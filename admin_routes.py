@@ -19,6 +19,7 @@ Security model (layered):
 from __future__ import annotations
 
 import logging
+import re
 import secrets
 from typing import Any
 
