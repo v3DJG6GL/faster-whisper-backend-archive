@@ -336,6 +336,16 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
   .input-col textarea { font-family: inherit; min-height: 60px; resize: vertical; }
   .input-col .help { color: var(--dim); font-size: 11px; margin-top: 3px; }
   .err { color: var(--red); font-size: 11px; margin-top: 3px; }
+  /* Field row dimming when a parent toggle makes this row irrelevant.
+     pointer-events stays alive so the user can still see the contents and
+     edit if they want — we just signal "this is currently unused". */
+  .field.dep-irrelevant { opacity: 0.45; }
+  .field.dep-irrelevant .input-col { filter: grayscale(0.6); }
+  .field .dep-note { color: var(--dim); font-size: 11px; margin-top: 3px;
+    font-style: italic; }
+  /* Nullable-number editor in its disabled (null) state — greyed input,
+     enable/disable button labelled accordingly. */
+  .nullable-wrap input:disabled { opacity: 0.4; cursor: not-allowed; }
   table.dict { width: 100%; border-collapse: collapse; }
   table.dict th, table.dict td { border: 1px solid var(--border); padding: 4px 8px;
     text-align: left; }
@@ -513,6 +523,42 @@ function setDirty(name, value) {
   if (name === 'ALLOWED_MODELS' || name === 'PRELOAD_MODELS') {
     document.dispatchEvent(new CustomEvent('admin:model-lists-changed'));
   }
+  // Re-evaluate "is row X irrelevant given the current state of toggle Y?"
+  // Cheap (handful of fields), runs after every edit so the UI tracks live.
+  applyFieldDependencies();
+}
+
+// Map of field → ("irrelevant" predicate, reason shown to the user when the
+// row is dimmed). Predicates read currentValue() so they pick up dirty edits
+// before save. Keep entries here whenever a new "parent" toggle is added that
+// makes another field's value not-actually-used.
+const _FIELD_DEPS = {
+  DICTATION_MAP: {
+    irrelevant: () => currentValue('DICTATION_ENABLED') === false,
+    note: 'unused while DICTATION_ENABLED is off',
+  },
+  LOWERCASE_AFTER_STRIPPED_TERMINATOR: {
+    irrelevant: () => currentValue('TRUST_MODEL_PUNCTUATION') === true,
+    note: 'unused while TRUST_MODEL_PUNCTUATION is on (Step 3 STRIP TERMS is skipped)',
+  },
+};
+
+function applyFieldDependencies() {
+  for (const [name, { irrelevant, note }] of Object.entries(_FIELD_DEPS)) {
+    const row = document.querySelector(`.field[data-field="${name}"]`);
+    if (!row) continue;
+    const dim = irrelevant();
+    row.classList.toggle('dep-irrelevant', dim);
+    let n = row.querySelector('.dep-note');
+    if (dim && !n) {
+      n = document.createElement('div');
+      n.className = 'dep-note';
+      n.textContent = note;
+      row.querySelector('.input-col').appendChild(n);
+    } else if (!dim && n) {
+      n.remove();
+    }
+  }
 }
 
 function makeBadges(name) {
@@ -535,6 +581,7 @@ function makeBadges(name) {
 function fieldRow(name) {
   const row = document.createElement('div');
   row.className = 'field';
+  row.dataset.field = name;   // used by applyFieldDependencies()
   const labelCol = document.createElement('div');
   labelCol.className = 'label-col';
   const nameEl = document.createElement('div');
@@ -742,24 +789,57 @@ function modelMultiSelectEditor(name, v) {
 }
 
 function nullableNumberEditor(name, v) {
+  // Toggle between "active number" and "disabled (null)" states. When null:
+  //   - input is HTMLDisabled (greyed out, can't focus or type)
+  //   - button label flips to "enable" so the user knows it's a toggle
+  // When non-null:
+  //   - input is editable
+  //   - button reads "disable" (sets value back to null)
+  // Re-enabling restores the last-known number (or 0 if there was none).
   const wrap = document.createElement('span');
+  wrap.className = 'nullable-wrap';
   wrap.style.display = 'flex'; wrap.style.gap = '6px'; wrap.style.alignItems = 'center';
+
   const i = document.createElement('input');
   i.type = 'number'; i.step = 'any';
-  i.value = (v == null) ? '' : v;
-  i.placeholder = '(disabled — null)';
+  const btn = document.createElement('button');
+  btn.style.padding = '2px 8px';
+
+  // Last non-null value the user typed, used to restore on "enable" click.
+  let lastVal = (v == null) ? 0 : v;
+
+  function paint() {
+    const cur = currentValue(name);
+    const disabled = (cur == null);
+    i.disabled = disabled;
+    i.value = disabled ? '' : cur;
+    i.placeholder = disabled ? '(disabled — null)' : '';
+    btn.textContent = disabled ? 'enable' : 'disable';
+    btn.title = disabled
+      ? 'Restore numeric value (run this quality check again)'
+      : 'Set to null (skip this quality check)';
+  }
+
   i.addEventListener('input', () => {
-    if (i.value === '') { setDirty(name, null); return; }
+    if (i.value === '') { setDirty(name, null); paint(); return; }
     const n = Number(i.value);
-    if (!Number.isNaN(n)) setDirty(name, n);
+    if (!Number.isNaN(n)) { lastVal = n; setDirty(name, n); }
   });
-  const clr = document.createElement('button');
-  clr.textContent = 'disable';
-  clr.title = 'Set to null (skip this quality check)';
-  clr.style.padding = '2px 8px';
-  clr.addEventListener('click', () => { i.value = ''; setDirty(name, null); });
+  btn.addEventListener('click', () => {
+    const cur = currentValue(name);
+    if (cur == null) {
+      // Re-enable with the last known value.
+      setDirty(name, lastVal);
+    } else {
+      // Disable. Stash the current value so a later "enable" restores it.
+      lastVal = cur;
+      setDirty(name, null);
+    }
+    paint();
+  });
+  paint();
   wrap.appendChild(i);
-  wrap.appendChild(clr);
+  wrap.appendChild(btn);
   return wrap;
 }
 
@@ -964,6 +1044,9 @@ function render() {
     }
     main.appendChild(sec);
   }
+  // Run dependency dimming once after the form is built; subsequent updates
+  // are driven by setDirty().
+  applyFieldDependencies();
 }
 
 async function save() {
