@@ -1,4 +1,4 @@
-# Install (or reinstall) the whisper-transcription-backend as a Windows Service
+# Install (or reinstall) the faster-whisper-backend as a Windows Service
 # via NSSM. Run from any PowerShell prompt:
 #   .\install-service.ps1
 # (Self-elevates to admin via UAC if not already running elevated.)
@@ -37,8 +37,44 @@ $LogsDir   = Join-Path $RepoDir "logs"
 $StdoutLog = Join-Path $LogsDir "service-stdout.log"
 $StderrLog = Join-Path $LogsDir "service-stderr.log"
 
-if (-not (Test-Path $Python))  { throw "venv python not found: $Python  (run python -m venv venv && pip install -r requirements.txt first)" }
 if (-not (Test-Path $MainPy))  { throw "main.py not found: $MainPy" }
+
+# --- bootstrap venv if missing ---------------------------------------------
+# First-time install on a fresh clone has no venv yet. Create it inline using
+# whatever Python the user has on PATH so the script is "clone -> run" with
+# no manual prep. Idempotent: skipped entirely if venv already exists.
+if (-not (Test-Path $Python)) {
+    Write-Host "Python venv not found - bootstrapping..." -ForegroundColor Cyan
+
+    # Prefer the PEP 397 launcher (py.exe), fall back to python / python3.
+    $sysPy = $null
+    foreach ($cand in @("py", "python", "python3")) {
+        $cmd = Get-Command $cand -ErrorAction SilentlyContinue
+        if ($cmd) { $sysPy = $cmd.Source; break }
+    }
+    if (-not $sysPy) {
+        throw "No Python found on PATH. Install Python 3.10+ from https://www.python.org/downloads/ (check 'Add to PATH'), then re-run this script."
+    }
+
+    Write-Host "Creating venv with: $sysPy" -ForegroundColor Cyan
+    & $sysPy -m venv (Join-Path $RepoDir "venv")
+    if ($LASTEXITCODE -ne 0) { throw "venv creation failed (exit $LASTEXITCODE)" }
+    if (-not (Test-Path $Python)) { throw "venv created but $Python still missing - check the Python install" }
+
+    Write-Host "Upgrading pip..." -ForegroundColor Cyan
+    & $Python -m pip install --upgrade pip
+    if ($LASTEXITCODE -ne 0) { throw "pip upgrade failed (exit $LASTEXITCODE)" }
+
+    $reqFile = Join-Path $RepoDir "requirements.txt"
+    if (Test-Path $reqFile) {
+        Write-Host "Installing requirements (faster-whisper + CUDA wheels can take a few minutes)..." -ForegroundColor Cyan
+        & $Python -m pip install -r $reqFile
+        if ($LASTEXITCODE -ne 0) { throw "pip install failed (exit $LASTEXITCODE)" }
+    } else {
+        Write-Host "WARNING: requirements.txt not found at $reqFile" -ForegroundColor Yellow
+    }
+    Write-Host "venv ready." -ForegroundColor Green
+}
 
 # --- locate or download nssm.exe -------------------------------------------
 function Get-NssmPath {
