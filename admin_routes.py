@@ -312,36 +312,38 @@ async def test_regex(payload: dict[str, Any]) -> JSONResponse:
     regex_b = str(payload.get("regex_b") or "")
     words = {str(w).lower() for w in (payload.get("words") or [])}
 
-    def _compile_and_run(pattern: str, replacer):
-        """Returns dict with compiled / error / matches / slow / result."""
+    def _compile_and_run(pattern: str, replacer, input_text: str):
+        """Returns dict with compiled / error / matches / slow / result.
+        Runs `pattern` against `input_text` — Pass B receives Pass A's result
+        so the chained behaviour matches main.py's `_postprocess_text`.
+        """
         if not pattern:
             return {"compiled": False, "error": None, "matches": [],
-                    "slow": False, "result": sample, "skipped": True}
+                    "slow": False, "result": input_text, "skipped": True}
         try:
             cre = re.compile(pattern)
         except re.error as e:
             return {"compiled": False, "error": str(e), "matches": [],
-                    "slow": False, "result": sample, "skipped": False}
+                    "slow": False, "result": input_text, "skipped": False}
 
         # Timeout-guarded run on a worker thread. The `re` module has no
         # native timeout, so we just don't wait past 2 s — the work itself
         # may continue in the daemon thread but we return early.
-        out: dict[str, Any] = {"done": False, "matches": [], "result": sample,
+        out: dict[str, Any] = {"done": False, "matches": [], "result": input_text,
                                "lowercased": []}
         def _run() -> None:
             try:
-                # Collect match positions for highlighting before sub() runs.
                 out["matches"] = [
                     {"start": m.start(), "end": m.end(), "text": m.group(0)}
-                    for m in cre.finditer(sample)
+                    for m in cre.finditer(input_text)
                 ]
                 if replacer is None:
-                    out["result"] = cre.sub("", sample)
+                    out["result"] = cre.sub("", input_text)
                 else:
                     lc: list[str] = []
                     def _wrap(m: "re.Match[str]") -> str:
                         return replacer(m, lc)
-                    out["result"] = cre.sub(_wrap, sample)
+                    out["result"] = cre.sub(_wrap, input_text)
                     out["lowercased"] = lc
                 out["done"] = True
             except Exception as e:    # noqa: BLE001 — surface any error
@@ -352,32 +354,33 @@ async def test_regex(payload: dict[str, Any]) -> JSONResponse:
         t.join(timeout=2.0)
         if not out["done"]:
             return {"compiled": True, "error": None, "matches": [],
-                    "slow": True, "result": sample, "skipped": False,
+                    "slow": True, "result": input_text, "skipped": False,
                     "timeout": "regex did not complete in 2 s on the sample"}
         return {"compiled": True, "error": out.get("error"),
                 "matches": out["matches"], "slow": False,
                 "result": out["result"], "skipped": False,
                 "lowercased": out.get("lowercased", [])}
 
-    # Pass A replacer: strip terminator, conditionally lowercase next word.
-    # Mirrors main.py's _step3_pass_a.replace exactly.
     def _pass_a_replacer(m: "re.Match[str]", lc_log: list[str]) -> str:
         try:
             ws, first, rest = m.group(1), m.group(2), m.group(3)
         except IndexError:
-            # Custom regex didn't produce 3 groups — degrade to plain strip.
             return ""
         if (first + rest).lower() in words:
             lc_log.append(first + rest)
             return ws + first.lower() + rest
         return ws + first + rest
 
-    pa = _compile_and_run(regex_a, _pass_a_replacer)
-    pb = _compile_and_run(regex_b, None)
+    pa = _compile_and_run(regex_a, _pass_a_replacer, sample)
+    # Chain: Pass B operates on Pass A's output (matches main.py pipeline).
+    # If Pass A errored, fall back to the original sample so Pass B is still
+    # informative on its own.
+    pa_text = pa["result"] if pa.get("compiled") and not pa.get("error") else sample
+    pb = _compile_and_run(regex_b, None, pa_text)
     return JSONResponse({
         "pass_a": pa,
         "pass_b": pb,
-        "final": pb.get("result") if pb.get("compiled") and not pb.get("error") else pa.get("result"),
+        "final": pb.get("result") if pb.get("compiled") and not pb.get("error") else pa_text,
     })
 
 
