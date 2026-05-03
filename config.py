@@ -79,8 +79,8 @@ MODEL_COMPUTE_TYPE_FALLBACK = "int8"
 # =============================================================================
 
 # Whisper accepts only ISO-639-1 codes (no "de-CH"); we use "de" and rely on
-# the Swiss-flavored vocabulary in the prompt + the ß->ss step in the
-# postprocessing pipeline to push output toward Swiss-German orthography.
+# the Swiss-flavored vocabulary in the prompt + the PIPELINE_RULES below to
+# push output toward Swiss-German orthography (ß → ss).
 DEFAULT_LANGUAGE = "de"
 
 # Server-side default initial_prompt, used when a request omits `prompt`.
@@ -95,167 +95,264 @@ DEFAULT_PROMPT: "str | None" = (
     "Hausarzt, Praxis, Krankenkasse, Dr. med., FMH, CHF, Herr, Frau."
 )
 
-# Ordered list of (from, to) character substitutions applied to the raw
-# Whisper output BEFORE any other pipeline step. Use it for orthographic
-# normalisation that should be invisible to the rest of the pipeline.
-#
-# Default: ß → ss / ẞ → SS for Swiss German (Whisper's German model emits
-# ß, but Swiss orthography uses "ss": "Strasse" not "Straße"). Add your own
-# rules — e.g. ("ae", "ä") to expand ASCII transliterations, or any other
-# 1-to-N character mapping. (str.translate can't do 1→N, which is why this
-# is a tuple list of str.replace pairs rather than a translation table.)
-#
-# Caveats:
-#  - Plain str.replace, no word boundaries: ("ae", "ä") would also rewrite
-#    "Caesar" → "Cäsar" and "haematology" → "hämatology". Add it only if
-#    your input is exclusively German.
-#  - Substitutions run in order. Don't include both ("ä", "ae") and
-#    ("ae", "ä") — the second would undo the first.
-CHARACTER_REPLACEMENTS = (("ß", "ss"), ("ẞ", "SS"))
-
 
 # =============================================================================
-# Text post-processing pipeline
+# Text post-processing pipeline (PIPELINE_RULES)
 # =============================================================================
-
-# DICTATION_ENABLED: master switch for Steps 4-8 (dictation-map → capitalize).
-# Steps 0/1/3 always run.
-DICTATION_ENABLED = True
-
-# PUNCTUATION_TO_KEEP: Step 1 character whitelist. Anything in
-# string.punctuation NOT in this string is stripped at Step 1. `.?!,` are
-# kept here precisely so Step 3's regex passes can context-aware-strip them
-# (digit-protected, with conditional lowercase of the next word).
-PUNCTUATION_TO_KEEP = "./-:,?!"
-
-# STRIP_REGEX_DISABLE: one-click bypass for both Step 3 passes. When True,
-# the model's own punctuation passes through unchanged. Set True for
-# finetunes with strong auto-punctuation (tnfru, primeline-derived).
-STRIP_REGEX_DISABLE = False
-
-# STRIP_AND_LOWERCASE_REGEX: Step 3 Pass A regex. Strips matched terminator
-# AND lowercases the captured next-word if it's in STRIP_AND_LOWERCASE_WORDS
-# (handles "Hallo. Wie" → "Hallo wie" — Whisper inserted a pause-`.`,
-# downstream word is a non-noun → fix). Empty string = skip Pass A.
-STRIP_AND_LOWERCASE_REGEX = r"(?<!\d)[.?!](\s*)([A-ZÄÖÜ])(\w*)"
-
-# STRIP_ONLY_REGEX: Step 3 Pass B regex. Plain strip with no side effects.
-# Default catches lone .?! (anywhere not inside a number) plus pause-induced
-# commas (the `(?<!\d),|,(?!\d)` clause keeps "1,000" intact). Absorbs the
-# old separate "Step 4 STRIP COMMAS". Empty string = skip Pass B.
-STRIP_ONLY_REGEX = r"(?<!\d)[.?!]|(?<!\d),|,(?!\d)"
-
-# STRIP_AND_LOWERCASE_WORDS: words allowed to be lowercased by Pass A after
-# its strip. German nouns are always capitalized, so this is a fixed list of
-# common non-nouns (interrogatives, conjunctions, articles, prepositions,
-# common adverbs/verbs). Comparison is case-insensitive — keep lowercase.
-STRIP_AND_LOWERCASE_WORDS: "frozenset[str]" = frozenset([
-    # Interrogatives
-    "wie", "was", "wer", "wann", "wo", "warum", "wieso", "weshalb",
-    "welche", "welcher", "welches", "welchem", "welchen",
-    # Conjunctions
-    "und", "oder", "aber", "doch", "denn", "weil", "wenn", "dann",
-    "dass", "obwohl", "während", "sondern", "deshalb", "trotzdem",
-    "falls", "ob",
-    # Articles
-    "der", "die", "das", "den", "dem", "des",
-    "ein", "eine", "einer", "einem", "einen", "eines",
-    "kein", "keine", "keiner", "keinem", "keinen",
-    # Common adverbs / particles
-    "auch", "nur", "noch", "schon", "hier", "da", "dort",
-    "heute", "morgen", "gestern", "jetzt", "nicht",
-    "sehr", "ganz", "etwas", "viel", "wenig", "oft", "immer",
-    # Common prepositions
-    "in", "auf", "an", "von", "mit", "zu", "bei", "aus",
-    "über", "unter", "vor", "nach", "für", "gegen", "ohne", "um",
-    "durch", "ab", "seit",
-    # Common verb forms at sentence start
-    "ist", "sind", "war", "waren", "hat", "haben",
-    "wird", "werden", "kann", "soll", "muss", "will",
-    "könnte", "sollte", "müsste", "wollte",
-])
-
-# Spoken word -> literal symbol. Word-bounded and case-insensitive.
-# Multi-word phrases ("eckige Klammer auf") MUST be listed before their
-# single-word components ("Klammer auf", "Klammer") — main.py sorts by length
-# so the longest phrase wins in the regex alternation.
+# A single ordered list of rules applied to the joined transcript. Each rule
+# is one of:
+#   - "regex"                       — pattern + replacement (re.sub)
+#   - "callback:lowercase-wordlist" — strip terminator, lowercase next word if in wordlist
+#   - "callback:map"                — auto-built alternation of map keys; lookup replacement
+#   - "callback:dedup"              — collapse adjacent punctuation (last-non-comma wins)
+#   - "callback:upper"              — capitalize after sentence terminator
+#   - "terminal"                    — final lstrip(" \t\r") + rstrip(" \t\r"); always last
 #
-# Tradeoff: a dictation system can't tell "der wichtigste Punkt der
-# Tagesordnung" (Punkt = literal noun) from "Schlusssatz Punkt"
-# (Punkt = "."). All such substitutions are unconditional. Disable globally
-# with DICTATION_ENABLED = False (or WHISPER_DICTATION_MAP=0).
-DICTATION_MAP: "dict[str, str]" = {
-    # --- Multi-word phrases (matched before their single-word components) ---
-    # Whisper frequently mishears the line/paragraph commands — we add the
-    # canonical form plus the most common ASR mistakes. Add more aliases
-    # here if you spot recurring mishearings.
-    "neuer Absatz": "\n\n",
-    "neuer Absätze": "\n\n",   # mishearing
-    "neue Absätze": "\n\n",    # plural mishearing
-    "neuer Apfel": "\n\n",     # mishearing
-    "neue Zeile": "\n",
-    "neue Zeilen": "\n",       # plural mishearing
-    "neue Teile": "\n",        # mishearing
-    "neue Seile": "\n",        # mishearing
-    "neue Säule": "\n",        # mishearing
-    "eckige Klammer auf": "[",
-    "eckige Klammer zu": "]",
-    "geschweifte Klammer auf": "{",
-    "geschweifte Klammer zu": "}",
-    "Anführungszeichen unten": "„",
-    "Anführungszeichen oben": "“",
-    "Klammer auf": "(",
-    "Klammer zu": ")",
-    "kleiner als": "<",
-    "größer als": ">",
-    # --- Single-word punctuation -------------------------------------------
-    "Punkt": ".",
-    "Komma": ",",
-    "Doppelpunkt": ":",
-    "Semikolon": ";",
-    "Strichpunkt": ";",
-    "Fragezeichen": "?",
-    "Ausrufezeichen": "!",
-    "Ausrufungszeichen": "!",
-    "Bindestrich": "-",
-    "Trennstrich": "-",
-    "Gedankenstrich": "–",
-    "Schrägstrich": "/",
-    "Backslash": "\\",
-    "Apostroph": "'",
-    "Unterstrich": "_",
-    "Sternchen": "*",
-    "Raute": "#",
-    "Gänsefüßchen": '"',
-    "Gänsefüsschen": '"',  # CH-DE spelling without ß
-    # "Franken" -> "CHF" (not "Fr.") on purpose: a trailing period would make
-    # Step 9 CAPITALIZE wrongly uppercase the following word ("Fr. Pro" instead
-    # of "Fr. pro"). CHF is also the more formal CH-DE medical convention.
-    "Franken": "CHF",
-    "Frankenzeichen": "CHF",
-    # --- Math / typographic symbols ----------------------------------------
-    "Prozent": "%",
-    "Prozentzeichen": "%",
-    "Paragraph": "§",
-    "Paragraphenzeichen": "§",
-    "Grad": "°",
-    "Gradzeichen": "°",
-    "Klammeraffe": "@",
-    "Plus": "+",
-    "Pluszeichen": "+",
-    "Minus": "-",
-    "Minuszeichen": "-",
-    "Gleich": "=",
-    "Gleichheitszeichen": "=",
-    "Tilde": "~",
-    "Pipe": "|",
-    "Dach": "^",
-    "Eurozeichen": "€",
-    "Dollarzeichen": "$",
-    "Et-Zeichen": "&",
-    "Und-Zeichen": "&",
-    "Kaufmannsund": "&",
-}
+# Rules are reorderable, disable-able, and resettable from the admin WebUI
+# (/config). The 13 seeded defaults below + 1 terminal trim row are the
+# canonical pipeline for Swiss-German dictation. Custom rules (with
+# `seeded: False`) can be added at any non-terminal position via the WebUI.
+#
+# Each rule's regex pattern is precompiled in main.rebuild_caches() at module
+# load and again when the WebUI saves changes (CACHE_REBUILD_FIELDS).
+PIPELINE_RULES: list[dict] = [
+    {
+        "name": "replace-szet-lc",
+        "label": "Replace ß → ss",
+        "type": "regex",
+        "pattern": "ß",
+        "replacement": "ss",
+        "enabled": True, "locked": False, "seeded": True,
+    },
+    {
+        "name": "replace-szet-uc",
+        "label": "Replace ẞ → SS",
+        "type": "regex",
+        "pattern": "ẞ",
+        "replacement": "SS",
+        "enabled": True, "locked": False, "seeded": True,
+    },
+    {
+        # Anything in string.punctuation NOT in `./-:,?!` is removed, plus
+        # the German low quote „. The remaining `./-:,?!` are kept for the
+        # later strip rules' digit-protected logic.
+        "name": "strip-non-keep-punct",
+        "label": "Strip non-keep punctuation",
+        "type": "regex",
+        "pattern": r"[\"#$%&'()*+;<=>@\[\\\]^_`{|}~„]",
+        "replacement": "",
+        "enabled": True, "locked": False, "seeded": True,
+    },
+    {
+        "name": "normalize-digit-range",
+        "label": "Normalize digit-range hyphen → slash",
+        "type": "regex",
+        "pattern": r"(\d)\s*-\s*(\d)",
+        "replacement": r"\1/\2",
+        "enabled": True, "locked": False, "seeded": True,
+    },
+    {
+        # Pass A: paired strip — match terminator + capital-word, strip the
+        # terminator and lowercase the next word IFF it's in `wordlist`.
+        # German nouns are always capitalized; the wordlist is non-nouns
+        # (interrogatives, conjunctions, articles, etc.) — case-insensitive.
+        "name": "strip-and-lowercase-non-noun",
+        "label": "Strip + lowercase next non-noun",
+        "type": "callback:lowercase-wordlist",
+        "pattern": r"(?<!\d)[.?!](\s*)([A-ZÄÖÜ])(\w*)",
+        "wordlist": [
+            # Interrogatives
+            "wie", "was", "wer", "wann", "wo", "warum", "wieso", "weshalb",
+            "welche", "welcher", "welches", "welchem", "welchen",
+            # Conjunctions
+            "und", "oder", "aber", "doch", "denn", "weil", "wenn", "dann",
+            "dass", "obwohl", "während", "sondern", "deshalb", "trotzdem",
+            "falls", "ob",
+            # Articles
+            "der", "die", "das", "den", "dem", "des",
+            "ein", "eine", "einer", "einem", "einen", "eines",
+            "kein", "keine", "keiner", "keinem", "keinen",
+            # Common adverbs / particles
+            "auch", "nur", "noch", "schon", "hier", "da", "dort",
+            "heute", "morgen", "gestern", "jetzt", "nicht",
+            "sehr", "ganz", "etwas", "viel", "wenig", "oft", "immer",
+            # Common prepositions
+            "in", "auf", "an", "von", "mit", "zu", "bei", "aus",
+            "über", "unter", "vor", "nach", "für", "gegen", "ohne", "um",
+            "durch", "ab", "seit",
+            # Common verb forms at sentence start
+            "ist", "sind", "war", "waren", "hat", "haben",
+            "wird", "werden", "kann", "soll", "muss", "will",
+            "könnte", "sollte", "müsste", "wollte",
+        ],
+        "enabled": True, "locked": False, "seeded": True,
+    },
+    {
+        # Plain strip — catches lone .?! the paired pass missed PLUS soft-pause
+        # commas (digit-protected: "1,000" survives; "Frau, Müller" loses the
+        # comma). Replacement is empty; no side effects.
+        "name": "strip-only-terminators-and-commas",
+        "label": "Strip-only terminators + commas",
+        "type": "regex",
+        "pattern": r"(?<!\d)[.?!]|(?<!\d),|,(?!\d)",
+        "replacement": "",
+        "enabled": True, "locked": False, "seeded": True,
+    },
+    {
+        # Spoken word → literal symbol. Word-bounded, case-insensitive.
+        # Multi-word phrases (e.g. "eckige Klammer auf") MUST appear before
+        # their single-word components — main.py sorts the keys longest-first
+        # when building the alternation regex, so the longest phrase wins.
+        #
+        # Tradeoff: a dictation system can't distinguish noun-Punkt from
+        # symbol-Punkt — substitutions are unconditional. Untick `enabled`
+        # for "verbatim" mode.
+        "name": "dictation-map",
+        "label": "Dictation map",
+        "type": "callback:map",
+        "map": {
+            # --- Multi-word phrases ----------------------------------------
+            "neuer Absatz": "\n\n",
+            "neuer Absätze": "\n\n",
+            "neue Absätze": "\n\n",
+            "neuer Apfel": "\n\n",
+            "neue Zeile": "\n",
+            "neue Zeilen": "\n",
+            "neue Teile": "\n",
+            "neue Seile": "\n",
+            "neue Säule": "\n",
+            "eckige Klammer auf": "[",
+            "eckige Klammer zu": "]",
+            "geschweifte Klammer auf": "{",
+            "geschweifte Klammer zu": "}",
+            "Anführungszeichen unten": "„",
+            "Anführungszeichen oben": "“",
+            "Klammer auf": "(",
+            "Klammer zu": ")",
+            "kleiner als": "<",
+            "größer als": ">",
+            # --- Single-word punctuation -----------------------------------
+            "Punkt": ".",
+            "Komma": ",",
+            "Doppelpunkt": ":",
+            "Semikolon": ";",
+            "Strichpunkt": ";",
+            "Fragezeichen": "?",
+            "Ausrufezeichen": "!",
+            "Ausrufungszeichen": "!",
+            "Bindestrich": "-",
+            "Trennstrich": "-",
+            "Gedankenstrich": "–",
+            "Schrägstrich": "/",
+            "Backslash": "\\",
+            "Apostroph": "'",
+            "Unterstrich": "_",
+            "Sternchen": "*",
+            "Raute": "#",
+            "Gänsefüßchen": '"',
+            "Gänsefüsschen": '"',
+            # "Franken" → "CHF" (not "Fr.") to avoid Step CAPITALIZE wrongly
+            # uppercasing the next word ("Fr. Pro" → "Fr. pro").
+            "Franken": "CHF",
+            "Frankenzeichen": "CHF",
+            # --- Math / typographic symbols --------------------------------
+            "Prozent": "%",
+            "Prozentzeichen": "%",
+            "Paragraph": "§",
+            "Paragraphenzeichen": "§",
+            "Grad": "°",
+            "Gradzeichen": "°",
+            "Klammeraffe": "@",
+            "Plus": "+",
+            "Pluszeichen": "+",
+            "Minus": "-",
+            "Minuszeichen": "-",
+            "Gleich": "=",
+            "Gleichheitszeichen": "=",
+            "Tilde": "~",
+            "Pipe": "|",
+            "Dach": "^",
+            "Eurozeichen": "€",
+            "Dollarzeichen": "$",
+            "Et-Zeichen": "&",
+            "Und-Zeichen": "&",
+            "Kaufmannsund": "&",
+        },
+        "enabled": True, "locked": True, "seeded": True,
+    },
+    {
+        "name": "space-before-closing-punct",
+        "label": "Remove space before closing punctuation",
+        "type": "regex",
+        "pattern": r"[ \t]+([,.:;!?\)\]\}])",
+        "replacement": r"\1",
+        "enabled": True, "locked": True, "seeded": True,
+    },
+    {
+        "name": "space-after-opening-punct",
+        "label": "Remove space after opening punctuation",
+        "type": "regex",
+        "pattern": r"([\(\[\{])[ \t]+",
+        "replacement": r"\1",
+        "enabled": True, "locked": True, "seeded": True,
+    },
+    {
+        # NEW vs the previous 11-step pipeline. Whisper segments are joined
+        # with empty separator — if both adjacent segments end/start with
+        # whitespace the join produces an interior double-space that no other
+        # rule cleans (TIDY SPACING only matches whitespace adjacent to
+        # punctuation).
+        "name": "collapse-multi-space",
+        "label": "Collapse multi-space",
+        "type": "regex",
+        "pattern": r"  +",
+        "replacement": " ",
+        "enabled": True, "locked": True, "seeded": True,
+    },
+    {
+        # Whisper emits its own commas as soft pauses around dictation
+        # keywords. After substitution we get runs like ",." (Punkt) or ",;"
+        # (Semikolon). The user's intended mark wins: prefer any non-comma
+        # in the run, and within non-commas prefer the LAST one (dictation
+        # came after the Whisper pause). Pure commas collapse to one comma.
+        "name": "dedup-punct",
+        "label": "Dedup punctuation runs",
+        "type": "callback:dedup",
+        "pattern": r"[,.:;!?]{2,}",
+        "enabled": True, "locked": True, "seeded": True,
+    },
+    {
+        # Around a dictation-emitted "\n" / "\n\n" we often have residue: a
+        # Whisper-emitted comma ("Müller, \n"), trailing space (" \n"), or
+        # punctuation that leaked through ("\n , Welt"). Collapse the
+        # neighborhood — optional whitespace + optional comma — on each side.
+        "name": "tidy-newlines",
+        "label": "Tidy newlines",
+        "type": "regex",
+        "pattern": r"[ \t]*,?[ \t]*(\n+)[ \t]*,?[ \t]*",
+        "replacement": r"\1",
+        "enabled": True, "locked": True, "seeded": True,
+    },
+    {
+        # After dictation inserts ".", "?", "!", "\n", "\n\n", the following
+        # letter starts a new sentence/paragraph. Whisper has no idea about
+        # our substitution, so it leaves the next letter lowercase.
+        "name": "capitalize-after-terminator",
+        "label": "Capitalize after sentence terminator",
+        "type": "callback:upper",
+        "pattern": r"([.?!]\s+|\n+\s*)([a-zäöüß])",
+        "enabled": True, "locked": True, "seeded": True,
+    },
+    {
+        # Final, hardcoded — runs after the loop. lstrip+rstrip strip leading
+        # and trailing space/tab/CR but NOT \n, so a user-dictated leading or
+        # trailing "neue Zeile" ("\n") at the edges of the utterance survives.
+        "name": "trim-edges",
+        "label": "Trim edges (always-last)",
+        "type": "terminal",
+        "enabled": True, "locked": True, "seeded": True,
+    },
+]
 
 
 # =============================================================================
@@ -414,7 +511,6 @@ _env_prompt = os.environ.get("WHISPER_DEFAULT_PROMPT")
 if _env_prompt is not None:
     DEFAULT_PROMPT = _env_prompt or None  # explicit empty string => disable
 
-DICTATION_ENABLED = os.environ.get("WHISPER_DICTATION_MAP", "1" if DICTATION_ENABLED else "0") == "1"
 TRACE_ENABLED = os.environ.get("WHISPER_TRACE", "1" if TRACE_ENABLED else "0") == "1"
 
 LOG_FILE = os.environ.get("WHISPER_LOG_FILE", LOG_FILE)

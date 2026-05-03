@@ -55,21 +55,9 @@ _FIELD_GROUPS: list[tuple[str, list[tuple[str | None, list[str]]]]] = [
         "CONDITION_ON_PREVIOUS_TEXT", "WORD_TIMESTAMPS_ENABLED",
         "NO_SPEECH_THRESHOLD", "LOG_PROB_THRESHOLD", "COMPRESSION_RATIO_THRESHOLD",
     ])]),
-    ("Pipeline", [
-        ("Step 0 — character replacements", ["CHARACTER_REPLACEMENTS"]),
-        ("Step 1 — punctuation strip",      ["PUNCTUATION_TO_KEEP"]),
-        ("Step 3 — Whisper noise strip",    [
-            "STRIP_REGEX_DISABLE",
-            "STRIP_AND_LOWERCASE_REGEX",
-            "STRIP_AND_LOWERCASE_WORDS",
-            "STRIP_ONLY_REGEX",
-        ]),
-        ("Steps 4-8 — dictation pipeline",  [
-            "DICTATION_ENABLED", "DICTATION_MAP", "TRACE_ENABLED",
-        ]),
-    ]),
+    ("Pipeline", [(None, ["PIPELINE_RULES"])]),
     ("Logging", [(None, [
-        "LOG_FILE", "LOG_MAX_BYTES", "LOG_BACKUP_COUNT",
+        "LOG_FILE", "LOG_MAX_BYTES", "LOG_BACKUP_COUNT", "TRACE_ENABLED",
     ])]),
     ("Server (uvicorn)", [(None, [
         "SERVER_HOST", "SERVER_PORT", "SERVER_WORKERS", "SERVER_LOG_LEVEL",
@@ -288,100 +276,144 @@ async def post_state(payload: dict[str, Any], request: Request) -> JSONResponse:
     })
 
 
-@router.post("/test-regex",
+@router.post("/test-pipeline",
              dependencies=[Depends(require_admin_host), Depends(require_admin_token)])
-async def test_regex(payload: dict[str, Any]) -> JSONResponse:
-    """Validate + dry-run the Step-3 regex pair against a sample.
+async def test_pipeline(payload: dict[str, Any]) -> JSONResponse:
+    """Dry-run the full pipeline-rules list against a sample. Used by the
+    WebUI's per-row live-validation badge AND the inline test panel.
 
-    Used by the WebUI's regex-editor live-validation badge AND the inline
-    test panel. Each non-empty regex is compiled and run under a 2 s
-    timeout against the supplied sample; the response carries per-pass
-    diff data so the UI can highlight matches and show the final result.
+    Payload: { sample: str, rules: list[dict] }
+    `rules` is the live (dirty+saved) overlay from the WebUI so unsaved edits
+    are testable. Each rule is the same dict shape as in cfg.PIPELINE_RULES.
 
-    Payload shape: { sample: str, regex_a: str, regex_b: str, words: list[str] }
-    Response shape: {
-      pass_a: { compiled, error, matches, slow, result, lowercased },
-      pass_b: { compiled, error, matches, slow,  result },
-      final: str,
-    }
+    Response:
+      {
+        "steps": [
+          { ordinal, label, type, before, after, matches, skipped, error, slow }, ...
+          { ordinal, label: "Trim edges", type: "terminal", ... }
+        ],
+        "final": str,
+      }
+
+    Each rule is compiled and run under a 2 s threading-timer guard against
+    the sample. Disabled rules render as `skipped: true` (not run). Rules
+    with empty patterns also `skipped: true`. Compile errors → `error: "<msg>"`
+    and the pipeline continues with the un-modified text. The terminal trim
+    is appended at the end; if no terminal row is present, the trim is
+    still applied (matching main.py behaviour).
     """
     import threading
 
     sample = str(payload.get("sample") or "")
-    regex_a = str(payload.get("regex_a") or "")
-    regex_b = str(payload.get("regex_b") or "")
-    words = {str(w).lower() for w in (payload.get("words") or [])}
+    rules = payload.get("rules") or []
+    if not isinstance(rules, list):
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"error": "rules must be a list of rule dicts"},
+        )
 
-    def _compile_and_run(pattern: str, replacer, input_text: str):
-        """Returns dict with compiled / error / matches / slow / result.
-        Runs `pattern` against `input_text` — Pass B receives Pass A's result
-        so the chained behaviour matches main.py's `_postprocess_text`.
-        """
-        if not pattern:
-            return {"compiled": False, "error": None, "matches": [],
-                    "slow": False, "result": input_text, "skipped": True}
+    def _run_rule(text: str, rule: dict) -> dict[str, Any]:
+        """Apply one rule to `text`. Returns the step dict for the response."""
+        rtype = rule.get("type", "?")
+        label = rule.get("label", rule.get("name", "?"))
+        common = {"label": label, "type": rtype, "before": text, "matches": 0,
+                  "skipped": False, "error": None, "slow": False}
+
+        if rtype == "terminal":
+            after = text.lstrip(" \t\r").rstrip(" \t\r")
+            return {**common, "after": after}
+
+        if not rule.get("enabled", True):
+            return {**common, "after": text, "skipped": True}
+
         try:
-            cre = re.compile(pattern)
-        except re.error as e:
-            return {"compiled": False, "error": str(e), "matches": [],
-                    "slow": False, "result": input_text, "skipped": False}
-
-        # Timeout-guarded run on a worker thread. The `re` module has no
-        # native timeout, so we just don't wait past 2 s — the work itself
-        # may continue in the daemon thread but we return early.
-        out: dict[str, Any] = {"done": False, "matches": [], "result": input_text,
-                               "lowercased": []}
-        def _run() -> None:
-            try:
-                out["matches"] = [
-                    {"start": m.start(), "end": m.end(), "text": m.group(0)}
-                    for m in cre.finditer(input_text)
-                ]
-                if replacer is None:
-                    out["result"] = cre.sub("", input_text)
+            if rtype == "callback:map":
+                m = rule.get("map", {}) or {}
+                if not m:
+                    return {**common, "after": text, "skipped": True}
+                alternation = "|".join(re.escape(k) for k in sorted(m, key=len, reverse=True))
+                cre = re.compile(r"\b(" + alternation + r")\b", re.IGNORECASE)
+                lookup = {k.lower(): v for k, v in m.items()}
+                replacer = lambda mt: lookup.get(mt.group(0).lower(), mt.group(0))
+            else:
+                pattern = rule.get("pattern", "") or ""
+                if not pattern:
+                    return {**common, "after": text, "skipped": True}
+                cre = re.compile(pattern)
+                if rtype == "regex":
+                    repl = rule.get("replacement", "") or ""
+                    replacer = lambda mt, _r=repl: mt.expand(_r) if "\\" in _r else _r
+                elif rtype == "callback:lowercase-wordlist":
+                    wordlist = frozenset(w.lower() for w in (rule.get("wordlist") or []))
+                    def replacer(mt, _wl=wordlist):
+                        try:
+                            ws, first, rest = mt.group(1), mt.group(2), mt.group(3)
+                        except IndexError:
+                            return ""
+                        if (first + rest).lower() in _wl:
+                            return ws + first.lower() + rest
+                        return ws + first + rest
+                elif rtype == "callback:dedup":
+                    def replacer(mt):
+                        run = mt.group(0)
+                        non_comma = [c for c in run if c != ","]
+                        return non_comma[-1] if non_comma else ","
+                elif rtype == "callback:upper":
+                    def replacer(mt):
+                        try:
+                            return mt.group(1) + mt.group(2).upper()
+                        except IndexError:
+                            return mt.group(0).upper()
                 else:
-                    lc: list[str] = []
-                    def _wrap(m: "re.Match[str]") -> str:
-                        return replacer(m, lc)
-                    out["result"] = cre.sub(_wrap, input_text)
-                    out["lowercased"] = lc
+                    return {**common, "after": text, "skipped": True,
+                            "error": f"unknown rule type: {rtype}"}
+        except re.error as e:
+            return {**common, "after": text, "error": str(e)}
+
+        out: dict[str, Any] = {"done": False, "after": text, "matches": 0}
+        def _do() -> None:
+            try:
+                out["matches"] = sum(1 for _ in cre.finditer(text))
+                out["after"] = cre.sub(replacer, text)
                 out["done"] = True
-            except Exception as e:    # noqa: BLE001 — surface any error
-                out["error"] = str(e)
+            except Exception as e:  # noqa: BLE001
+                out["err"] = str(e)
                 out["done"] = True
-        t = threading.Thread(target=_run, daemon=True)
+        t = threading.Thread(target=_do, daemon=True)
         t.start()
         t.join(timeout=2.0)
         if not out["done"]:
-            return {"compiled": True, "error": None, "matches": [],
-                    "slow": True, "result": input_text, "skipped": False,
-                    "timeout": "regex did not complete in 2 s on the sample"}
-        return {"compiled": True, "error": out.get("error"),
-                "matches": out["matches"], "slow": False,
-                "result": out["result"], "skipped": False,
-                "lowercased": out.get("lowercased", [])}
+            return {**common, "after": text, "slow": True}
+        if "err" in out:
+            return {**common, "after": text, "error": out["err"]}
+        return {**common, "after": out["after"], "matches": out["matches"]}
 
-    def _pass_a_replacer(m: "re.Match[str]", lc_log: list[str]) -> str:
-        try:
-            ws, first, rest = m.group(1), m.group(2), m.group(3)
-        except IndexError:
-            return ""
-        if (first + rest).lower() in words:
-            lc_log.append(first + rest)
-            return ws + first.lower() + rest
-        return ws + first + rest
+    text = sample
+    steps: list[dict[str, Any]] = []
+    saw_terminal = False
+    for idx, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            continue
+        step = _run_rule(text, rule)
+        step["ordinal"] = idx + 1
+        steps.append(step)
+        text = step["after"]
+        if rule.get("type") == "terminal":
+            saw_terminal = True
+    if not saw_terminal:
+        # No terminal row in the payload — apply the implicit trim.
+        before = text
+        text = text.lstrip(" \t\r").rstrip(" \t\r")
+        if before != text:
+            steps.append({
+                "ordinal": len(steps) + 1,
+                "label": "Trim edges (always-last)",
+                "type": "terminal",
+                "before": before, "after": text, "matches": 0,
+                "skipped": False, "error": None, "slow": False,
+            })
 
-    pa = _compile_and_run(regex_a, _pass_a_replacer, sample)
-    # Chain: Pass B operates on Pass A's output (matches main.py pipeline).
-    # If Pass A errored, fall back to the original sample so Pass B is still
-    # informative on its own.
-    pa_text = pa["result"] if pa.get("compiled") and not pa.get("error") else sample
-    pb = _compile_and_run(regex_b, None, pa_text)
-    return JSONResponse({
-        "pass_a": pa,
-        "pass_b": pb,
-        "final": pb.get("result") if pb.get("compiled") and not pb.get("error") else pa_text,
-    })
+    return JSONResponse({"steps": steps, "final": text})
 
 
 @router.post("/restart", dependencies=[Depends(require_admin_host), Depends(require_admin_token)])
@@ -541,6 +573,58 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
   .regex-test-final { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
   .field .dep-note { color: var(--dim); font-size: 11px; margin-top: 3px;
     font-style: italic; }
+  /* Pipeline rules editor */
+  .pipeline-rules-wrap { display: flex; flex-direction: column; gap: 6px; }
+  .rule-list { display: flex; flex-direction: column; gap: 4px; }
+  .rule-row { background: #161b22; border: 1px solid var(--border); border-radius: 4px;
+    padding: 6px 10px; }
+  .rule-row.locked { border-left: 3px solid #f2cc60; }
+  .rule-row.terminal { border-left: 3px solid var(--dim); opacity: 0.85; }
+  .rule-row.dragging { opacity: 0.4; outline: 2px dashed var(--cyan); }
+  .rule-row.disabled { opacity: 0.55; }
+  .rule-row .row-header { display: flex; align-items: center; gap: 8px;
+    font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
+  .rule-row .drag-handle { cursor: grab; user-select: none; color: var(--dim);
+    padding: 2px 4px; }
+  .rule-row .drag-handle:active { cursor: grabbing; }
+  .rule-row.locked .drag-handle { cursor: not-allowed; }
+  .rule-row .ordinal { color: var(--dim); min-width: 24px; text-align: right; }
+  .rule-row .rule-label { flex: 1; color: var(--fg); }
+  .rule-row .rule-slug { color: var(--dim); font-size: 11px; font-style: italic; }
+  .rule-row .type-pill { display: inline-block; padding: 0 6px; border-radius: 3px;
+    font-size: 11px; background: #21262d; color: var(--cyan); }
+  .rule-row .expand-btn, .rule-row .delete-btn {
+    background: transparent; border: 1px solid var(--border);
+    color: var(--fg); padding: 2px 6px; border-radius: 3px; cursor: pointer;
+    font: inherit; font-size: 11px; }
+  .rule-row .delete-btn { color: var(--red); }
+  .rule-row .row-body { padding-left: 32px; padding-top: 6px; display: none; }
+  .rule-row.expanded .row-body { display: block; }
+  .rule-row.terminal .row-body { display: block; padding-top: 4px; }
+  .rule-editor { display: flex; flex-direction: column; gap: 4px; }
+  .rule-editor .map-table { font-family: ui-monospace, monospace; font-size: 12px; }
+  .rule-editor .map-table input { background: transparent; color: var(--fg);
+    border: 1px solid var(--border); padding: 2px 4px; }
+  /* Full-pipeline test table */
+  .pipeline-test-table { width: 100%; border-collapse: collapse; font-size: 12px;
+    margin-top: 6px; }
+  .pipeline-test-table th, .pipeline-test-table td {
+    border-bottom: 1px solid var(--border); padding: 4px 6px;
+    text-align: left; vertical-align: top; }
+  .pipeline-test-table th { color: var(--dim); font-weight: 500; }
+  .pipeline-test-table tr:nth-child(even) { background: #0d1117; }
+  .pipeline-test-table .out { font-family: ui-monospace, Menlo, monospace;
+    white-space: pre-wrap; word-break: break-word; }
+  .pipeline-test-table .out mark { background: #033a16; color: #7ee787; }
+  .pipeline-test-table .nochange { color: var(--dim); font-style: italic; }
+  .pipeline-test-table .tag { display: inline-block; padding: 0 6px;
+    border-radius: 3px; font-size: 11px; }
+  .pipeline-test-table .tag.ok { background: #033a16; color: #7ee787; }
+  .pipeline-test-table .tag.err { background: #3a0d0d; color: #ff7b72; }
+  .pipeline-test-table .tag.warn { background: #2d1f0a; color: #f2cc60; }
+  .pipeline-test-table .tag.empty { background: #21262d; color: var(--dim); font-style: italic; }
+  .preset-select { margin-bottom: 6px; }
+  .preset-select select { font-family: ui-monospace, monospace; font-size: 12px; }
   /* Nullable-number editor in its disabled (null) state — greyed input,
      enable/disable button labelled accordingly. */
   .nullable-wrap input:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -729,48 +813,10 @@ function setDirty(name, value) {
   applyFieldDependencies();
 }
 
-// Map of field → ("irrelevant" predicate, reason shown to the user when the
-// row is dimmed). Predicates read currentValue() so they pick up dirty edits
-// before save. Keep entries here whenever a new "parent" toggle is added that
-// makes another field's value not-actually-used.
-const _FIELD_DEPS = {
-  DICTATION_MAP: {
-    irrelevant: () => currentValue('DICTATION_ENABLED') === false,
-    note: 'unused while DICTATION_ENABLED is off',
-  },
-  STRIP_AND_LOWERCASE_REGEX: {
-    irrelevant: () => currentValue('STRIP_REGEX_DISABLE') === true,
-    note: 'unused while STRIP_REGEX_DISABLE is on (both Step 3 passes skipped)',
-  },
-  STRIP_AND_LOWERCASE_WORDS: {
-    irrelevant: () =>
-      currentValue('STRIP_REGEX_DISABLE') === true
-      || currentValue('STRIP_AND_LOWERCASE_REGEX') === '',
-    note: 'unused when STRIP_REGEX_DISABLE is on or STRIP_AND_LOWERCASE_REGEX is empty (Pass A skipped)',
-  },
-  STRIP_ONLY_REGEX: {
-    irrelevant: () => currentValue('STRIP_REGEX_DISABLE') === true,
-    note: 'unused while STRIP_REGEX_DISABLE is on (both Step 3 passes skipped)',
-  },
-};
-
-function applyFieldDependencies() {
-  for (const [name, { irrelevant, note }] of Object.entries(_FIELD_DEPS)) {
-    const row = document.querySelector(`.field[data-field="${name}"]`);
-    if (!row) continue;
-    const dim = irrelevant();
-    row.classList.toggle('dep-irrelevant', dim);
-    let n = row.querySelector('.dep-note');
-    if (dim && !n) {
-      n = document.createElement('div');
-      n.className = 'dep-note';
-      n.textContent = note;
-      row.querySelector('.input-col').appendChild(n);
-    } else if (!dim && n) {
-      n.remove();
-    }
-  }
-}
+// Field dependencies are now handled inside the pipelineRulesEditor itself
+// (per-row enabled/locked/seeded state). No top-level field-to-field
+// dimming rules survive the PIPELINE_RULES unification.
+function applyFieldDependencies() { /* no-op */ }
 
 function makeBadges(name) {
   const d = fieldDef(name);
@@ -863,28 +909,24 @@ function fieldRow(name) {
 
 function makeEditor(name) {
   const v = fieldDef(name).value;
+  // PIPELINE_RULES gets its own list-of-rules editor (mixed row types,
+  // drag-to-reorder, per-row test badge). Routed by name BEFORE shape checks
+  // since the value is a list.
+  if (name === 'PIPELINE_RULES') return pipelineRulesEditor(name, v || []);
   // Type dispatch — keep this strict. Order matters: check shape (object vs.
   // array vs. boolean vs. number) BEFORE name-based heuristics, otherwise
   // misses like MAX_LOADED_MODELS routing to a list editor sneak in.
   if (typeof v === 'boolean') return boolEditor(name, v);
   if (typeof v === 'number') return numberEditor(name, v);
-  if (name === 'DICTATION_MAP') return dictTableEditor(name, v || {});
-  if (name === 'CHARACTER_REPLACEMENTS') return tupleListEditor(name, v || []);
   // Model-aware editors (must precede generic Array/list dispatch). Source
   // their options from the current ALLOWED_MODELS state — typing in the
   // allowlist textarea live-updates these.
   if (name === 'DEFAULT_MODEL') return modelDropdownEditor(name, v);
   if (name === 'PRELOAD_MODELS') return modelMultiSelectEditor(name, v);
-  // Regex fields — special editor with live validation badge + per-step
-  // test panel (rendered once per "Whisper noise strip" subgroup).
-  if (name === 'STRIP_AND_LOWERCASE_REGEX' || name === 'STRIP_ONLY_REGEX') {
-    return regexEditor(name, v == null ? '' : v);
-  }
   if (Array.isArray(v)) return linesEditor(name, v);
   // Empty/missing array-shaped fields fall through here; only force a list
   // editor when we know the field is a collection by name.
   if (name === 'ALLOWED_MODELS'
-      || name === 'STRIP_AND_LOWERCASE_WORDS'
       || name === 'ADMIN_ALLOWED_HOSTS' || name === 'STATS_ALLOWED_HOSTS') {
     return linesEditor(name, []);
   }
@@ -1049,96 +1091,588 @@ function modelMultiSelectEditor(name, v) {
   return wrap;
 }
 
-function regexEditor(name, v) {
-  // Mono-font input with a live status badge below it.
-  // Validation states:
-  //   ✓ valid · matches N in sample · M chars   (green)
-  //   ✗ <re.error>                              (red, blocks save via 422 on save)
-  //   ⚠ slow (timed out at 2 s)                 (yellow, allows save with warn)
-  //   ∅ empty — pass skipped                    (grey, italic)
-  // Status updates on every keystroke via debounced POST /config/test-regex.
+// =============================================================================
+// PIPELINE_RULES editor — single ordered list of mixed-type rules
+// =============================================================================
+// Rendered as a stack of .rule-row cards. Each row: drag-handle | enabled
+// checkbox | ordinal | name+label | type-pill | edit toggle | reset (seeded
+// only) | delete (custom only). Body (visible when expanded) holds a
+// type-specific sub-editor + per-row live status badge.
+//
+// Drag-to-reorder uses HTML5 native DnD on the .drag-handle. Locked rules
+// (e.g. dictation-map → tidies → capitalize chain) trigger a confirm()
+// dialog when dropped to a position that breaks an ordering edge.
+
+const TEST_PRESETS = {
+  'default':              "Hallo. Wie geht's? 10.23 Uhr! Bitte Frau, Müller. neuer Absatz. 1,000 EUR.",
+  'german verbatim':      "Hallo. Wie geht's? 10.23 Uhr. Bitte Frau Müller. 1,000 EUR.",
+  'german + dictation':   "Hallo Punkt neue Zeile Frau Komma Müller. 1,000 EUR neue Zeile Bitte fragen.",
+  'english':              "Hello. How are you? It is 10:30 AM. Please ask Mrs. Smith.",
+  'numbers + commas':     "Total 1,000 EUR. Range 10-23 cm. 10.23 Uhr ist 10:23. Schritt 1, 2, 3.",
+};
+
+function _slugify(s) {
+  // kebab-case, ASCII-ish, drop diacritics, collapse runs of -.
+  return (s || '').toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')   // strip combining marks
+    .replace(/ß/g, 'ss').replace(/[äöü]/g, m => ({'ä':'a','ö':'o','ü':'u'}[m]))
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64) || 'rule';
+}
+
+function _ensureUniqueSlug(slug, existing) {
+  if (!existing.has(slug)) return slug;
+  let n = 2;
+  while (existing.has(`${slug}-${n}`)) n++;
+  return `${slug}-${n}`;
+}
+
+const _PIPELINE_TYPES = [
+  { type: 'regex',                       pill: 'regex' },
+  { type: 'callback:lowercase-wordlist', pill: 'cb:wordlist' },
+  { type: 'callback:map',                pill: 'cb:map' },
+  { type: 'callback:dedup',              pill: 'cb:dedup' },
+  { type: 'callback:upper',              pill: 'cb:upper' },
+  { type: 'terminal',                    pill: 'terminal' },
+];
+const _typePill = (t) => (_PIPELINE_TYPES.find(x => x.type === t) || {}).pill || t;
+
+// Live status check for one rule against the current test panel sample.
+// Hits POST /config/test-pipeline with a single-rule list. Returns the step
+// dict or null on transport error.
+async function _testOneRule(rule) {
+  const panelSample = document.getElementById('pipeline-test-sample');
+  const sample = panelSample ? panelSample.value : TEST_PRESETS['default'];
+  const r = await api('POST', '/config/test-pipeline', {
+    sample, rules: [rule],
+  });
+  if (!r.ok) return null;
+  const j = await r.json();
+  return (j.steps && j.steps[0]) || null;
+}
+
+function pipelineRulesEditor(name, initialRules) {
+  // initialRules: list of rule dicts as stored in PIPELINE_RULES.
+  // Local mutable copy lives in a closure; setDirty(name, snapshot) on every
+  // edit so save tracks the whole list as one entry.
+  let rules = JSON.parse(JSON.stringify(initialRules || []));
   const wrap = document.createElement('div');
-  wrap.className = 'regex-wrap';
+  wrap.className = 'pipeline-rules-wrap';
 
-  const ta = document.createElement('input');
-  ta.type = 'text';
-  ta.spellcheck = false;
-  ta.autocomplete = 'off';
-  ta.value = v || '';
-  ta.style.fontFamily = 'ui-monospace, Menlo, Consolas, monospace';
-  ta.style.fontSize = '12px';
-  ta.style.width = '100%';
-  ta.style.boxSizing = 'border-box';
+  const advWarn = document.createElement('div');
+  advWarn.className = 'advanced-warn';
+  advWarn.innerHTML = '⚠ <strong>advanced</strong> — incorrect regex breaks transcription. '
+    + 'Use the test panel below to dry-run before saving. ↺ Reset to default if you get stuck.';
+  wrap.appendChild(advWarn);
 
-  const status = document.createElement('div');
-  status.className = 'regex-status';
-  status.textContent = '∅ empty — pass skipped';
+  const list = document.createElement('div');
+  list.className = 'rule-list';
+  wrap.appendChild(list);
 
-  // Debounced live test against the default sample (the test panel
-  // overrides the sample if open). 250 ms is comfortable for typing.
-  let timer = null;
-  async function refreshStatus() {
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(async () => {
-      const cur = currentValue(name) || '';
-      if (!cur) {
-        status.className = 'regex-status empty';
-        status.textContent = '∅ empty — pass skipped';
-        return;
-      }
-      // Use the test panel's current sample if visible, else the default.
-      const panelSample = document.getElementById('regex-test-sample');
-      const sample = panelSample ? panelSample.value : DEFAULT_REGEX_SAMPLE;
-      const r = await api('POST', '/config/test-regex', {
-        sample,
-        regex_a: name === 'STRIP_AND_LOWERCASE_REGEX' ? cur : '',
-        regex_b: name === 'STRIP_ONLY_REGEX'          ? cur : '',
-        words: currentValue('STRIP_AND_LOWERCASE_WORDS') || [],
-      });
-      if (!r.ok) {
-        status.className = 'regex-status err';
-        status.textContent = '✗ test endpoint error';
-        return;
-      }
-      const j = await r.json();
-      const pass = name === 'STRIP_AND_LOWERCASE_REGEX' ? j.pass_a : j.pass_b;
-      if (pass.error) {
-        status.className = 'regex-status err';
-        status.textContent = '✗ ' + pass.error;
-      } else if (pass.slow) {
-        status.className = 'regex-status warn';
-        status.textContent = '⚠ slow — exceeded 2 s on sample (catastrophic backtracking?)';
-      } else {
-        status.className = 'regex-status ok';
-        const n = (pass.matches || []).length;
-        status.textContent = '✓ valid · ' + n + ' match' + (n === 1 ? '' : 'es')
-                             + ' in sample · ' + cur.length + ' chars';
-      }
-    }, 250);
+  // Drag state across rule rows.
+  let dragSrcIdx = null;
+
+  function commit() {
+    setDirty(name, JSON.parse(JSON.stringify(rules)));
+    paintAll();
   }
 
-  ta.addEventListener('input', () => {
-    setDirty(name, ta.value);
-    refreshStatus();
-  });
-  // Refresh once on initial render (so the badge isn't blank).
-  // Run after the row is in the DOM — defer with rAF.
-  requestAnimationFrame(refreshStatus);
+  function paintAll() {
+    list.innerHTML = '';
+    rules.forEach((rule, idx) => list.appendChild(renderRow(rule, idx)));
+  }
 
-  wrap.appendChild(ta);
-  wrap.appendChild(status);
+  function renderRow(rule, idx) {
+    const row = document.createElement('div');
+    row.className = 'rule-row';
+    row.dataset.idx = idx;
+    if (rule.locked) row.classList.add('locked');
+    if (!rule.enabled) row.classList.add('disabled');
+    if (rule.type === 'terminal') row.classList.add('terminal');
+
+    // Header row.
+    const head = document.createElement('div');
+    head.className = 'row-header';
+
+    const drag = document.createElement('span');
+    drag.className = 'drag-handle';
+    drag.textContent = rule.locked ? '🔒' : '⋮⋮';
+    drag.title = rule.locked
+      ? 'Locked — reorder will warn before applying'
+      : 'Drag to reorder';
+    if (rule.type !== 'terminal') {
+      drag.draggable = true;
+      drag.addEventListener('dragstart', (e) => {
+        dragSrcIdx = idx;
+        row.classList.add('dragging');
+        e.dataTransfer.effectAllowed = 'move';
+      });
+      drag.addEventListener('dragend', () => {
+        row.classList.remove('dragging');
+        dragSrcIdx = null;
+      });
+    }
+    head.appendChild(drag);
+
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.checked = !!rule.enabled;
+    cb.title = 'Enable / disable this rule';
+    if (rule.type === 'terminal') cb.disabled = true;
+    cb.addEventListener('change', () => {
+      rule.enabled = cb.checked;
+      commit();
+    });
+    head.appendChild(cb);
+
+    const ord = document.createElement('span');
+    ord.className = 'ordinal';
+    ord.textContent = String(idx + 1);
+    head.appendChild(ord);
+
+    const lbl = document.createElement('span');
+    lbl.className = 'rule-label';
+    lbl.textContent = rule.label || rule.name;
+    head.appendChild(lbl);
+
+    const slug = document.createElement('span');
+    slug.className = 'rule-slug';
+    slug.textContent = '(' + (rule.name || '?') + ')';
+    head.appendChild(slug);
+
+    const pill = document.createElement('span');
+    pill.className = 'type-pill';
+    pill.textContent = _typePill(rule.type);
+    head.appendChild(pill);
+
+    const expandBtn = document.createElement('button');
+    expandBtn.type = 'button';
+    expandBtn.className = 'expand-btn';
+    expandBtn.textContent = 'edit ▾';
+    expandBtn.addEventListener('click', () => {
+      row.classList.toggle('expanded');
+      expandBtn.textContent = row.classList.contains('expanded') ? 'edit ▴' : 'edit ▾';
+    });
+    head.appendChild(expandBtn);
+
+    if (rule.seeded) {
+      const reset = document.createElement('button');
+      reset.type = 'button';
+      reset.className = 'reset-link';
+      reset.textContent = '↺ reset';
+      reset.title = 'Restore this rule to its in-repo default';
+      reset.addEventListener('click', () => {
+        const baseline = (fieldDef(name).default_value || []).find(b => b.name === rule.name);
+        if (!baseline) return;
+        rules[idx] = JSON.parse(JSON.stringify(baseline));
+        commit();
+      });
+      head.appendChild(reset);
+    } else {
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'delete-btn';
+      del.textContent = '× delete';
+      del.title = 'Remove this custom rule';
+      del.addEventListener('click', () => {
+        rules.splice(idx, 1);
+        commit();
+      });
+      head.appendChild(del);
+    }
+    row.appendChild(head);
+
+    // Drop zone (whole row accepts drops).
+    row.addEventListener('dragover', (e) => {
+      if (dragSrcIdx === null || dragSrcIdx === idx) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+    });
+    row.addEventListener('drop', (e) => {
+      e.preventDefault();
+      if (dragSrcIdx === null || dragSrcIdx === idx) return;
+      const src = rules[dragSrcIdx];
+      let target = idx;
+      // Refuse to drop AFTER the terminal row.
+      if (rules[idx] && rules[idx].type === 'terminal') {
+        target = idx;  // dropping ONTO terminal puts the moved row above it
+      }
+      const movingLocked = src.locked || (rules[idx] && rules[idx].locked);
+      if (movingLocked) {
+        const ok = confirm(
+          'Reordering ' + src.name + ' near a locked rule may break the\n' +
+          'pipeline (e.g. dictation must run before its tidy rules).\n\n' +
+          'Proceed anyway?'
+        );
+        if (!ok) return;
+      }
+      // Move src to target position.
+      const [moved] = rules.splice(dragSrcIdx, 1);
+      const insertAt = target > dragSrcIdx ? target : target;
+      rules.splice(insertAt, 0, moved);
+      // Keep terminal row last.
+      const tIdx = rules.findIndex(r => r.type === 'terminal');
+      if (tIdx >= 0 && tIdx !== rules.length - 1) {
+        const [tr] = rules.splice(tIdx, 1);
+        rules.push(tr);
+      }
+      commit();
+    });
+
+    // Body (collapsed by default).
+    const body = document.createElement('div');
+    body.className = 'row-body';
+    body.appendChild(renderTypeEditor(rule, idx));
+
+    if (rule.type !== 'terminal') {
+      const status = document.createElement('div');
+      status.className = 'regex-status empty';
+      status.textContent = '∅ click "Run test" in the panel below, or edit any field to refresh';
+      body.appendChild(status);
+
+      let timer = null;
+      async function refresh() {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(async () => {
+          const step = await _testOneRule(rule);
+          if (!step) {
+            status.className = 'regex-status err';
+            status.textContent = '✗ test endpoint error';
+            return;
+          }
+          if (step.skipped) {
+            status.className = 'regex-status empty';
+            status.textContent = rule.enabled
+              ? '∅ empty pattern — rule skipped'
+              : '∅ disabled';
+          } else if (step.error) {
+            status.className = 'regex-status err';
+            status.textContent = '✗ ' + step.error;
+          } else if (step.slow) {
+            status.className = 'regex-status warn';
+            status.textContent = '⚠ slow — exceeded 2 s on sample (catastrophic backtracking?)';
+          } else {
+            status.className = 'regex-status ok';
+            const n = step.matches || 0;
+            status.textContent = '✓ valid · ' + n + ' match' + (n === 1 ? '' : 'es') + ' in sample';
+          }
+        }, 250);
+      }
+      // Refresh on any input change inside the body.
+      body.addEventListener('input', refresh);
+      body.addEventListener('change', refresh);
+      requestAnimationFrame(refresh);
+    }
+
+    row.appendChild(body);
+    return row;
+  }
+
+  function renderTypeEditor(rule, idx) {
+    const box = document.createElement('div');
+    box.className = 'rule-editor';
+
+    if (rule.type === 'terminal') {
+      const note = document.createElement('div');
+      note.className = 'help';
+      note.textContent = 'Hardcoded terminal step: lstrip(" \\t\\r") + rstrip(" \\t\\r"). '
+        + 'Always runs last. Preserves a leading or trailing newline ("\\n") emitted by '
+        + '"neue Zeile" / "neuer Absatz" at the edges of the utterance.';
+      box.appendChild(note);
+      return box;
+    }
+
+    if (rule.type === 'regex') {
+      box.appendChild(_makeMonoLabeledInput('pattern', rule.pattern, (v) => {
+        rule.pattern = v; commit();
+      }));
+      box.appendChild(_makeMonoLabeledInput('replacement', rule.replacement, (v) => {
+        rule.replacement = v; commit();
+      }));
+      return box;
+    }
+
+    if (rule.type === 'callback:lowercase-wordlist') {
+      box.appendChild(_makeMonoLabeledInput('pattern', rule.pattern, (v) => {
+        rule.pattern = v; commit();
+      }));
+      const wlLbl = document.createElement('div');
+      wlLbl.className = 'help';
+      wlLbl.textContent = 'wordlist (one entry per line, case-insensitive):';
+      box.appendChild(wlLbl);
+      const ta = document.createElement('textarea');
+      ta.value = (rule.wordlist || []).join('\n');
+      ta.rows = 6;
+      ta.style.width = '100%';
+      ta.style.fontFamily = 'ui-monospace, Menlo, Consolas, monospace';
+      ta.style.fontSize = '12px';
+      ta.addEventListener('input', () => {
+        rule.wordlist = ta.value.split('\n').map(s => s.trim()).filter(Boolean);
+        commit();
+      });
+      box.appendChild(ta);
+      return box;
+    }
+
+    if (rule.type === 'callback:map') {
+      const note = document.createElement('div');
+      note.className = 'help';
+      note.textContent = 'Pattern auto-built from map keys (longest-first, '
+        + 'word-bounded, case-insensitive). Edit entries below.';
+      box.appendChild(note);
+      const tbl = document.createElement('table');
+      tbl.className = 'map-table';
+      tbl.style.width = '100%';
+      const rows = Object.entries(rule.map || {});
+      rows.forEach(([k, v]) => tbl.appendChild(_makeMapRow(rule, k, v)));
+      box.appendChild(tbl);
+      const addBtn = document.createElement('button');
+      addBtn.type = 'button';
+      addBtn.textContent = '+ add entry';
+      addBtn.style.marginTop = '6px';
+      addBtn.addEventListener('click', () => {
+        if (!rule.map) rule.map = {};
+        const k = '_new_' + Object.keys(rule.map).length;
+        rule.map[k] = '';
+        commit();
+      });
+      box.appendChild(addBtn);
+      return box;
+    }
+
+    if (rule.type === 'callback:dedup' || rule.type === 'callback:upper') {
+      box.appendChild(_makeMonoLabeledInput('pattern', rule.pattern, (v) => {
+        rule.pattern = v; commit();
+      }));
+      const note = document.createElement('div');
+      note.className = 'help';
+      note.textContent = rule.type === 'callback:dedup'
+        ? 'Callback: collapse each match — last non-comma wins; pure-comma run → single comma.'
+        : 'Callback: uppercase group(2) (or whole match if pattern has fewer than 2 groups).';
+      box.appendChild(note);
+      return box;
+    }
+
+    return box;
+  }
+
+  function _makeMonoLabeledInput(label, val, onInput) {
+    const lbl = document.createElement('div');
+    lbl.className = 'help';
+    lbl.textContent = label + ':';
+    const inp = document.createElement('input');
+    inp.type = 'text';
+    inp.spellcheck = false;
+    inp.autocomplete = 'off';
+    inp.value = val == null ? '' : val;
+    inp.style.fontFamily = 'ui-monospace, Menlo, Consolas, monospace';
+    inp.style.fontSize = '12px';
+    inp.style.width = '100%';
+    inp.style.boxSizing = 'border-box';
+    inp.addEventListener('input', () => onInput(inp.value));
+    const wrap = document.createElement('div');
+    wrap.appendChild(lbl); wrap.appendChild(inp);
+    return wrap;
+  }
+
+  function _makeMapRow(rule, key, val) {
+    const tr = document.createElement('tr');
+    const td1 = document.createElement('td');
+    const td2 = document.createElement('td');
+    const td3 = document.createElement('td');
+    td3.style.width = '40px';
+    const ki = document.createElement('input');
+    ki.type = 'text'; ki.value = key; ki.style.fontFamily = 'ui-monospace, monospace'; ki.style.width = '100%';
+    const vi = document.createElement('input');
+    vi.type = 'text'; vi.value = val; vi.style.fontFamily = 'ui-monospace, monospace'; vi.style.width = '100%';
+    function rebuild() {
+      const m = {};
+      const trs = tr.parentNode.querySelectorAll('tr');
+      trs.forEach(r => {
+        const k = r.querySelector('td:first-child input').value;
+        const v = r.querySelector('td:nth-child(2) input').value;
+        if (k) m[k] = v;
+      });
+      rule.map = m;
+      commit();
+    }
+    ki.addEventListener('input', rebuild);
+    vi.addEventListener('input', rebuild);
+    const del = document.createElement('button');
+    del.type = 'button'; del.textContent = '×';
+    del.addEventListener('click', () => { tr.remove(); rebuild(); });
+    td1.appendChild(ki); td2.appendChild(vi); td3.appendChild(del);
+    tr.appendChild(td1); tr.appendChild(td2); tr.appendChild(td3);
+    return tr;
+  }
+
+  // Bottom controls.
+  const ctrls = document.createElement('div');
+  ctrls.className = 'rule-list-controls';
+  ctrls.style.marginTop = '8px';
+  ctrls.style.display = 'flex';
+  ctrls.style.gap = '8px';
+
+  const addBtn = document.createElement('button');
+  addBtn.type = 'button';
+  addBtn.textContent = '+ Add custom rule';
+  addBtn.addEventListener('click', () => _openAddCustomDialog());
+  ctrls.appendChild(addBtn);
+
+  const resetOrderBtn = document.createElement('button');
+  resetOrderBtn.type = 'button';
+  resetOrderBtn.className = 'reset-link';
+  resetOrderBtn.textContent = '↺ Reset order';
+  resetOrderBtn.title = 'Restore canonical seeded order; custom rules append before terminal';
+  resetOrderBtn.addEventListener('click', () => {
+    const baseline = fieldDef(name).default_value || [];
+    const baseOrder = baseline.map(b => b.name);
+    const seeded = [];
+    const customs = [];
+    let terminal = null;
+    rules.forEach(r => {
+      if (r.type === 'terminal') terminal = r;
+      else if (r.seeded) seeded.push(r);
+      else customs.push(r);
+    });
+    seeded.sort((a, b) => baseOrder.indexOf(a.name) - baseOrder.indexOf(b.name));
+    rules = [...seeded, ...customs];
+    if (terminal) rules.push(terminal);
+    commit();
+  });
+  ctrls.appendChild(resetOrderBtn);
+
+  const resetAllBtn = document.createElement('button');
+  resetAllBtn.type = 'button';
+  resetAllBtn.className = 'reset-link';
+  resetAllBtn.textContent = '↺ Reset all to defaults';
+  resetAllBtn.title = 'Restore the 13 seeded rules to their in-repo defaults; custom rules untouched';
+  resetAllBtn.addEventListener('click', () => {
+    const baseline = fieldDef(name).default_value || [];
+    const customs = rules.filter(r => !r.seeded && r.type !== 'terminal');
+    const ok = confirm(
+      'Reset 13 seeded rules to their in-repo defaults.\n' +
+      (customs.length ? `Your ${customs.length} custom rule(s) will be kept at their current positions.\n\n` : '\n') +
+      'Continue?'
+    );
+    if (!ok) return;
+    // Replace seeded rules with baseline copy (order preserved by name).
+    const baseByName = new Map(baseline.map(b => [b.name, b]));
+    rules = rules.map(r => r.seeded || r.type === 'terminal'
+      ? JSON.parse(JSON.stringify(baseByName.get(r.name) || r))
+      : r);
+    commit();
+  });
+  ctrls.appendChild(resetAllBtn);
+
+  wrap.appendChild(ctrls);
+
+  function _openAddCustomDialog() {
+    // Lightweight inline form, appended at the bottom of the rules list.
+    const form = document.createElement('div');
+    form.className = 'rule-row';
+    form.style.borderColor = '#7ee787';
+    const head = document.createElement('div');
+    head.className = 'row-header';
+    head.innerHTML = '<strong>+ New custom rule</strong>';
+    form.appendChild(head);
+    const body = document.createElement('div');
+    body.className = 'row-body';
+    body.style.display = 'block';
+
+    const typeSel = document.createElement('select');
+    _PIPELINE_TYPES.filter(t => t.type !== 'terminal').forEach(t => {
+      const o = document.createElement('option');
+      o.value = t.type; o.textContent = t.type + '  (' + t.pill + ')';
+      typeSel.appendChild(o);
+    });
+    const labelInp = document.createElement('input');
+    labelInp.type = 'text';
+    labelInp.placeholder = 'Friendly label (e.g. "Expand Uhr to :00")';
+    labelInp.style.width = '100%'; labelInp.style.marginTop = '4px';
+    const patInp = document.createElement('input');
+    patInp.type = 'text'; patInp.placeholder = 'pattern';
+    patInp.style.width = '100%'; patInp.style.marginTop = '4px';
+    patInp.style.fontFamily = 'ui-monospace, monospace';
+    const replInp = document.createElement('input');
+    replInp.type = 'text'; replInp.placeholder = 'replacement (regex only)';
+    replInp.style.width = '100%'; replInp.style.marginTop = '4px';
+    replInp.style.fontFamily = 'ui-monospace, monospace';
+
+    const ok = document.createElement('button');
+    ok.type = 'button'; ok.textContent = 'Add'; ok.style.marginTop = '6px';
+    const cancel = document.createElement('button');
+    cancel.type = 'button'; cancel.textContent = 'Cancel'; cancel.style.marginLeft = '6px';
+
+    body.appendChild(_labeledRow('Type', typeSel));
+    body.appendChild(_labeledRow('Label', labelInp));
+    body.appendChild(_labeledRow('Pattern', patInp));
+    body.appendChild(_labeledRow('Replacement', replInp));
+    body.appendChild(ok);
+    body.appendChild(cancel);
+    form.appendChild(body);
+    list.appendChild(form);
+
+    cancel.addEventListener('click', () => form.remove());
+    ok.addEventListener('click', () => {
+      const lbl = labelInp.value.trim() || 'Custom rule';
+      const slugSet = new Set(rules.map(r => r.name));
+      const slug = _ensureUniqueSlug(_slugify(lbl), slugSet);
+      const t = typeSel.value;
+      const newRule = {
+        name: slug, label: lbl, type: t,
+        enabled: true, locked: false, seeded: false,
+      };
+      if (t === 'regex') {
+        newRule.pattern = patInp.value;
+        newRule.replacement = replInp.value;
+      } else if (t === 'callback:map') {
+        newRule.map = {};
+      } else {
+        newRule.pattern = patInp.value;
+        if (t === 'callback:lowercase-wordlist') newRule.wordlist = [];
+      }
+      // Insert just before the terminal row, or at the end if no terminal.
+      const tIdx = rules.findIndex(r => r.type === 'terminal');
+      if (tIdx >= 0) rules.splice(tIdx, 0, newRule);
+      else rules.push(newRule);
+      form.remove();
+      commit();
+    });
+  }
+
+  function _labeledRow(label, el) {
+    const wr = document.createElement('div');
+    wr.style.marginTop = '4px';
+    const l = document.createElement('div');
+    l.className = 'help'; l.textContent = label + ':';
+    wr.appendChild(l); wr.appendChild(el);
+    return wr;
+  }
+
+  paintAll();
   return wrap;
 }
 
-const DEFAULT_REGEX_SAMPLE =
-  "Hallo. Wie geht's? 10.23 Uhr! Bitte Frau, Müller. neuer Absatz. 1,000 EUR.";
 
-function regexTestPanel() {
-  // One panel per Step-3 subgroup. Inserted once via the toggle in the
-  // <h3 class="subgroup"> banner. Editable sample, run-against-both-passes
-  // button, per-pass diff render, final output row.
+function pipelineTestPanel() {
+  // Full-pipeline test panel — preset dropdown + editable textarea + run button.
+  // Inserted under the Pipeline section heading. Output renders as an ordered
+  // table mirroring the trace block: ordinal | label | type-pill | output.
   const wrap = document.createElement('div');
   wrap.className = 'regex-test-panel';
+
+  const presetWrap = document.createElement('div');
+  presetWrap.className = 'preset-select';
+  presetWrap.innerHTML = '<span class="help" style="margin-right:6px">preset:</span>';
+  const sel = document.createElement('select');
+  for (const k of Object.keys(TEST_PRESETS)) {
+    const o = document.createElement('option');
+    o.value = k; o.textContent = k;
+    sel.appendChild(o);
+  }
+  presetWrap.appendChild(sel);
+  wrap.appendChild(presetWrap);
 
   const sampleLbl = document.createElement('div');
   sampleLbl.className = 'help';
@@ -1146,8 +1680,8 @@ function regexTestPanel() {
   wrap.appendChild(sampleLbl);
 
   const sample = document.createElement('textarea');
-  sample.id = 'regex-test-sample';
-  sample.value = DEFAULT_REGEX_SAMPLE;
+  sample.id = 'pipeline-test-sample';
+  sample.value = TEST_PRESETS['default'];
   sample.rows = 2;
   sample.style.width = '100%';
   sample.style.boxSizing = 'border-box';
@@ -1155,9 +1689,13 @@ function regexTestPanel() {
   sample.style.fontSize = '12px';
   wrap.appendChild(sample);
 
+  sel.addEventListener('change', () => {
+    sample.value = TEST_PRESETS[sel.value] || '';
+  });
+
   const runBtn = document.createElement('button');
   runBtn.type = 'button';
-  runBtn.textContent = 'Run test';
+  runBtn.textContent = 'Run all enabled rules';
   runBtn.style.marginTop = '6px';
   wrap.appendChild(runBtn);
 
@@ -1167,58 +1705,52 @@ function regexTestPanel() {
 
   async function run() {
     out.innerHTML = '<em>running…</em>';
-    const r = await api('POST', '/config/test-regex', {
+    const r = await api('POST', '/config/test-pipeline', {
       sample: sample.value,
-      regex_a: currentValue('STRIP_AND_LOWERCASE_REGEX') || '',
-      regex_b: currentValue('STRIP_ONLY_REGEX') || '',
-      words: currentValue('STRIP_AND_LOWERCASE_WORDS') || [],
+      rules: currentValue('PIPELINE_RULES') || [],
     });
     if (!r.ok) { out.innerHTML = '<em class="err">test endpoint error</em>'; return; }
     const j = await r.json();
-    const block = (label, pass) => {
-      const p = document.createElement('div');
-      p.className = 'regex-test-pass';
-      const head = document.createElement('div');
-      head.className = 'regex-test-head';
-      head.textContent = label + ': ';
-      const tag = document.createElement('span');
-      if (pass.skipped) {
-        tag.className = 'tag empty'; tag.textContent = 'skipped';
-      } else if (pass.error) {
-        tag.className = 'tag err'; tag.textContent = '✗ ' + pass.error;
-      } else if (pass.slow) {
-        tag.className = 'tag warn'; tag.textContent = '⚠ slow';
+    const tbl = document.createElement('table');
+    tbl.className = 'pipeline-test-table';
+    const thead = document.createElement('tr');
+    thead.innerHTML = '<th>#</th><th>label</th><th>type</th><th>output</th>';
+    tbl.appendChild(thead);
+    (j.steps || []).forEach(step => {
+      const tr = document.createElement('tr');
+      let badge = '';
+      if (step.skipped) badge = ' <span class="tag empty">skipped</span>';
+      else if (step.error) badge = ' <span class="tag err">✗</span>';
+      else if (step.slow) badge = ' <span class="tag warn">⚠ slow</span>';
+      else if (step.matches) badge = ' <span class="tag ok">' + step.matches + ' matches</span>';
+      const changed = step.before !== step.after;
+      const outCell = document.createElement('td');
+      outCell.className = 'out';
+      if (step.error) {
+        outCell.innerHTML = '<span class="err">' + step.error + '</span>';
+      } else if (!changed) {
+        outCell.innerHTML = '<span class="nochange">(no change)</span>';
       } else {
-        tag.className = 'tag ok'; tag.textContent = '✓ ' + (pass.matches || []).length + ' matches';
+        outCell.textContent = step.after;
       }
-      head.appendChild(tag);
-      p.appendChild(head);
-
-      if (!pass.skipped && !pass.error) {
-        const res = document.createElement('pre');
-        res.className = 'regex-test-result';
-        res.textContent = pass.result;
-        p.appendChild(res);
-        if (pass.lowercased && pass.lowercased.length) {
-          const lc = document.createElement('div');
-          lc.className = 'help';
-          lc.textContent = 'lowercased: ' + pass.lowercased.join(', ');
-          p.appendChild(lc);
-        }
-      }
-      return p;
-    };
+      tr.innerHTML = '<td>' + step.ordinal + '</td>'
+        + '<td>' + (step.label || '?') + badge + '</td>'
+        + '<td><span class="type-pill">' + _typePill(step.type) + '</span></td>';
+      tr.appendChild(outCell);
+      tbl.appendChild(tr);
+    });
+    const finalRow = document.createElement('tr');
+    const finalCell = document.createElement('td');
+    finalCell.colSpan = 3;
+    finalCell.innerHTML = '<strong>Final →</strong>';
+    finalRow.appendChild(finalCell);
+    const finalOut = document.createElement('td');
+    finalOut.className = 'out';
+    finalOut.textContent = j.final;
+    finalRow.appendChild(finalOut);
+    tbl.appendChild(finalRow);
     out.innerHTML = '';
-    out.appendChild(block('Pass A', j.pass_a));
-    out.appendChild(block('Pass B', j.pass_b));
-    const finalRow = document.createElement('div');
-    finalRow.className = 'regex-test-final';
-    finalRow.innerHTML = '<strong>Final →</strong> ';
-    const fpre = document.createElement('pre');
-    fpre.className = 'regex-test-result';
-    fpre.textContent = j.final;
-    finalRow.appendChild(fpre);
-    out.appendChild(finalRow);
+    out.appendChild(tbl);
   }
   runBtn.addEventListener('click', run);
   return wrap;
@@ -1473,15 +2005,6 @@ function render() {
         h3.className = 'subgroup';
         h3.textContent = sub.title;
         sec.appendChild(h3);
-        // Step 3 subgroup gets the regex test panel + advanced badge.
-        if (/Step 3/.test(sub.title)) {
-          const adv = document.createElement('div');
-          adv.className = 'advanced-warn';
-          adv.innerHTML = '⚠ <strong>advanced</strong> — incorrect regex breaks transcription. '
-            + 'Use the test panel below to dry-run before saving. ↺ Reset to default if you get stuck.';
-          sec.appendChild(adv);
-          sec.appendChild(regexTestPanel());
-        }
       }
       for (const fname of sub.fields) {
         try {
@@ -1496,6 +2019,12 @@ function render() {
           sec.appendChild(errRow);
         }
       }
+    }
+    // The Pipeline section gets the full-pipeline test panel appended at the
+    // bottom (after PIPELINE_RULES renders). Single panel — runs the whole
+    // ordered list against the editable sample.
+    if (g.title === 'Pipeline') {
+      sec.appendChild(pipelineTestPanel());
     }
     main.appendChild(sec);
   }

@@ -26,6 +26,7 @@ from pathlib import PurePath, PureWindowsPath
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
+from typing import Union
 
 
 _REPO_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -41,7 +42,6 @@ ENV_VAR_MAPPING: dict[str, str] = {
     "MAX_LOADED_MODELS": "WHISPER_MAX_LOADED_MODELS",
     "PRELOAD_MODELS": "WHISPER_PRELOAD_MODELS",
     "DEFAULT_PROMPT": "WHISPER_DEFAULT_PROMPT",
-    "DICTATION_ENABLED": "WHISPER_DICTATION_MAP",
     "TRACE_ENABLED": "WHISPER_TRACE",
     "LOG_FILE": "WHISPER_LOG_FILE",
     "ADMIN_ALLOWED_HOSTS": "WHISPER_ADMIN_ALLOWED_HOSTS",
@@ -61,10 +61,7 @@ RESTART_REQUIRED_FIELDS: frozenset[str] = frozenset({
 
 # Hot settings whose derived caches need rebuild after edit. The admin route
 # calls main.rebuild_caches() when any of these change.
-CACHE_REBUILD_FIELDS: frozenset[str] = frozenset({
-    "DICTATION_MAP", "PUNCTUATION_TO_KEEP",
-    "STRIP_AND_LOWERCASE_REGEX", "STRIP_ONLY_REGEX", "STRIP_AND_LOWERCASE_WORDS",
-})
+CACHE_REBUILD_FIELDS: frozenset[str] = frozenset({"PIPELINE_RULES"})
 
 
 # =============================================================================
@@ -147,30 +144,13 @@ FIELD_DESCRIPTIONS: dict[str, str] = {
         "decoding. Default 2.4.",
 
     # --- Pipeline ---
-    "CHARACTER_REPLACEMENTS":
-        "Step 0: ordered (from,to) str.replace pairs run before all other "
-        "steps. Default ß→ss, ẞ→SS for Swiss German.",
-    "PUNCTUATION_TO_KEEP":
-        "Step 1 whitelist: chars kept from string.punctuation. Defaults "
-        "cover date/number separators and ?!.",
-    "STRIP_REGEX_DISABLE":
-        "One-click master bypass: when on, both Step 3 passes are skipped "
-        "(instead of clearing both regex fields).",
-    "STRIP_AND_LOWERCASE_REGEX":
-        "Step 3 Pass A regex: strips matched terminator AND lowercases the "
-        "next word if it's in STRIP_AND_LOWERCASE_WORDS. Empty = skip.",
-    "STRIP_AND_LOWERCASE_WORDS":
-        "German non-nouns (wie, und, der, aber, weil, …) lowercased by "
-        "Pass A after a stripped terminator. Lowercase entries.",
-    "STRIP_ONLY_REGEX":
-        "Step 3 Pass B regex: plain strip with no casing side-effects "
-        "(also covers commas via the digit-protected pattern). Empty = skip.",
-    "DICTATION_ENABLED":
-        "Master switch for dictation post-processing (Steps 4-8). Off = "
-        "Steps 0/1/3 still run; everything else skipped.",
-    "DICTATION_MAP":
-        "Spoken-word to symbol map (e.g. 'Punkt'→'.', 'neue Zeile'→newline). "
-        "Case-insensitive, longest match wins.",
+    "PIPELINE_RULES":
+        "Ordered text-cleanup rules applied to the joined transcript. Each "
+        "row is a regex or named-callback rule; drag to reorder, edit, "
+        "disable, or add custom rules. Reset to defaults if anything breaks. "
+        "The final 'trim edges' row always runs last.",
+
+    # --- Logging ---
     "TRACE_ENABLED":
         "Emit a multi-line trace block per transcription request. Disable "
         "on busy servers to control log volume.",
@@ -235,6 +215,80 @@ DeviceLit = Literal["cuda", "cpu"]
 ComputeLit = Literal["float16", "int8_float16", "int8", "float32", "bfloat16"]
 
 
+# =============================================================================
+# Pipeline rule schema (discriminated union on `type`)
+# =============================================================================
+# Each rule is one row in the unified post-processing pipeline. See
+# config.py:PIPELINE_RULES for the canonical seeded list.
+RuleSlug = Annotated[str, Field(min_length=1, max_length=64,
+                                pattern=r"^[a-z0-9-]+$")]
+RuleLabel = Annotated[str, Field(min_length=1, max_length=80)]
+
+
+class _RuleBase(BaseModel):
+    """Common fields for every PipelineRule row."""
+    model_config = {"extra": "forbid"}
+    name: RuleSlug
+    label: RuleLabel
+    enabled: bool = True
+    locked: bool = False
+    seeded: bool = False
+
+
+class RegexRule(_RuleBase):
+    """Static (pattern, replacement) row. Pure re.sub."""
+    type: Literal["regex"]
+    pattern: Annotated[str, Field(max_length=512)]
+    replacement: Annotated[str, Field(max_length=512)] = ""
+
+
+class LowercaseWordlistRule(_RuleBase):
+    """Strip terminator and lowercase the next word if it's in the wordlist."""
+    type: Literal["callback:lowercase-wordlist"]
+    pattern: Annotated[str, Field(max_length=512)]
+    wordlist: Annotated[
+        list[Annotated[str, Field(min_length=1, max_length=32, pattern=r"^[A-Za-zäöüß]+$")]],
+        Field(max_length=2000),
+    ]
+
+
+class MapRule(_RuleBase):
+    """Spoken-word → symbol lookup. Pattern auto-built from `map` keys
+    (longest-first alternation, case-insensitive) at compile time."""
+    type: Literal["callback:map"]
+    map: dict[
+        Annotated[str, Field(min_length=1, max_length=64,
+                             pattern=r"^[\w \-.,!?ßẞÄÖÜäöü]{1,64}$")],
+        Annotated[str, Field(max_length=8)],
+    ] = Field(default_factory=dict, max_length=500)
+
+
+class DedupRule(_RuleBase):
+    """Pattern-only row. Callback collapses each match: prefer last
+    non-comma in the run; pure-comma run collapses to a single comma."""
+    type: Literal["callback:dedup"]
+    pattern: Annotated[str, Field(max_length=512)]
+
+
+class UpperRule(_RuleBase):
+    """Pattern-only row. Callback uppercases group(2) (or the entire match
+    if the pattern has fewer than 2 groups)."""
+    type: Literal["callback:upper"]
+    pattern: Annotated[str, Field(max_length=512)]
+
+
+class TerminalRule(_RuleBase):
+    """Hardcoded final lstrip(' \\t\\r') + rstrip(' \\t\\r'). Always last;
+    never user-editable. Exactly one terminal row is required."""
+    type: Literal["terminal"]
+
+
+PipelineRule = Annotated[
+    Union[RegexRule, LowercaseWordlistRule, MapRule, DedupRule, UpperRule, TerminalRule],
+    Field(discriminator="type"),
+]
+
+
 class AdminConfig(BaseModel):
     """Pydantic schema for config.local.json. Every field is Optional; absent
     means "do not override". Bounds and patterns enforce resource caps and
@@ -274,19 +328,7 @@ class AdminConfig(BaseModel):
     COMPRESSION_RATIO_THRESHOLD: Annotated[float, Field(ge=0.0, le=10.0)] | None = _F("COMPRESSION_RATIO_THRESHOLD")
 
     # --- Pipeline ---
-    CHARACTER_REPLACEMENTS: list[tuple[
-        Annotated[str, Field(min_length=1, max_length=4)],
-        Annotated[str, Field(max_length=8)],
-    ]] | None = _F("CHARACTER_REPLACEMENTS")
-    PUNCTUATION_TO_KEEP: Annotated[str, Field(max_length=32)] | None = _F("PUNCTUATION_TO_KEEP")
-    STRIP_REGEX_DISABLE: bool | None = _F("STRIP_REGEX_DISABLE")
-    STRIP_AND_LOWERCASE_REGEX: Annotated[str, Field(max_length=256)] | None = _F("STRIP_AND_LOWERCASE_REGEX", max_length=256)
-    STRIP_AND_LOWERCASE_WORDS: list[
-        Annotated[str, Field(min_length=1, max_length=32, pattern=r"^[A-Za-zäöüß]+$")]
-    ] | None = _F("STRIP_AND_LOWERCASE_WORDS")
-    STRIP_ONLY_REGEX: Annotated[str, Field(max_length=256)] | None = _F("STRIP_ONLY_REGEX", max_length=256)
-    DICTATION_ENABLED: bool | None = _F("DICTATION_ENABLED")
-    DICTATION_MAP: dict[DictKey, DictVal] | None = _F("DICTATION_MAP")
+    PIPELINE_RULES: Annotated[list[PipelineRule], Field(max_length=200)] | None = _F("PIPELINE_RULES")
     TRACE_ENABLED: bool | None = _F("TRACE_ENABLED")
 
     # --- Logging ---
@@ -338,16 +380,7 @@ class AdminConfig(BaseModel):
             raise ValueError("invalid host string")
         return v
 
-    @field_validator("DICTATION_MAP")
-    @classmethod
-    def _cap_dict(cls, v: dict[str, str] | None) -> dict[str, str] | None:
-        if v is None:
-            return v
-        if len(v) > 500:
-            raise ValueError(f"DICTATION_MAP capped at 500 entries (got {len(v)})")
-        return v
-
-    @field_validator("ALLOWED_MODELS", "PRELOAD_MODELS", "STRIP_AND_LOWERCASE_WORDS")
+    @field_validator("ALLOWED_MODELS", "PRELOAD_MODELS")
     @classmethod
     def _cap_list(cls, v: list[Any] | None) -> list[Any] | None:
         if v is None:
@@ -356,50 +389,76 @@ class AdminConfig(BaseModel):
             raise ValueError(f"capped at 1000 entries (got {len(v)})")
         return v
 
-    @field_validator("STRIP_AND_LOWERCASE_REGEX", "STRIP_ONLY_REGEX")
+    @field_validator("PIPELINE_RULES")
     @classmethod
-    def _validate_regex(cls, v: str | None) -> str | None:
-        # Empty string = "skip this pass". Always valid.
-        if v is None or v == "":
-            return v
-        # Compile-time validation: surface re.error as a Pydantic ValueError so
-        # the WebUI's inline-error display picks it up.
-        try:
-            compiled = re.compile(v)
-        except re.error as e:
-            raise ValueError(f"invalid regex: {e}")
-        # Catastrophic-backtracking guard: run against a 1 KB fixture under a
-        # 2 s timeout. threading.Timer + a cancel-flag works on both Linux and
-        # Windows (re module has no native timeout). We use re.sub() since
-        # that's what main.py calls — same behaviour, same failure mode.
-        import threading
-        fixture = "Hallo. Wie geht's? 10.23 Uhr! Bitte. " * 32   # ~1 KB
-        result_holder: dict[str, Any] = {"done": False, "err": None}
-        def _run() -> None:
-            try:
-                compiled.sub("", fixture)
-                result_holder["done"] = True
-            except Exception as e:
-                result_holder["err"] = e
-        t = threading.Thread(target=_run, daemon=True)
-        t.start()
-        t.join(timeout=2.0)
-        if not result_holder["done"]:
-            raise ValueError(
-                "regex took > 2 s on a 1 KB fixture (likely catastrophic "
-                "backtracking). Simplify the pattern or use possessive quantifiers."
-            )
-        if result_holder["err"] is not None:
-            raise ValueError(f"regex test run failed: {result_holder['err']}")
-        return v
-
-    @field_validator("CHARACTER_REPLACEMENTS")
-    @classmethod
-    def _cap_replacements(cls, v: list[Any] | None) -> list[Any] | None:
+    def _validate_pipeline_rules(cls, v: list[Any] | None) -> list[Any] | None:
+        """Validate the unified pipeline rules list:
+          1. Each rule's regex pattern compiles AND survives a 2 s catastrophic-
+             backtracking guard against a 1 KB fixture. (Empty patterns are OK
+             for a regex rule — that's just a no-op.)
+          2. Each `regex` rule's replacement string survives `re.sub` with the
+             pattern (catches bad backrefs like `\\3` when only 2 groups exist).
+          3. Slug uniqueness across the list.
+          4. Exactly one terminal rule, and it must be the last entry.
+        """
         if v is None:
             return v
-        if len(v) > 32:
-            raise ValueError("CHARACTER_REPLACEMENTS capped at 32 entries")
+        import threading
+        fixture = "Hallo. Wie geht's? 10.23 Uhr! Bitte. " * 32   # ~1 KB
+        seen: set[str] = set()
+        terminal_idx: int | None = None
+        for idx, rule in enumerate(v):
+            slug = rule.get("name") if isinstance(rule, dict) else getattr(rule, "name", None)
+            rtype = rule.get("type") if isinstance(rule, dict) else getattr(rule, "type", None)
+            if slug in seen:
+                raise ValueError(f"duplicate rule name '{slug}' at index {idx}")
+            if slug is not None:
+                seen.add(slug)
+            if rtype == "terminal":
+                if terminal_idx is not None:
+                    raise ValueError(f"only one terminal rule allowed (already at index {terminal_idx})")
+                terminal_idx = idx
+                continue
+            # Pattern compile + 2 s timeout-guarded run. callback:map has no
+            # pattern field — pattern is auto-built from map keys at compile
+            # time; skip it here.
+            if rtype == "callback:map":
+                continue
+            pattern = rule.get("pattern") if isinstance(rule, dict) else getattr(rule, "pattern", None)
+            if not pattern:
+                continue
+            try:
+                compiled = re.compile(pattern)
+            except re.error as e:
+                raise ValueError(f"rule {idx} ({slug!r}): invalid regex: {e}")
+            replacement = ""
+            if rtype == "regex":
+                replacement = (rule.get("replacement") if isinstance(rule, dict)
+                               else getattr(rule, "replacement", "")) or ""
+            result_holder: dict[str, Any] = {"done": False, "err": None}
+            def _run(_compiled=compiled, _repl=replacement) -> None:
+                try:
+                    _compiled.sub(_repl, fixture)
+                    result_holder["done"] = True
+                except Exception as e:
+                    result_holder["err"] = e
+            t = threading.Thread(target=_run, daemon=True)
+            t.start()
+            t.join(timeout=2.0)
+            if not result_holder["done"]:
+                raise ValueError(
+                    f"rule {idx} ({slug!r}): regex took > 2 s on a 1 KB fixture "
+                    "(likely catastrophic backtracking). Simplify the pattern."
+                )
+            if result_holder["err"] is not None:
+                raise ValueError(
+                    f"rule {idx} ({slug!r}): regex test failed: {result_holder['err']}"
+                )
+        if terminal_idx is not None and terminal_idx != len(v) - 1:
+            raise ValueError(
+                f"terminal rule must be the last entry "
+                f"(found at index {terminal_idx}, list has {len(v)} rules)"
+            )
         return v
 
     @field_validator("ADMIN_ALLOWED_HOSTS", "STATS_ALLOWED_HOSTS")
@@ -423,8 +482,6 @@ class AdminConfig(BaseModel):
 # were defined inline in config.py.
 _POST_LOAD_COERCERS: dict[str, Any] = {
     "ALLOWED_MODELS": set,
-    "STRIP_AND_LOWERCASE_WORDS": frozenset,
-    "CHARACTER_REPLACEMENTS": lambda items: tuple(tuple(p) for p in items),
 }
 
 

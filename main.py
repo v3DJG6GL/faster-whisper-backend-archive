@@ -4,7 +4,6 @@ import ctypes
 import logging
 import logging.handlers
 import re
-import string
 import tempfile
 import time
 from contextlib import asynccontextmanager
@@ -105,246 +104,180 @@ from faster_whisper import WhisperModel
 
 
 # =============================================================================
-# Text post-processing pipeline (Swiss-German / CH-DE)
+# Text post-processing pipeline — unified rules list (cfg.PIPELINE_RULES)
 # =============================================================================
-# Whisper's raw output looks like "Hallo Komma der Patient zeigt Besserung
-# Punkt." — a mix of the model's own punctuation and spoken-out symbol words.
-# Whisper emits standard German orthography (with ß), but our target is Swiss
-# German, which uses "ss" instead. `_postprocess_text()` reshapes the output
-# in nine ordered steps:
+# A single ordered list of rules is applied to the joined transcript. Each
+# rule is one of: "regex" (pattern + replacement), "callback:lowercase-wordlist"
+# (smart German non-noun lowercaser), "callback:map" (dictation word→symbol
+# map), "callback:dedup" (collapse adjacent punctuation runs), "callback:upper"
+# (capitalize after sentence terminator), or "terminal" (final lstrip+rstrip;
+# always last). See config.py:PIPELINE_RULES for the canonical seeded list and
+# config_store.py for the Pydantic schema.
 #
-#   0. REPLACE        Apply cfg.CHARACTER_REPLACEMENTS (ordered str.replace
-#                     pairs). Default rules are ß → ss / ẞ → SS (Swiss
-#                     orthography). User-extensible for other 1→N character
-#                     substitutions.
-#   1. STRIP          Remove most punctuation, keep date/time/number separators.
-#   2. NORMALIZE      Turn "10-23" into "10/23" so number ranges aren't broken.
-#   3. STRIP — pass A Drop Whisper-emitted "."/"?"/"!" at audio pauses AND
-#                     lowercase the following word if it's a known non-noun
-#                     (interrogatives, conjunctions, articles, etc.) so
-#                     "Hallo. Wie geht's" → "Hallo wie geht's". Keeps dots
-#                     inside numbers (10.23, 11.). Regex driven by
-#                     cfg.STRIP_AND_LOWERCASE_REGEX. Skipped when empty or
-#                     when cfg.STRIP_REGEX_DISABLE is True.
-#   3. STRIP — pass B Plain strip — also catches lone ".?!" the paired pass
-#                     missed AND the soft-pause commas that used to be old
-#                     "Step 4" (between digits keeps; "1,000" survives).
-#                     Regex driven by cfg.STRIP_ONLY_REGEX. Same skip rules.
-#   4. DICTATION MAP  Replace German words with symbols ("Komma" → ",").
-#   5. TIDY SPACING   Remove stray spaces around the inserted punctuation.
-#   6. DEDUP PUNCT    Collapse runs of adjacent punctuation. Whisper emits its
-#                     own commas around dictation keywords ("..., Punkt."),
-#                     which after substitution leaves "...,." — keep only the
-#                     dictation-emitted (user-intended) mark.
-#   7. TIDY NEWLINES  Drop Whisper-emitted commas / stray whitespace around the
-#                     newlines inserted by "neue Zeile" / "neuer Absatz".
-#   8. CAPITALIZE     Capitalize the first letter after a dictation-emitted
-#                     ".", "?", "!", or newline.
-#   9. TRIM EDGES     lstrip + rstrip (preserve a single trailing newline).
-#
-# Each step's regex/lookup is precompiled in rebuild_caches() (called once at
-# module load and again from the admin WebUI when any cache-affecting field
-# changes — see config_store.CACHE_REBUILD_FIELDS).
-# -----------------------------------------------------------------------------
+# rebuild_caches() compiles each rule's regex pattern once at module load and
+# again on admin WebUI save (CACHE_REBUILD_FIELDS = {"PIPELINE_RULES"}).
+# Disabled rules and skipped types (terminal, empty patterns) are filtered
+# out of the compiled list — the runtime walker is just a tight for-loop.
 
-# --- Step 0: ordered character replacements ---------------------------------
-# Source data lives in cfg.CHARACTER_REPLACEMENTS. (str.translate can't do
-# 1->N char mapping, hence the tuple-of-replace pattern.)
-
-# --- Step 1: punctuation strip -----------------------------------------------
-# Source: cfg.PUNCTUATION_TO_KEEP. Anything else from string.punctuation is
-# removed; we also strip German low + high quotes („ ") since Whisper emits
-# them inconsistently.
-# Built once below in rebuild_caches(); admin-WebUI edits to cfg.PUNCTUATION_TO_KEEP
-# or cfg.DICTATION_MAP call rebuild_caches() to refresh.
-_PUNCTUATION_TO_REMOVE: str = ""
-_PUNCTUATION_STRIP_TABLE: dict = {}
-
-# --- Step 2: number-range normalization --------------------------------------
-# Whisper writes ranges as "10-23"; downstream consumers (vowen.ai) want "10/23".
-_NUMBER_RANGE_HYPHEN_PATTERN = re.compile(r"(\d)\s*-\s*(\d)")
-
-# --- Step 3: two-pass Whisper noise strip ----------------------------------
-# Both regexes are now driven by config (cfg.STRIP_AND_LOWERCASE_REGEX +
-# cfg.STRIP_ONLY_REGEX) and rebuilt by rebuild_caches() so the patterns are
-# editable from the admin WebUI. None when the corresponding cfg field is
-# empty (that pass becomes a guarded no-op).
-#
-# Pass A: paired strip — finds a terminator + capital word; strips terminator
-# and conditionally lowercases the next word per cfg.STRIP_AND_LOWERCASE_WORDS.
-# Pass B: plain strip — catches lone terminators the paired pass missed PLUS
-# pause-induced commas (the old standalone "Step 4" — its
-# `(?<!\d),|,(?!\d)` clause now lives in Pass B's default regex).
-_STEP3_PASS_A: "re.Pattern[str] | None" = None
-_STEP3_PASS_B: "re.Pattern[str] | None" = None
-
-# --- Step 4: German dictation map --------------------------------------------
-# Source data: cfg.DICTATION_MAP (spoken word -> literal symbol). Multi-word
-# phrases must be matched before their single-word components, which is why
-# we sort by length (longest-first) when building the alternation regex.
-
-# Regex that matches any cfg.DICTATION_MAP key, longest-first so multi-word
-# phrases beat their single-word prefixes. Built in rebuild_caches() below.
-_DICTATION_REGEX: "re.Pattern[str]" = re.compile(r"(?!x)x")  # placeholder, never matches
-# Lowercase index of the same map, used to look up the replacement after a
-# case-insensitive match (e.g. "PUNKT" or "punkt" both resolve to ".").
-_DICTATION_LOWERCASE_LOOKUP: dict[str, str] = {}
+from dataclasses import dataclass
 
 
-def rebuild_caches() -> None:
-    """Rebuild module-level caches that are derived from cfg.* values.
-
-    Called once at module load (just below) and again by the admin WebUI
-    after a config change to any name in config_store.CACHE_REBUILD_FIELDS.
-    Other cfg references in this file are read live per-request, so they
-    don't need a rebuild step.
+@dataclass(frozen=True)
+class _CompiledRule:
+    """One row of the compiled pipeline. `payload` carries type-specific data:
+      regex                       → replacement string
+      callback:lowercase-wordlist → frozenset[str] of lowercase words
+      callback:map                → dict[str_lower, str] lookup
+      callback:dedup              → None (callback hardcoded)
+      callback:upper              → None (callback hardcoded)
     """
-    global _DICTATION_REGEX, _DICTATION_LOWERCASE_LOOKUP
-    global _PUNCTUATION_TO_REMOVE, _PUNCTUATION_STRIP_TABLE
-    global _STEP3_PASS_A, _STEP3_PASS_B
-
-    _DICTATION_REGEX = re.compile(
-        r"\b(" + "|".join(re.escape(k) for k in sorted(cfg.DICTATION_MAP, key=len, reverse=True)) + r")\b",
-        re.IGNORECASE,
-    )
-    _DICTATION_LOWERCASE_LOOKUP = {k.lower(): v for k, v in cfg.DICTATION_MAP.items()}
-    _PUNCTUATION_TO_REMOVE = (
-        "".join(c for c in string.punctuation if c not in cfg.PUNCTUATION_TO_KEEP) + "„"
-    )
-    _PUNCTUATION_STRIP_TABLE = str.maketrans("", "", _PUNCTUATION_TO_REMOVE)
-
-    # Step 3 passes: compile from config strings. Empty string → that pass
-    # is skipped (None sentinel checked by the pipeline). Failed compile
-    # is a config error caught by config_store's field_validator at save
-    # time, so a runtime re.error here would only happen if config.py was
-    # hand-edited with a bad pattern — we let it surface.
-    _STEP3_PASS_A = re.compile(cfg.STRIP_AND_LOWERCASE_REGEX) if cfg.STRIP_AND_LOWERCASE_REGEX else None
-    _STEP3_PASS_B = re.compile(cfg.STRIP_ONLY_REGEX) if cfg.STRIP_ONLY_REGEX else None
+    label: str
+    type: str
+    pattern: "re.Pattern[str]"
+    payload: object
 
 
-rebuild_caches()
-
-# --- Step 5: whitespace tidy -------------------------------------------------
-# After dictation substitution, output looks like "Müller , der" or "( siehe".
-# These two patterns collapse the stray spaces. We use [ \t] (not \s) so the
-# "\n\n" emitted by "neuer Absatz" → paragraph break is left intact.
-_SPACE_BEFORE_CLOSING_PUNCT = re.compile(r"[ \t]+([,.:;!?\)\]\}])")
-_SPACE_AFTER_OPENING_PUNCT = re.compile(r"([\(\[\{])[ \t]+")
-
-# --- Step 6: deduplicate adjacent punctuation --------------------------------
-# Whisper emits its own commas as soft pauses around dictation keywords. After
-# substitution we end up with runs like ",." (Punkt), ",;" (Semikolon), ",:,"
-# (Doppelpunkt). The user's intended mark wins: prefer any non-comma in the
-# run, and within non-commas prefer the LAST one (dictation came after the
-# Whisper pause). Pure commas collapse to a single comma.
-_PUNCTUATION_RUN_PATTERN = re.compile(r"[,.:;!?]{2,}")
-
-# --- Step 7: tidy newline neighborhood ---------------------------------------
-# Around a dictation-emitted "\n" / "\n\n" we often have residue: a Whisper-
-# emitted comma ("Müller, \n"), trailing space (" \n"), or punctuation that
-# leaked through ("\n , Welt"). Collapse the whole neighborhood — optional
-# whitespace + optional comma — on each side of the newline(s) into nothing.
-# This both removes the noise AND gives clean line starts (no leading space
-# on the next line).
-_NEWLINE_NEIGHBORHOOD_PATTERN = re.compile(r"[ \t]*,?[ \t]*(\n+)[ \t]*,?[ \t]*")
-
-# --- Step 9: capitalize after sentence-ending punctuation -------------------
-# After our dictation map inserts ".", "?", "!", "\n", "\n\n", the following
-# letter should start a new sentence/paragraph in proper case. Whisper has no
-# idea about our substitution, so it leaves it lowercase.
-_CAPITALIZE_AFTER_SENTENCE_PATTERN = re.compile(r"([.?!]\s+|\n+\s*)([a-zäöüß])")
+_COMPILED_RULES: list[_CompiledRule] = []
+# Captured from the terminal rule's label in cfg.PIPELINE_RULES at cache build
+# time. Falls back to the constant below if the user removed the terminal row.
+_TERMINAL_LABEL: str = "Trim edges (always-last)"
 
 
-def _collapse_punctuation_run(match: "re.Match[str]") -> str:
+def _dedup_callback(match: "re.Match[str]") -> str:
+    """Pick the user-intended punct from a run of 2+ adjacent marks. Whisper
+    emits its own commas as soft pauses around dictation keywords; after
+    substitution we get ",." (Punkt) or ",;" (Semikolon). Prefer any non-
+    comma; within non-commas prefer the LAST (dictation came after the
+    Whisper pause). Pure commas → single comma."""
     run = match.group(0)
     non_comma = [c for c in run if c != ","]
     return non_comma[-1] if non_comma else ","
 
 
-def _apply_replacements(text: str) -> str:
-    for src, dst in cfg.CHARACTER_REPLACEMENTS:
-        text = text.replace(src, dst)
-    return text
+def _upper_callback(match: "re.Match[str]") -> str:
+    """Uppercase group(2) if the pattern produced two groups; else uppercase
+    the entire match. Default seeded pattern produces ([.?!]\\s+|\\n+\\s*)
+    + ([a-zäöüß])."""
+    try:
+        g1, g2 = match.group(1), match.group(2)
+    except IndexError:
+        return match.group(0).upper()
+    return g1 + g2.upper()
 
 
-def _apply_dictation(text: str) -> str:
-    return _DICTATION_REGEX.sub(lambda m: _DICTATION_LOWERCASE_LOOKUP[m.group(1).lower()], text)
-
-
-def _tidy_spacing(text: str) -> str:
-    text = _SPACE_BEFORE_CLOSING_PUNCT.sub(r"\1", text)
-    text = _SPACE_AFTER_OPENING_PUNCT.sub(r"\1", text)
-    return text
-
-
-def _step3_pass_a(text: str) -> str:
-    """Step 3 Pass A: paired strip — match terminator + capital-word, strip
-    the terminator and lowercase the next word IFF it's in
-    cfg.STRIP_AND_LOWERCASE_WORDS. No-op when the regex is None (empty
-    config → skipped). The regex must produce three groups:
-      group(1) = whitespace between terminator and word
-      group(2) = first letter of the word
-      group(3) = rest of the word
+def _make_lowercase_wordlist_replacer(wordlist: frozenset):
+    """Returns a regex-sub callback that strips the matched terminator and
+    lowercases group(2) IFF (group(2)+group(3)).lower() is in `wordlist`.
+    The default seeded pattern produces three groups:
+      group(1) = whitespace between terminator and next word
+      group(2) = first letter of the next word
+      group(3) = rest of the next word
+    If the user's pattern has fewer than 3 groups we degrade to plain strip.
     """
-    if _STEP3_PASS_A is None:
-        return text
     def replace(m: "re.Match[str]") -> str:
-        ws, first, rest = m.group(1), m.group(2), m.group(3)
-        if (first + rest).lower() in cfg.STRIP_AND_LOWERCASE_WORDS:
+        try:
+            ws, first, rest = m.group(1), m.group(2), m.group(3)
+        except IndexError:
+            return ""
+        if (first + rest).lower() in wordlist:
             return ws + first.lower() + rest
         return ws + first + rest
-    return _STEP3_PASS_A.sub(replace, text)
+    return replace
 
 
-def _step3_pass_b(text: str) -> str:
-    """Step 3 Pass B: plain strip — every match is removed, no side effects.
-    Default regex catches lone terminators (digit-protected) AND pause-induced
-    commas (the old standalone Step 4). No-op when None."""
-    if _STEP3_PASS_B is None:
-        return text
-    return _STEP3_PASS_B.sub("", text)
+def _make_map_replacer(lookup: dict):
+    """Returns a regex-sub callback that does a case-insensitive dict lookup
+    on the entire match. Used by callback:map rules."""
+    def replace(m: "re.Match[str]") -> str:
+        return lookup.get(m.group(0).lower(), m.group(0))
+    return replace
 
 
-def _capitalize_after_sentence(text: str) -> str:
-    text = _CAPITALIZE_AFTER_SENTENCE_PATTERN.sub(
-        lambda m: m.group(1) + m.group(2).upper(), text
-    )
-    # Also capitalize the very first letter (Whisper usually does, but VAD
-    # splits or mid-utterance starts can produce a stray lowercase).
-    if text and text[0].islower():
-        text = text[0].upper() + text[1:]
+def rebuild_caches() -> None:
+    """(Re)compile every rule in cfg.PIPELINE_RULES into _COMPILED_RULES.
+
+    Called once at module load (just below) and again by the admin WebUI
+    after a config change to PIPELINE_RULES (CACHE_REBUILD_FIELDS).
+
+    Disabled rules and the terminal row are filtered out — they don't run
+    via the walker. A rule with an invalid regex is logged + skipped (the
+    save-time validator usually catches these, but a hand-edited config.py
+    or a runtime catastrophic-backtracking case might surface here).
+    """
+    global _COMPILED_RULES, _TERMINAL_LABEL
+    compiled: list[_CompiledRule] = []
+    terminal_label = _TERMINAL_LABEL
+    for rule in cfg.PIPELINE_RULES:
+        rtype = rule.get("type")
+        if rtype == "terminal":
+            terminal_label = rule.get("label", terminal_label)
+            continue
+        if not rule.get("enabled", True):
+            continue
+
+        try:
+            if rtype == "callback:map":
+                # Auto-build alternation regex from map keys, longest-first,
+                # word-bounded, case-insensitive — matches the legacy
+                # _DICTATION_REGEX behaviour exactly.
+                m = rule.get("map", {}) or {}
+                if not m:
+                    continue
+                alternation = "|".join(re.escape(k) for k in sorted(m, key=len, reverse=True))
+                cre = re.compile(r"\b(" + alternation + r")\b", re.IGNORECASE)
+                payload: object = {k.lower(): v for k, v in m.items()}
+            else:
+                pattern = rule.get("pattern", "")
+                if not pattern:
+                    # Empty pattern on a regex rule → skip (no-op).
+                    continue
+                cre = re.compile(pattern)
+                if rtype == "regex":
+                    payload = rule.get("replacement", "") or ""
+                elif rtype == "callback:lowercase-wordlist":
+                    payload = frozenset(w.lower() for w in (rule.get("wordlist", []) or []))
+                elif rtype in ("callback:dedup", "callback:upper"):
+                    payload = None
+                else:
+                    logger.warning("[pipeline] unknown rule type %r — skipping", rtype)
+                    continue
+        except re.error as e:
+            logger.warning("[pipeline] rule %r has invalid regex (%s) — skipping",
+                           rule.get("name"), e)
+            continue
+        compiled.append(_CompiledRule(rule.get("label", rule.get("name", "?")),
+                                       rtype, cre, payload))
+    _COMPILED_RULES = compiled
+    _TERMINAL_LABEL = terminal_label
+
+
+def _apply_rule(rule: _CompiledRule, text: str) -> str:
+    """Dispatch on rule type. Hot path — keep it tight."""
+    if rule.type == "regex":
+        return rule.pattern.sub(rule.payload, text)  # type: ignore[arg-type]
+    if rule.type == "callback:lowercase-wordlist":
+        return rule.pattern.sub(_make_lowercase_wordlist_replacer(rule.payload), text)  # type: ignore[arg-type]
+    if rule.type == "callback:map":
+        return rule.pattern.sub(_make_map_replacer(rule.payload), text)  # type: ignore[arg-type]
+    if rule.type == "callback:dedup":
+        return rule.pattern.sub(_dedup_callback, text)
+    if rule.type == "callback:upper":
+        return rule.pattern.sub(_upper_callback, text)
     return text
+
+
+rebuild_caches()
 
 
 def _postprocess_text(text: str, trace: "list | None" = None) -> str:
-    """Run the 9-step pipeline above on a single piece of Whisper output.
-
-    If `trace` is provided (a list), each step that *changes* the text appends
-    a `(step_name, before, after)` tuple — the request handler uses this to
-    log a fancy diff view of what each step did.
-    """
-    def step(name: str, transform):
-        nonlocal text
+    """Run the unified pipeline rule list on `text`. If `trace` is a list,
+    each rule that changes the text appends `(label_with_ordinal, before, after)`
+    so the per-request log block can render a diff view."""
+    for ordinal, rule in enumerate(_COMPILED_RULES, start=1):
         before = text
-        text = transform(before)
+        text = _apply_rule(rule, before)
         if trace is not None and before != text:
-            trace.append((name, before, text))
-
-    step("0 REPLACE",        _apply_replacements)
-    step("1 STRIP",           lambda t: t.translate(_PUNCTUATION_STRIP_TABLE))
-    step("2 NORMALIZE",       lambda t: _NUMBER_RANGE_HYPHEN_PATTERN.sub(r"\1/\2", t))
-    # Step 3: two regex passes. Skipped entirely when STRIP_REGEX_DISABLE
-    # is set; otherwise each pass runs only when its config regex is non-empty
-    # (the helper functions guard on the compiled-regex sentinel themselves).
-    if not cfg.STRIP_REGEX_DISABLE:
-        step("3 STRIP — pass A",  _step3_pass_a)
-        step("3 STRIP — pass B",  _step3_pass_b)
-    if cfg.DICTATION_ENABLED:
-        step("4 DICTATION",       _apply_dictation)
-        step("5 TIDY SPACING",    _tidy_spacing)
-        step("6 DEDUP PUNCT",     lambda t: _PUNCTUATION_RUN_PATTERN.sub(_collapse_punctuation_run, t))
-        step("7 TIDY NEWLINES",   lambda t: _NEWLINE_NEIGHBORHOOD_PATTERN.sub(r"\1", t))
-        step("8 CAPITALIZE",      _capitalize_after_sentence)
+            trace.append((f"{ordinal} {rule.label}", before, text))
     return text
 
 
@@ -853,7 +786,6 @@ async def transcribe(
 
             for i, segment in enumerate(segments_iter):
                 raw_full_text_parts.append(segment.text)
-                clean_segment_text = _postprocess_text(segment.text)
 
                 # segment.temperature reflects CT2's actual after-fallback
                 # value (may differ from the request `temperature` if fallback
@@ -862,12 +794,19 @@ async def transcribe(
                 seg_temp = getattr(segment, "temperature", temperature)
                 seg_cr = getattr(segment, "compression_ratio", 1.0)
 
+                # NOTE: segments[].text and words[].word carry RAW Whisper
+                # output. Only the joined `text` field below is post-processed.
+                # Multi-word dictation phrases ("neue Zeile") frequently get
+                # split across VAD segment boundaries, so per-segment post-
+                # processing would produce inconsistent results — the joined
+                # pass is the authoritative one. Clients that need cleaned
+                # per-segment text should read `text` (joined) and split it.
                 segments_list.append({
                     "id": i,
                     "seek": 0,
                     "start": segment.start,
                     "end": segment.end,
-                    "text": clean_segment_text,
+                    "text": segment.text,
                     "tokens": [],
                     "temperature": seg_temp,
                     "avg_logprob": segment.avg_logprob,
@@ -888,23 +827,23 @@ async def transcribe(
                 if getattr(segment, "words", None):
                     for word in segment.words:
                         all_words.append({
-                            "word": _postprocess_text(word.word),
+                            "word": word.word,
                             "start": word.start,
                             "end": word.end,
                         })
 
-            # Strip leading whitespace fully (no leading paragraph break before
-            # the first character ever makes sense) but only trim trailing
-            # spaces/tabs — preserve a trailing "\n" emitted by "neue Zeile" /
-            # "neuer Absatz" at the end of the dictation, since the user
-            # explicitly asked for it.
+            # Terminal trim — symmetric strip of spaces/tabs/CR on BOTH
+            # edges. Preserves a leading or trailing "\n" emitted by
+            # "neue Zeile" / "neuer Absatz" at the edges of the utterance,
+            # since the user explicitly asked for the line break.
             raw_full_text = "".join(raw_full_text_parts)
             trace: "list | None" = [] if cfg.TRACE_ENABLED else None
             full_text_str = _postprocess_text(raw_full_text, trace=trace)
             before_trim = full_text_str
-            full_text_str = full_text_str.lstrip().rstrip(" \t\r")
+            full_text_str = full_text_str.lstrip(" \t\r").rstrip(" \t\r")
             if trace is not None and before_trim != full_text_str:
-                trace.append(("9 TRIM EDGES", before_trim, full_text_str))
+                trace.append((f"{len(_COMPILED_RULES) + 1} {_TERMINAL_LABEL}",
+                              before_trim, full_text_str))
 
             # Always emit the rich diagnostic block — it's how empty-output
             # failures are debugged. The per-pipeline transformation trace

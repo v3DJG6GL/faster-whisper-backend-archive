@@ -64,7 +64,6 @@ Three layers of overrides, **env wins over file wins over in-repo default**:
 | `WHISPER_MAX_LOADED_MODELS` | `MAX_LOADED_MODELS` | How many models to keep hot in VRAM (LRU eviction) |
 | `WHISPER_PRELOAD_MODELS` | `PRELOAD_MODELS` | Comma-separated list to load eagerly at startup (no first-request warm-up) |
 | `WHISPER_DEFAULT_PROMPT` | `DEFAULT_PROMPT` | Initial prompt when request omits `prompt` (empty string disables) |
-| `WHISPER_DICTATION_MAP` | `DICTATION_ENABLED` | `0` disables spoken-symbol mapping |
 | `WHISPER_TRACE` | `TRACE_ENABLED` | `0` silences per-request trace blocks |
 | `WHISPER_LOG_FILE` | `LOG_FILE` | Rotating log file path |
 | `WHISPER_ADMIN_ALLOWED_HOSTS` | `ADMIN_ALLOWED_HOSTS` | Comma-separated IPs/CIDRs allowed to reach `/config` (loopback always implicit) |
@@ -122,22 +121,18 @@ Get-Service     WhisperAPI
 
 ## Post-processing pipeline
 
-`_postprocess_text()` in `main.py` runs each request's text through 9 ordered steps:
+A single ordered list of rules — `cfg.PIPELINE_RULES` — is applied to each transcript's joined text. Each row is one of:
 
-| # | Step | What it does |
-|---|---|---|
-| 0 | REPLACE | Apply `CHARACTER_REPLACEMENTS` (ordered str.replace pairs; default `ß`→`ss`, `ẞ`→`SS`) |
-| 1 | STRIP | Drop punctuation except `./-:,?!` |
-| 2 | NORMALIZE | `10-23` → `10/23` |
-| 3 | STRIP — pass A + B | Two regex passes — Pass A: strip + lowercase next non-noun (uses `STRIP_AND_LOWERCASE_REGEX` + `STRIP_AND_LOWERCASE_WORDS`); Pass B: plain strip (uses `STRIP_ONLY_REGEX`, includes commas via the digit-protected pattern). **Skipped when `STRIP_REGEX_DISABLE=True`.** |
-| 4 | DICTATION | Replace spoken words: `Punkt` → `.`, `Komma` → `,`, `neue Zeile` → `\n`, etc. |
-| 5 | TIDY SPACING | Collapse spaces around inserted punctuation |
-| 6 | DEDUP PUNCT | Collapse `,.` / `,;` / `,:,` runs to one mark |
-| 7 | TIDY NEWLINES | Strip residue around `\n` / `\n\n` |
-| 8 | CAPITALIZE | Capitalize after `.?!` and after `\n+` |
-| 9 | TRIM EDGES | `lstrip()` + `rstrip(" \t\r")` (preserves trailing newline) |
+- `regex` — pattern + replacement (`re.sub`)
+- `callback:lowercase-wordlist` — strip terminator and lowercase next word if it's in the wordlist
+- `callback:map` — auto-built alternation of map keys (longest-first, case-insensitive); look up replacement
+- `callback:dedup` — collapse adjacent punctuation runs (last non-comma wins; pure-comma run → single comma)
+- `callback:upper` — capitalize after sentence terminator
+- `terminal` — final `lstrip(" \t\r") + rstrip(" \t\r")`; always last (preserves leading/trailing `\n`)
 
-Customize the dictation map by editing `DICTATION_MAP` and `PUNCTUATION_TO_KEEP` in `config.py` — or, with the admin WebUI enabled, from the browser at `/config`.
+The 13 seeded defaults handle Swiss German orthography (`ß`→`ss`), Whisper noise stripping, dictation (`Punkt`→`.`, `neue Zeile`→`\n`, …), and tidy spacing/newlines/capitalization. **Edit, reorder, disable, or add custom rules from the admin WebUI at `/config`** (Pipeline section). Per-row reset, list-wide reset-to-defaults, reset-order, and a full-pipeline test panel are included. Seeded rules cannot be deleted; uncheck `enabled` to disable. Custom rules (added via `+ Add custom rule`) are fully deletable.
+
+JSON response notes: `text` is the post-processed joined transcript. `segments[].text` and `words[].word` carry **raw** Whisper output (no post-processing applied to per-segment / per-word fields — multi-word dictation phrases like `"neue Zeile"` only resolve cleanly on the joined text).
 
 ## Stats dashboard
 
