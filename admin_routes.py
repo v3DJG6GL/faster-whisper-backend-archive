@@ -487,6 +487,16 @@ async function loadState() {
 function fieldDef(name) { return state.fields[name]; }
 function isEnvPinned(name) { return fieldDef(name).provenance === 'env'; }
 
+// Read the in-progress value if dirty, else the server-side saved value.
+// Used by editors that want to react to OTHER fields' live edits — e.g.
+// the DEFAULT_MODEL dropdown and PRELOAD_MODELS multi-select source their
+// option set from the current ALLOWED_MODELS, including unsaved edits.
+function currentValue(name) {
+  return Object.prototype.hasOwnProperty.call(dirty, name)
+    ? dirty[name]
+    : fieldDef(name).value;
+}
+
 function setDirty(name, value) {
   // Equality vs. server value — if user reverts manually we drop the entry
   const cur = JSON.stringify(fieldDef(name).value);
@@ -497,6 +507,11 @@ function setDirty(name, value) {
     dirty[name] = value;
   }
   $('save-btn').disabled = Object.keys(dirty).length === 0;
+  // Notify dependent editors when the model lists change. The DEFAULT_MODEL
+  // dropdown + PRELOAD_MODELS multi-select listen for this and re-render.
+  if (name === 'ALLOWED_MODELS' || name === 'PRELOAD_MODELS') {
+    document.dispatchEvent(new CustomEvent('admin:model-lists-changed'));
+  }
 }
 
 function makeBadges(name) {
@@ -551,10 +566,15 @@ function makeEditor(name) {
   if (typeof v === 'number') return numberEditor(name, v);
   if (name === 'DICTATION_MAP') return dictTableEditor(name, v || {});
   if (name === 'SWISS_ESZETT_REPLACEMENTS') return tupleListEditor(name, v || []);
+  // Model-aware editors (must precede generic Array/list dispatch). Source
+  // their options from the current ALLOWED_MODELS state — typing in the
+  // allowlist textarea live-updates these.
+  if (name === 'DEFAULT_MODEL') return modelDropdownEditor(name, v);
+  if (name === 'PRELOAD_MODELS') return modelMultiSelectEditor(name, v);
   if (Array.isArray(v)) return linesEditor(name, v);
   // Empty/missing array-shaped fields fall through here; only force a list
   // editor when we know the field is a collection by name.
-  if (name === 'ALLOWED_MODELS' || name === 'PRELOAD_MODELS'
+  if (name === 'ALLOWED_MODELS'
       || name === 'LOWERCASE_AFTER_STRIPPED_TERMINATOR'
       || name === 'ADMIN_ALLOWED_HOSTS' || name === 'STATS_ALLOWED_HOSTS') {
     return linesEditor(name, []);
@@ -572,6 +592,152 @@ function makeEditor(name) {
     return nullableNumberEditor(name, v);
   }
   return stringEditor(name, v == null ? '' : v);
+}
+
+function modelDropdownEditor(name, v) {
+  // Single-select dropdown for DEFAULT_MODEL. Options come from the current
+  // ALLOWED_MODELS (including unsaved edits in the textarea above), with a
+  // "(preloaded)" suffix on entries that are also in PRELOAD_MODELS so the
+  // user can see which choices avoid the cold-start cost. Re-renders on
+  // any change to either list.
+  //
+  // Empty ALLOWED_MODELS means "any model passes" (per config.py): falls
+  // back to a free-text input — a dropdown of nothing is useless.
+  // A current value not in ALLOWED_MODELS is preserved as a "(custom)"
+  // option so opening this page after editing the allowlist doesn't
+  // silently drop a deliberate choice.
+  const wrap = document.createElement('div');
+  function render() {
+    wrap.innerHTML = '';
+    const allowed = Array.isArray(currentValue('ALLOWED_MODELS'))
+      ? currentValue('ALLOWED_MODELS') : [];
+    const preload = new Set(Array.isArray(currentValue('PRELOAD_MODELS'))
+      ? currentValue('PRELOAD_MODELS') : []);
+    const cur = currentValue(name) || '';
+
+    if (allowed.length === 0) {
+      const i = document.createElement('input');
+      i.type = 'text'; i.value = cur;
+      i.placeholder = 'any model id (ALLOWED_MODELS is empty)';
+      i.addEventListener('input', () => setDirty(name, i.value));
+      wrap.appendChild(i);
+      const help = document.createElement('div');
+      help.className = 'help';
+      help.textContent = 'ALLOWED_MODELS is empty — free-form. Add entries above for a dropdown.';
+      wrap.appendChild(help);
+      return;
+    }
+
+    const sel = document.createElement('select');
+    let curInList = false;
+    if (!cur) {
+      // Empty default — show a placeholder "Select model..." option.
+      const ph = document.createElement('option');
+      ph.value = ''; ph.textContent = '— select a model —';
+      ph.selected = true; ph.disabled = true;
+      sel.appendChild(ph);
+    }
+    for (const m of allowed) {
+      const opt = document.createElement('option');
+      opt.value = m;
+      opt.textContent = preload.has(m) ? (m + '  (preloaded)') : m;
+      if (m === cur) { opt.selected = true; curInList = true; }
+      sel.appendChild(opt);
+    }
+    if (cur && !curInList) {
+      const opt = document.createElement('option');
+      opt.value = cur;
+      opt.textContent = cur + '  (NOT in ALLOWED_MODELS — request will fail)';
+      opt.selected = true;
+      sel.insertBefore(opt, sel.firstChild);
+    }
+    sel.addEventListener('change', () => setDirty(name, sel.value));
+    wrap.appendChild(sel);
+  }
+  render();
+  document.addEventListener('admin:model-lists-changed', render);
+  return wrap;
+}
+
+function modelMultiSelectEditor(name, v) {
+  // Checkbox list for PRELOAD_MODELS. Universe = ALLOWED_MODELS ∪ current
+  // PRELOAD entries (so a stale entry no longer in the allowlist still
+  // shows, with a warning, instead of silently disappearing). Empty
+  // ALLOWED_MODELS falls back to a textarea — same idea as the dropdown.
+  const wrap = document.createElement('div');
+  function render() {
+    wrap.innerHTML = '';
+    const allowed = Array.isArray(currentValue('ALLOWED_MODELS'))
+      ? currentValue('ALLOWED_MODELS') : [];
+    const preload = Array.isArray(currentValue(name))
+      ? currentValue(name) : [];
+    const preloadSet = new Set(preload);
+
+    if (allowed.length === 0) {
+      const t = document.createElement('textarea');
+      t.value = preload.join('\n');
+      t.rows = Math.min(Math.max(preload.length, 2), 8);
+      t.placeholder = 'one model id per line';
+      t.addEventListener('input', () => {
+        const lines = t.value.split('\n').map(s => s.trim()).filter(Boolean);
+        setDirty(name, lines);
+      });
+      wrap.appendChild(t);
+      const help = document.createElement('div');
+      help.className = 'help';
+      help.textContent = 'ALLOWED_MODELS is empty — free-form. Add entries above for checkboxes.';
+      wrap.appendChild(help);
+      return;
+    }
+
+    // Universe = allowed + any stale preload entries (preserved so the user
+    // can see + uncheck them deliberately).
+    const universe = [...allowed];
+    for (const p of preload) {
+      if (!universe.includes(p)) universe.push(p);
+    }
+
+    const list = document.createElement('div');
+    list.style.display = 'flex';
+    list.style.flexDirection = 'column';
+    list.style.gap = '4px';
+    for (const m of universe) {
+      const lbl = document.createElement('label');
+      lbl.style.display = 'flex';
+      lbl.style.gap = '6px';
+      lbl.style.alignItems = 'center';
+      lbl.style.cursor = 'pointer';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = preloadSet.has(m);
+      cb.addEventListener('change', () => {
+        const next = new Set(Array.isArray(currentValue(name)) ? currentValue(name) : []);
+        if (cb.checked) next.add(m); else next.delete(m);
+        setDirty(name, [...next]);
+      });
+      lbl.appendChild(cb);
+      const txt = document.createElement('span');
+      txt.textContent = m;
+      if (!allowed.includes(m)) {
+        const warn = document.createElement('em');
+        warn.textContent = '  (not in ALLOWED_MODELS)';
+        warn.style.color = '#f2cc60';
+        warn.style.fontStyle = 'normal';
+        txt.appendChild(warn);
+      }
+      lbl.appendChild(txt);
+      list.appendChild(lbl);
+    }
+    wrap.appendChild(list);
+    const help = document.createElement('div');
+    help.className = 'help';
+    help.textContent = 'preload at startup — first request to each is hot. '
+      + 'keep <= MAX_LOADED_MODELS to avoid LRU evicting your own preloads.';
+    wrap.appendChild(help);
+  }
+  render();
+  document.addEventListener('admin:model-lists-changed', render);
+  return wrap;
 }
 
 function nullableNumberEditor(name, v) {
