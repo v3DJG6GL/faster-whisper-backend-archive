@@ -65,6 +65,13 @@ if (-not (Test-Path $Python)) {
     & $Python -m pip install --upgrade pip
     if ($LASTEXITCODE -ne 0) { throw "pip upgrade failed (exit $LASTEXITCODE)" }
 
+    # Purge the HTTP cache after the pip upgrade. Older pip versions store
+    # cache entries in a format the upgraded pip can't deserialize, producing
+    # a "Cache entry deserialization failed" warning per package — harmless
+    # (pip re-downloads) but very noisy. Ignore failures: a clean cache is
+    # not load-bearing.
+    & $Python -m pip cache purge 2>&1 | Out-Null
+
     $reqFile = Join-Path $RepoDir "requirements.txt"
     if (Test-Path $reqFile) {
         Write-Host "Installing requirements (faster-whisper + CUDA wheels can take a few minutes)..." -ForegroundColor Cyan
