@@ -43,7 +43,7 @@ _FIELD_GROUPS: list[tuple[str, list[str]]] = [
         "MODEL_DEVICE_FALLBACK", "MODEL_COMPUTE_TYPE_FALLBACK",
     ]),
     ("Locale", [
-        "DEFAULT_LANGUAGE", "DEFAULT_PROMPT", "SWISS_ESZETT_REPLACEMENTS",
+        "DEFAULT_LANGUAGE", "DEFAULT_PROMPT", "CHARACTER_REPLACEMENTS",
     ]),
     ("Pipeline", [
         "DICTATION_ENABLED", "TRACE_ENABLED", "PUNCTUATION_TO_KEEP",
@@ -565,7 +565,7 @@ function makeEditor(name) {
   if (typeof v === 'boolean') return boolEditor(name, v);
   if (typeof v === 'number') return numberEditor(name, v);
   if (name === 'DICTATION_MAP') return dictTableEditor(name, v || {});
-  if (name === 'SWISS_ESZETT_REPLACEMENTS') return tupleListEditor(name, v || []);
+  if (name === 'CHARACTER_REPLACEMENTS') return tupleListEditor(name, v || []);
   // Model-aware editors (must precede generic Array/list dispatch). Source
   // their options from the current ALLOWED_MODELS state — typing in the
   // allowlist textarea live-updates these.

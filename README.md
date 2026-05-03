@@ -126,7 +126,7 @@ Get-Service     WhisperAPI
 
 | # | Step | What it does |
 |---|---|---|
-| 0 | SWISSIFY | `ß` → `ss`, `ẞ` → `SS` |
+| 0 | REPLACE | Apply `CHARACTER_REPLACEMENTS` (ordered str.replace pairs; default `ß`→`ss`, `ẞ`→`SS`) |
 | 1 | STRIP | Drop punctuation except `./-:,?!` |
 | 2 | NORMALIZE | `10-23` → `10/23` |
 | 3 | STRIP TERMS | Strip Whisper-emitted `.?!` and lowercase the next word if it's a known German non-noun |

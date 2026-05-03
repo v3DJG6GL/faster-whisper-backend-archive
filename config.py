@@ -95,10 +95,23 @@ DEFAULT_PROMPT: "str | None" = (
     "Hausarzt, Praxis, Krankenkasse, Dr. med., FMH, CHF, Herr, Frau."
 )
 
-# Swiss German doesn't use ß; "Strasse" not "Straße", "weiss" not "weiß", etc.
-# Whisper's German model emits ß, so we replace it before any other rules run.
-# (str.translate can't do 1->2 char mapping, hence str.replace via tuple.)
-SWISS_ESZETT_REPLACEMENTS = (("ß", "ss"), ("ẞ", "SS"))
+# Ordered list of (from, to) character substitutions applied to the raw
+# Whisper output BEFORE any other pipeline step. Use it for orthographic
+# normalisation that should be invisible to the rest of the pipeline.
+#
+# Default: ß → ss / ẞ → SS for Swiss German (Whisper's German model emits
+# ß, but Swiss orthography uses "ss": "Strasse" not "Straße"). Add your own
+# rules — e.g. ("ae", "ä") to expand ASCII transliterations, or any other
+# 1-to-N character mapping. (str.translate can't do 1→N, which is why this
+# is a tuple list of str.replace pairs rather than a translation table.)
+#
+# Caveats:
+#  - Plain str.replace, no word boundaries: ("ae", "ä") would also rewrite
+#    "Caesar" → "Cäsar" and "haematology" → "hämatology". Add it only if
+#    your input is exclusively German.
+#  - Substitutions run in order. Don't include both ("ä", "ae") and
+#    ("ae", "ä") — the second would undo the first.
+CHARACTER_REPLACEMENTS = (("ß", "ss"), ("ẞ", "SS"))
 
 
 # =============================================================================

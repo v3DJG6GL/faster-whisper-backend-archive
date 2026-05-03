@@ -106,7 +106,7 @@ class AdminConfig(BaseModel):
     # --- Locale ---
     DEFAULT_LANGUAGE: Annotated[str, Field(pattern=r"^[a-z]{2}$")] | None = None
     DEFAULT_PROMPT: Annotated[str, Field(max_length=2048)] | None = None
-    SWISS_ESZETT_REPLACEMENTS: list[tuple[
+    CHARACTER_REPLACEMENTS: list[tuple[
         Annotated[str, Field(min_length=1, max_length=4)],
         Annotated[str, Field(max_length=8)],
     ]] | None = None
@@ -198,13 +198,13 @@ class AdminConfig(BaseModel):
             raise ValueError(f"capped at 1000 entries (got {len(v)})")
         return v
 
-    @field_validator("SWISS_ESZETT_REPLACEMENTS")
+    @field_validator("CHARACTER_REPLACEMENTS")
     @classmethod
     def _cap_replacements(cls, v: list[Any] | None) -> list[Any] | None:
         if v is None:
             return v
         if len(v) > 32:
-            raise ValueError("SWISS_ESZETT_REPLACEMENTS capped at 32 entries")
+            raise ValueError("CHARACTER_REPLACEMENTS capped at 32 entries")
         return v
 
     @field_validator("ADMIN_ALLOWED_HOSTS", "STATS_ALLOWED_HOSTS")
@@ -229,7 +229,7 @@ class AdminConfig(BaseModel):
 _POST_LOAD_COERCERS: dict[str, Any] = {
     "ALLOWED_MODELS": set,
     "LOWERCASE_AFTER_STRIPPED_TERMINATOR": frozenset,
-    "SWISS_ESZETT_REPLACEMENTS": lambda items: tuple(tuple(p) for p in items),
+    "CHARACTER_REPLACEMENTS": lambda items: tuple(tuple(p) for p in items),
 }
 
 

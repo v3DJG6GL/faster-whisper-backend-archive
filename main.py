@@ -113,7 +113,10 @@ from faster_whisper import WhisperModel
 # German, which uses "ss" instead. `_postprocess_text()` reshapes the output
 # in ten ordered steps:
 #
-#   0. SWISSIFY       Replace ß → ss / ẞ → SS (Swiss orthography).
+#   0. REPLACE        Apply cfg.CHARACTER_REPLACEMENTS (ordered str.replace
+#                     pairs). Default rules are ß → ss / ẞ → SS (Swiss
+#                     orthography). User-extensible for other 1→N character
+#                     substitutions.
 #   1. STRIP          Remove most punctuation, keep date/time/number separators.
 #   2. NORMALIZE      Turn "10-23" into "10/23" so number ranges aren't broken.
 #   3. STRIP TERMS    Drop Whisper-emitted "."/"?"/"!" at audio pauses, AND
@@ -141,9 +144,9 @@ from faster_whisper import WhisperModel
 # rebuilt on every transcription request).
 # -----------------------------------------------------------------------------
 
-# --- Step 0: Swiss-German orthography ----------------------------------------
-# Source data lives in cfg.SWISS_ESZETT_REPLACEMENTS. (str.translate can't do
-# 1->2 char mapping, hence the tuple-of-replace pattern.)
+# --- Step 0: ordered character replacements ---------------------------------
+# Source data lives in cfg.CHARACTER_REPLACEMENTS. (str.translate can't do
+# 1->N char mapping, hence the tuple-of-replace pattern.)
 
 # --- Step 1: punctuation strip -----------------------------------------------
 # Source: cfg.PUNCTUATION_TO_KEEP. Anything else from string.punctuation is
@@ -250,8 +253,8 @@ def _collapse_punctuation_run(match: "re.Match[str]") -> str:
     return non_comma[-1] if non_comma else ","
 
 
-def _swissify(text: str) -> str:
-    for src, dst in cfg.SWISS_ESZETT_REPLACEMENTS:
+def _apply_replacements(text: str) -> str:
+    for src, dst in cfg.CHARACTER_REPLACEMENTS:
         text = text.replace(src, dst)
     return text
 
@@ -305,7 +308,7 @@ def _postprocess_text(text: str, trace: "list | None" = None) -> str:
         if trace is not None and before != text:
             trace.append((name, before, text))
 
-    step("0 SWISSIFY",       _swissify)
+    step("0 REPLACE",        _apply_replacements)
     step("1 STRIP",          lambda t: t.translate(_PUNCTUATION_STRIP_TABLE))
     step("2 NORMALIZE",      lambda t: _NUMBER_RANGE_HYPHEN_PATTERN.sub(r"\1/\2", t))
     step("3 STRIP TERMS",    _strip_whisper_terminators)
