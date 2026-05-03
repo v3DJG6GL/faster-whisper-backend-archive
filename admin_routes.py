@@ -866,7 +866,10 @@ async function doRestart() {
   // Poll /v1/models. We need to see the service genuinely go DOWN first
   // (failed fetch), then come back UP. Until we see a down poll we never
   // declare success — otherwise an unchanged service satisfies the check.
-  const deadline = Date.now() + 60000;
+  // Deadline is generous because PRELOAD_MODELS blocks uvicorn's lifespan
+  // startup — N preloads × ~5-10 s per large-v3 = up to several minutes.
+  const RESTART_TIMEOUT_MS = 5 * 60 * 1000;
+  const deadline = Date.now() + RESTART_TIMEOUT_MS;
   let sawDown = false;
   while (Date.now() < deadline) {
     await new Promise(r => setTimeout(r, 1000));
@@ -881,12 +884,14 @@ async function doRestart() {
       if (!m.ok) sawDown = true;
     } catch {
       sawDown = true;
-      $('restart-progress-msg').textContent = 'Service is down; waiting for it to come back.';
+      $('restart-progress-msg').textContent =
+        'Service is down; waiting for it to come back '
+        + '(may take a few minutes if PRELOAD_MODELS is large).';
     }
   }
   $('restart-progress-msg').textContent =
-    "Service didn't come back within 60 s. Check `Get-Service WhisperAPI` and "
-    + "the log viewer at /logs.";
+    "Service didn't come back within " + (RESTART_TIMEOUT_MS / 60000) + " min. "
+    + "Check `Get-Service WhisperAPI` and the log viewer at /logs.";
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
