@@ -36,36 +36,57 @@ logger = logging.getLogger("whisper-api")
 # Fields the WebUI is allowed to surface. Keep this as the single source of
 # truth for the form layout — drives section grouping in the HTML and the
 # /config/state endpoint's provenance map.
-_FIELD_GROUPS: list[tuple[str, list[str]]] = [
-    ("Models", [
+# Section groups: each section can have one or more SUB-groups. A subgroup
+# title of None means "no subheader" — fields render directly under the
+# section. Section titles mirror the per-request log block phases (Decode
+# params / Pipeline / …) so an operator reading a log can find the matching
+# config knobs by section name with no translation.
+_FIELD_GROUPS: list[tuple[str, list[tuple[str | None, list[str]]]]] = [
+    ("Models", [(None, [
         "DEFAULT_MODEL", "ALLOWED_MODELS", "PRELOAD_MODELS", "MAX_LOADED_MODELS",
         "MODEL_DEVICE", "MODEL_COMPUTE_TYPE",
         "MODEL_DEVICE_FALLBACK", "MODEL_COMPUTE_TYPE_FALLBACK",
-    ]),
-    ("Locale", [
-        "DEFAULT_LANGUAGE", "DEFAULT_PROMPT", "CHARACTER_REPLACEMENTS",
-    ]),
-    ("Pipeline", [
-        "DICTATION_ENABLED", "TRUST_MODEL_PUNCTUATION", "TRACE_ENABLED",
-        "PUNCTUATION_TO_KEEP", "DICTATION_MAP",
-        "LOWERCASE_AFTER_STRIPPED_TERMINATOR",
-    ]),
-    ("Whisper transcribe", [
+    ])]),
+    ("Decode params", [(None, [
+        "DEFAULT_LANGUAGE", "DEFAULT_PROMPT",
         "BEAM_SIZE", "BEST_OF",
         "VAD_FILTER", "VAD_MIN_SILENCE_MS", "VAD_SPEECH_PAD_MS", "VAD_THRESHOLD",
         "CONDITION_ON_PREVIOUS_TEXT", "WORD_TIMESTAMPS_ENABLED",
         "NO_SPEECH_THRESHOLD", "LOG_PROB_THRESHOLD", "COMPRESSION_RATIO_THRESHOLD",
+    ])]),
+    ("Pipeline", [
+        ("Step 0 — character replacements", ["CHARACTER_REPLACEMENTS"]),
+        ("Step 1 — punctuation strip",      ["PUNCTUATION_TO_KEEP"]),
+        ("Step 3 — Whisper noise strip",    [
+            "STRIP_REGEX_DISABLE",
+            "STRIP_AND_LOWERCASE_REGEX",
+            "STRIP_AND_LOWERCASE_WORDS",
+            "STRIP_ONLY_REGEX",
+        ]),
+        ("Steps 4-8 — dictation pipeline",  [
+            "DICTATION_ENABLED", "DICTATION_MAP", "TRACE_ENABLED",
+        ]),
     ]),
-    ("Logging", [
+    ("Logging", [(None, [
         "LOG_FILE", "LOG_MAX_BYTES", "LOG_BACKUP_COUNT",
-    ]),
-    ("Server (uvicorn)", [
+    ])]),
+    ("Server (uvicorn)", [(None, [
         "SERVER_HOST", "SERVER_PORT", "SERVER_WORKERS", "SERVER_LOG_LEVEL",
-    ]),
-    ("Access (allowlists)", [
+    ])]),
+    ("Access (allowlists)", [(None, [
         "ADMIN_ALLOWED_HOSTS", "STATS_ALLOWED_HOSTS",
-    ]),
+    ])]),
 ]
+
+
+def _all_fields() -> list[str]:
+    """Flat list of every field name across all sections + subgroups, in
+    display order. Used by the /state endpoint and post_state echo paths."""
+    out: list[str] = []
+    for _section, subs in _FIELD_GROUPS:
+        for _sub_title, names in subs:
+            out.extend(names)
+    return out
 
 
 # --- auth deps ---------------------------------------------------------------
@@ -143,20 +164,57 @@ async def get_state() -> dict[str, Any]:
     user where the value is coming from."""
     saved = config_store.load_overrides()
     env_pinned = config_store.env_pinned_fields()
+    baseline = getattr(cfg, "_BASELINE", {}) or {}
+    field_descs = config_store.FIELD_DESCRIPTIONS
+    pyd_fields = config_store.AdminConfig.model_fields
+
+    def _baseline_value(name: str) -> Any:
+        # Used by the WebUI's "↺ Reset" button. Returns the in-repo default
+        # captured in cfg._BASELINE before local.json + env overrides apply.
+        # Convert non-JSON-serializable types (set, frozenset, tuple of
+        # tuples) the same way _resolved_value does so the round-trip is clean.
+        v = baseline.get(name)
+        if isinstance(v, (set, frozenset)):
+            return sorted(v)
+        if isinstance(v, tuple):
+            return [list(p) if isinstance(p, tuple) else p for p in v]
+        return v
 
     fields: dict[str, dict[str, Any]] = {}
-    for _section, names in _FIELD_GROUPS:
-        for name in names:
-            fields[name] = {
-                "value": _resolved_value(name),
-                "provenance": _provenance(name, env_pinned, saved),
-                "env_var": env_pinned.get(name),
-                "restart_required": name in config_store.RESTART_REQUIRED_FIELDS,
-            }
+    for name in _all_fields():
+        # Description preference: Pydantic schema > FIELD_DESCRIPTIONS dict
+        # (they're the same string in practice; schema wins so reload picks
+        # up live edits to FIELD_DESCRIPTIONS without a service restart).
+        desc = ""
+        if name in pyd_fields and pyd_fields[name].description:
+            desc = pyd_fields[name].description
+        elif name in field_descs:
+            desc = field_descs[name]
+        fields[name] = {
+            "value": _resolved_value(name),
+            "default_value": _baseline_value(name),
+            "description": desc,
+            "provenance": _provenance(name, env_pinned, saved),
+            "env_var": env_pinned.get(name),
+            "restart_required": name in config_store.RESTART_REQUIRED_FIELDS,
+        }
+
+    # Surface the nested group structure to the client. Each group has a list
+    # of subgroups: {title, subgroups: [{title: str | None, fields: [...]}]}.
+    groups_payload = [
+        {
+            "title": section,
+            "subgroups": [
+                {"title": sub_title, "fields": names}
+                for sub_title, names in subs
+            ],
+        }
+        for section, subs in _FIELD_GROUPS
+    ]
 
     return {
         "fields": fields,
-        "groups": [{"title": title, "fields": names} for title, names in _FIELD_GROUPS],
+        "groups": groups_payload,
         "token_required": bool(cfg.ADMIN_TOKEN),
         "service_name": "WhisperAPI",
     }
@@ -226,6 +284,99 @@ async def post_state(payload: dict[str, Any], request: Request) -> JSONResponse:
         "cold_pending": cold_changed,
         "env_pinned_ignored": sorted(n for n in written if n in env_pinned),
         "requires_restart": bool(cold_changed),
+    })
+
+
+@router.post("/test-regex",
+             dependencies=[Depends(require_admin_host), Depends(require_admin_token)])
+async def test_regex(payload: dict[str, Any]) -> JSONResponse:
+    """Validate + dry-run the Step-3 regex pair against a sample.
+
+    Used by the WebUI's regex-editor live-validation badge AND the inline
+    test panel. Each non-empty regex is compiled and run under a 2 s
+    timeout against the supplied sample; the response carries per-pass
+    diff data so the UI can highlight matches and show the final result.
+
+    Payload shape: { sample: str, regex_a: str, regex_b: str, words: list[str] }
+    Response shape: {
+      pass_a: { compiled, error, matches, slow, result, lowercased },
+      pass_b: { compiled, error, matches, slow,  result },
+      final: str,
+    }
+    """
+    import threading
+
+    sample = str(payload.get("sample") or "")
+    regex_a = str(payload.get("regex_a") or "")
+    regex_b = str(payload.get("regex_b") or "")
+    words = {str(w).lower() for w in (payload.get("words") or [])}
+
+    def _compile_and_run(pattern: str, replacer):
+        """Returns dict with compiled / error / matches / slow / result."""
+        if not pattern:
+            return {"compiled": False, "error": None, "matches": [],
+                    "slow": False, "result": sample, "skipped": True}
+        try:
+            cre = re.compile(pattern)
+        except re.error as e:
+            return {"compiled": False, "error": str(e), "matches": [],
+                    "slow": False, "result": sample, "skipped": False}
+
+        # Timeout-guarded run on a worker thread. The `re` module has no
+        # native timeout, so we just don't wait past 2 s — the work itself
+        # may continue in the daemon thread but we return early.
+        out: dict[str, Any] = {"done": False, "matches": [], "result": sample,
+                               "lowercased": []}
+        def _run() -> None:
+            try:
+                # Collect match positions for highlighting before sub() runs.
+                out["matches"] = [
+                    {"start": m.start(), "end": m.end(), "text": m.group(0)}
+                    for m in cre.finditer(sample)
+                ]
+                if replacer is None:
+                    out["result"] = cre.sub("", sample)
+                else:
+                    lc: list[str] = []
+                    def _wrap(m: "re.Match[str]") -> str:
+                        return replacer(m, lc)
+                    out["result"] = cre.sub(_wrap, sample)
+                    out["lowercased"] = lc
+                out["done"] = True
+            except Exception as e:    # noqa: BLE001 — surface any error
+                out["error"] = str(e)
+                out["done"] = True
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        t.join(timeout=2.0)
+        if not out["done"]:
+            return {"compiled": True, "error": None, "matches": [],
+                    "slow": True, "result": sample, "skipped": False,
+                    "timeout": "regex did not complete in 2 s on the sample"}
+        return {"compiled": True, "error": out.get("error"),
+                "matches": out["matches"], "slow": False,
+                "result": out["result"], "skipped": False,
+                "lowercased": out.get("lowercased", [])}
+
+    # Pass A replacer: strip terminator, conditionally lowercase next word.
+    # Mirrors main.py's _step3_pass_a.replace exactly.
+    def _pass_a_replacer(m: "re.Match[str]", lc_log: list[str]) -> str:
+        try:
+            ws, first, rest = m.group(1), m.group(2), m.group(3)
+        except IndexError:
+            # Custom regex didn't produce 3 groups — degrade to plain strip.
+            return ""
+        if (first + rest).lower() in words:
+            lc_log.append(first + rest)
+            return ws + first.lower() + rest
+        return ws + first + rest
+
+    pa = _compile_and_run(regex_a, _pass_a_replacer)
+    pb = _compile_and_run(regex_b, None)
+    return JSONResponse({
+        "pass_a": pa,
+        "pass_b": pb,
+        "final": pb.get("result") if pb.get("compiled") and not pb.get("error") else pa.get("result"),
     })
 
 
@@ -341,6 +492,49 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
      edit if they want — we just signal "this is currently unused". */
   .field.dep-irrelevant { opacity: 0.45; }
   .field.dep-irrelevant .input-col { filter: grayscale(0.6); }
+  /* Subgroup heading inside a section: smaller than h2, lighter weight,
+     small dividing line so it's visibly distinct from the section header
+     but doesn't draw the eye like a top-level section change. */
+  h3.subgroup { color: var(--dim); font-size: 12px; font-weight: 500;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    margin: 14px 0 6px 0; padding-bottom: 3px;
+    border-bottom: 1px solid var(--border); }
+  /* Reset-to-default link button — small, italic, only visible when the
+     current value differs from the in-repo default. Sits below the help
+     text, so it doesn't crowd the editor itself. */
+  .reset-wrap { margin-top: 4px; }
+  .reset-link { background: none; border: none; padding: 0;
+    color: var(--cyan); cursor: pointer; font: inherit; font-size: 11px;
+    font-style: italic; text-decoration: underline; text-underline-offset: 2px; }
+  .reset-link:hover { color: var(--bold); }
+  /* Regex editor + status badge */
+  .regex-wrap { display: flex; flex-direction: column; gap: 4px; }
+  .regex-status { font-size: 11px; font-family: ui-monospace, Menlo, monospace; }
+  .regex-status.ok { color: var(--green); }
+  .regex-status.err { color: var(--red); }
+  .regex-status.warn { color: var(--yellow); }
+  .regex-status.empty { color: var(--dim); font-style: italic; }
+  /* Advanced warning banner above the Step 3 fields */
+  .advanced-warn { background: #2d1f0a; color: #f2cc60; border-left: 3px solid #f2cc60;
+    padding: 6px 10px; margin: 8px 0; border-radius: 3px; font-size: 12px; }
+  /* Test panel */
+  .regex-test-panel { background: #161b22; border: 1px solid var(--border);
+    border-radius: 4px; padding: 10px 12px; margin: 8px 0 14px 0; }
+  .regex-test-out { margin-top: 10px; }
+  .regex-test-pass { margin: 6px 0; }
+  .regex-test-head { font-family: ui-monospace, Menlo, monospace; font-size: 12px;
+    color: var(--dim); }
+  .regex-test-head .tag { display: inline-block; padding: 0 6px; margin-left: 6px;
+    border-radius: 3px; font-size: 11px; }
+  .regex-test-head .tag.ok { background: #033a16; color: #7ee787; }
+  .regex-test-head .tag.err { background: #3a0d0d; color: #ff7b72; }
+  .regex-test-head .tag.warn { background: #2d1f0a; color: #f2cc60; }
+  .regex-test-head .tag.empty { background: #21262d; color: var(--dim); font-style: italic; }
+  .regex-test-result { background: #0d1117; border: 1px solid var(--border);
+    padding: 4px 8px; border-radius: 3px; margin: 4px 0;
+    font-family: ui-monospace, Menlo, monospace; font-size: 12px;
+    white-space: pre-wrap; word-break: break-word; max-height: 120px; overflow: auto; }
+  .regex-test-final { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
   .field .dep-note { color: var(--dim); font-size: 11px; margin-top: 3px;
     font-style: italic; }
   /* Nullable-number editor in its disabled (null) state — greyed input,
@@ -523,6 +717,9 @@ function setDirty(name, value) {
   if (name === 'ALLOWED_MODELS' || name === 'PRELOAD_MODELS') {
     document.dispatchEvent(new CustomEvent('admin:model-lists-changed'));
   }
+  // Notify per-field listeners (currently the ↺ Reset button) so they can
+  // refresh their "value differs from default?" display.
+  document.dispatchEvent(new CustomEvent('admin:dirty', { detail: { name } }));
   // Re-evaluate "is row X irrelevant given the current state of toggle Y?"
   // Cheap (handful of fields), runs after every edit so the UI tracks live.
   applyFieldDependencies();
@@ -537,9 +734,19 @@ const _FIELD_DEPS = {
     irrelevant: () => currentValue('DICTATION_ENABLED') === false,
     note: 'unused while DICTATION_ENABLED is off',
   },
-  LOWERCASE_AFTER_STRIPPED_TERMINATOR: {
-    irrelevant: () => currentValue('TRUST_MODEL_PUNCTUATION') === true,
-    note: 'unused while TRUST_MODEL_PUNCTUATION is on (Step 3 STRIP TERMS is skipped)',
+  STRIP_AND_LOWERCASE_REGEX: {
+    irrelevant: () => currentValue('STRIP_REGEX_DISABLE') === true,
+    note: 'unused while STRIP_REGEX_DISABLE is on (both Step 3 passes skipped)',
+  },
+  STRIP_AND_LOWERCASE_WORDS: {
+    irrelevant: () =>
+      currentValue('STRIP_REGEX_DISABLE') === true
+      || currentValue('STRIP_AND_LOWERCASE_REGEX') === '',
+    note: 'unused when STRIP_REGEX_DISABLE is on or STRIP_AND_LOWERCASE_REGEX is empty (Pass A skipped)',
+  },
+  STRIP_ONLY_REGEX: {
+    irrelevant: () => currentValue('STRIP_REGEX_DISABLE') === true,
+    note: 'unused while STRIP_REGEX_DISABLE is on (both Step 3 passes skipped)',
   },
 };
 
@@ -601,6 +808,51 @@ function fieldRow(name) {
   const inputCol = document.createElement('div');
   inputCol.className = 'input-col';
   inputCol.appendChild(makeEditor(name));
+
+  // Inline description from FIELD_DESCRIPTIONS (single source of truth).
+  // Surfaced via /config/state's per-field payload.
+  const desc = fieldDef(name).description;
+  if (desc) {
+    const help = document.createElement('div');
+    help.className = 'help';
+    help.textContent = desc;
+    inputCol.appendChild(help);
+  }
+
+  // ↺ Reset link button — appears whenever the current value differs from
+  // the in-repo baseline (cfg._BASELINE). Clicking sets the field to the
+  // baseline value, marking it dirty so the save button enables. Recovery
+  // path for "I broke a regex / typed the wrong number".
+  const resetWrap = document.createElement('div');
+  resetWrap.className = 'reset-wrap';
+  const resetBtn = document.createElement('button');
+  resetBtn.type = 'button';
+  resetBtn.className = 'reset-link';
+  resetBtn.textContent = '↺ Reset to default';
+  resetBtn.title = 'Restore the in-repo default value';
+  resetBtn.addEventListener('click', () => {
+    const def = fieldDef(name).default_value;
+    setDirty(name, def);
+    // Re-render this row so the editor reflects the new value.
+    const newRow = fieldRow(name);
+    row.replaceWith(newRow);
+  });
+  resetWrap.appendChild(resetBtn);
+  inputCol.appendChild(resetWrap);
+  // Toggle reset visibility on every input event by checking dirty + current.
+  function refreshReset() {
+    const cur = currentValue(name);
+    const def = fieldDef(name).default_value;
+    const same = JSON.stringify(cur) === JSON.stringify(def);
+    resetWrap.style.display = same ? 'none' : '';
+  }
+  refreshReset();
+  // Subscribe to dirty changes for this field via a custom event we'll fire
+  // from setDirty(). Simpler than wiring per-editor change listeners.
+  document.addEventListener('admin:dirty', (e) => {
+    if (!e.detail || e.detail.name === name) refreshReset();
+  });
+
   row.appendChild(inputCol);
   return row;
 }
@@ -619,11 +871,16 @@ function makeEditor(name) {
   // allowlist textarea live-updates these.
   if (name === 'DEFAULT_MODEL') return modelDropdownEditor(name, v);
   if (name === 'PRELOAD_MODELS') return modelMultiSelectEditor(name, v);
+  // Regex fields — special editor with live validation badge + per-step
+  // test panel (rendered once per "Whisper noise strip" subgroup).
+  if (name === 'STRIP_AND_LOWERCASE_REGEX' || name === 'STRIP_ONLY_REGEX') {
+    return regexEditor(name, v == null ? '' : v);
+  }
   if (Array.isArray(v)) return linesEditor(name, v);
   // Empty/missing array-shaped fields fall through here; only force a list
   // editor when we know the field is a collection by name.
   if (name === 'ALLOWED_MODELS'
-      || name === 'LOWERCASE_AFTER_STRIPPED_TERMINATOR'
+      || name === 'STRIP_AND_LOWERCASE_WORDS'
       || name === 'ADMIN_ALLOWED_HOSTS' || name === 'STATS_ALLOWED_HOSTS') {
     return linesEditor(name, []);
   }
@@ -785,6 +1042,181 @@ function modelMultiSelectEditor(name, v) {
   }
   render();
   document.addEventListener('admin:model-lists-changed', render);
+  return wrap;
+}
+
+function regexEditor(name, v) {
+  // Mono-font input with a live status badge below it.
+  // Validation states:
+  //   ✓ valid · matches N in sample · M chars   (green)
+  //   ✗ <re.error>                              (red, blocks save via 422 on save)
+  //   ⚠ slow (timed out at 2 s)                 (yellow, allows save with warn)
+  //   ∅ empty — pass skipped                    (grey, italic)
+  // Status updates on every keystroke via debounced POST /config/test-regex.
+  const wrap = document.createElement('div');
+  wrap.className = 'regex-wrap';
+
+  const ta = document.createElement('input');
+  ta.type = 'text';
+  ta.spellcheck = false;
+  ta.autocomplete = 'off';
+  ta.value = v || '';
+  ta.style.fontFamily = 'ui-monospace, Menlo, Consolas, monospace';
+  ta.style.fontSize = '12px';
+  ta.style.width = '100%';
+  ta.style.boxSizing = 'border-box';
+
+  const status = document.createElement('div');
+  status.className = 'regex-status';
+  status.textContent = '∅ empty — pass skipped';
+
+  // Debounced live test against the default sample (the test panel
+  // overrides the sample if open). 250 ms is comfortable for typing.
+  let timer = null;
+  async function refreshStatus() {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(async () => {
+      const cur = currentValue(name) || '';
+      if (!cur) {
+        status.className = 'regex-status empty';
+        status.textContent = '∅ empty — pass skipped';
+        return;
+      }
+      // Use the test panel's current sample if visible, else the default.
+      const panelSample = document.getElementById('regex-test-sample');
+      const sample = panelSample ? panelSample.value : DEFAULT_REGEX_SAMPLE;
+      const r = await api('POST', '/config/test-regex', {
+        sample,
+        regex_a: name === 'STRIP_AND_LOWERCASE_REGEX' ? cur : '',
+        regex_b: name === 'STRIP_ONLY_REGEX'          ? cur : '',
+        words: currentValue('STRIP_AND_LOWERCASE_WORDS') || [],
+      });
+      if (!r.ok) {
+        status.className = 'regex-status err';
+        status.textContent = '✗ test endpoint error';
+        return;
+      }
+      const j = await r.json();
+      const pass = name === 'STRIP_AND_LOWERCASE_REGEX' ? j.pass_a : j.pass_b;
+      if (pass.error) {
+        status.className = 'regex-status err';
+        status.textContent = '✗ ' + pass.error;
+      } else if (pass.slow) {
+        status.className = 'regex-status warn';
+        status.textContent = '⚠ slow — exceeded 2 s on sample (catastrophic backtracking?)';
+      } else {
+        status.className = 'regex-status ok';
+        const n = (pass.matches || []).length;
+        status.textContent = '✓ valid · ' + n + ' match' + (n === 1 ? '' : 'es')
+                             + ' in sample · ' + cur.length + ' chars';
+      }
+    }, 250);
+  }
+
+  ta.addEventListener('input', () => {
+    setDirty(name, ta.value);
+    refreshStatus();
+  });
+  // Refresh once on initial render (so the badge isn't blank).
+  // Run after the row is in the DOM — defer with rAF.
+  requestAnimationFrame(refreshStatus);
+
+  wrap.appendChild(ta);
+  wrap.appendChild(status);
+  return wrap;
+}
+
+const DEFAULT_REGEX_SAMPLE =
+  "Hallo. Wie geht's? 10.23 Uhr! Bitte Frau, Müller. neuer Absatz. 1,000 EUR.";
+
+function regexTestPanel() {
+  // One panel per Step-3 subgroup. Inserted once via the toggle in the
+  // <h3 class="subgroup"> banner. Editable sample, run-against-both-passes
+  // button, per-pass diff render, final output row.
+  const wrap = document.createElement('div');
+  wrap.className = 'regex-test-panel';
+
+  const sampleLbl = document.createElement('div');
+  sampleLbl.className = 'help';
+  sampleLbl.textContent = 'Test sample (edit to try your own):';
+  wrap.appendChild(sampleLbl);
+
+  const sample = document.createElement('textarea');
+  sample.id = 'regex-test-sample';
+  sample.value = DEFAULT_REGEX_SAMPLE;
+  sample.rows = 2;
+  sample.style.width = '100%';
+  sample.style.boxSizing = 'border-box';
+  sample.style.fontFamily = 'ui-monospace, Menlo, Consolas, monospace';
+  sample.style.fontSize = '12px';
+  wrap.appendChild(sample);
+
+  const runBtn = document.createElement('button');
+  runBtn.type = 'button';
+  runBtn.textContent = 'Run test';
+  runBtn.style.marginTop = '6px';
+  wrap.appendChild(runBtn);
+
+  const out = document.createElement('div');
+  out.className = 'regex-test-out';
+  wrap.appendChild(out);
+
+  async function run() {
+    out.innerHTML = '<em>running…</em>';
+    const r = await api('POST', '/config/test-regex', {
+      sample: sample.value,
+      regex_a: currentValue('STRIP_AND_LOWERCASE_REGEX') || '',
+      regex_b: currentValue('STRIP_ONLY_REGEX') || '',
+      words: currentValue('STRIP_AND_LOWERCASE_WORDS') || [],
+    });
+    if (!r.ok) { out.innerHTML = '<em class="err">test endpoint error</em>'; return; }
+    const j = await r.json();
+    const block = (label, pass) => {
+      const p = document.createElement('div');
+      p.className = 'regex-test-pass';
+      const head = document.createElement('div');
+      head.className = 'regex-test-head';
+      head.textContent = label + ': ';
+      const tag = document.createElement('span');
+      if (pass.skipped) {
+        tag.className = 'tag empty'; tag.textContent = 'skipped';
+      } else if (pass.error) {
+        tag.className = 'tag err'; tag.textContent = '✗ ' + pass.error;
+      } else if (pass.slow) {
+        tag.className = 'tag warn'; tag.textContent = '⚠ slow';
+      } else {
+        tag.className = 'tag ok'; tag.textContent = '✓ ' + (pass.matches || []).length + ' matches';
+      }
+      head.appendChild(tag);
+      p.appendChild(head);
+
+      if (!pass.skipped && !pass.error) {
+        const res = document.createElement('pre');
+        res.className = 'regex-test-result';
+        res.textContent = pass.result;
+        p.appendChild(res);
+        if (pass.lowercased && pass.lowercased.length) {
+          const lc = document.createElement('div');
+          lc.className = 'help';
+          lc.textContent = 'lowercased: ' + pass.lowercased.join(', ');
+          p.appendChild(lc);
+        }
+      }
+      return p;
+    };
+    out.innerHTML = '';
+    out.appendChild(block('Pass A', j.pass_a));
+    out.appendChild(block('Pass B', j.pass_b));
+    const finalRow = document.createElement('div');
+    finalRow.className = 'regex-test-final';
+    finalRow.innerHTML = '<strong>Final →</strong> ';
+    const fpre = document.createElement('pre');
+    fpre.className = 'regex-test-result';
+    fpre.textContent = j.final;
+    finalRow.appendChild(fpre);
+    out.appendChild(finalRow);
+  }
+  runBtn.addEventListener('click', run);
   return wrap;
 }
 
@@ -1029,17 +1461,36 @@ function render() {
     const h = document.createElement('h2');
     h.textContent = g.title;
     sec.appendChild(h);
-    for (const fname of g.fields) {
-      try {
-        sec.appendChild(fieldRow(fname));
-      } catch (err) {
-        console.error('failed to render field', fname, err);
-        const errRow = document.createElement('div');
-        errRow.className = 'field';
-        errRow.innerHTML = '<div class="label-col"><div class="name">' + fname
-          + '</div></div><div class="input-col"><div class="err">'
-          + 'render failed: ' + (err.message || err) + '</div></div>';
-        sec.appendChild(errRow);
+    // Each group now has subgroups; iterate them. A subgroup with title===null
+    // emits no subheader (back-compat with old single-list layout).
+    for (const sub of (g.subgroups || [{ title: null, fields: g.fields || [] }])) {
+      if (sub.title) {
+        const h3 = document.createElement('h3');
+        h3.className = 'subgroup';
+        h3.textContent = sub.title;
+        sec.appendChild(h3);
+        // Step 3 subgroup gets the regex test panel + advanced badge.
+        if (/Step 3/.test(sub.title)) {
+          const adv = document.createElement('div');
+          adv.className = 'advanced-warn';
+          adv.innerHTML = '⚠ <strong>advanced</strong> — incorrect regex breaks transcription. '
+            + 'Use the test panel below to dry-run before saving. ↺ Reset to default if you get stuck.';
+          sec.appendChild(adv);
+          sec.appendChild(regexTestPanel());
+        }
+      }
+      for (const fname of sub.fields) {
+        try {
+          sec.appendChild(fieldRow(fname));
+        } catch (err) {
+          console.error('failed to render field', fname, err);
+          const errRow = document.createElement('div');
+          errRow.className = 'field';
+          errRow.innerHTML = '<div class="label-col"><div class="name">' + fname
+            + '</div></div><div class="input-col"><div class="err">'
+            + 'render failed: ' + (err.message || err) + '</div></div>';
+          sec.appendChild(errRow);
+        }
       }
     }
     main.appendChild(sec);

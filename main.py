@@ -111,7 +111,7 @@ from faster_whisper import WhisperModel
 # Punkt." — a mix of the model's own punctuation and spoken-out symbol words.
 # Whisper emits standard German orthography (with ß), but our target is Swiss
 # German, which uses "ss" instead. `_postprocess_text()` reshapes the output
-# in ten ordered steps:
+# in nine ordered steps:
 #
 #   0. REPLACE        Apply cfg.CHARACTER_REPLACEMENTS (ordered str.replace
 #                     pairs). Default rules are ß → ss / ẞ → SS (Swiss
@@ -119,29 +119,32 @@ from faster_whisper import WhisperModel
 #                     substitutions.
 #   1. STRIP          Remove most punctuation, keep date/time/number separators.
 #   2. NORMALIZE      Turn "10-23" into "10/23" so number ranges aren't broken.
-#   3. STRIP TERMS    Drop Whisper-emitted "."/"?"/"!" at audio pauses, AND
+#   3. STRIP — pass A Drop Whisper-emitted "."/"?"/"!" at audio pauses AND
 #                     lowercase the following word if it's a known non-noun
 #                     (interrogatives, conjunctions, articles, etc.) so
 #                     "Hallo. Wie geht's" → "Hallo wie geht's". Keeps dots
-#                     inside numbers (10.23, 11.).
-#   4. STRIP COMMAS   In dictation mode, the user controls all commas via
-#                     "Komma". Drop Whisper-emitted soft-pause commas now —
-#                     except those between digits ("1,000"), which we keep.
-#   5. DICTATION MAP  Replace German words with symbols ("Komma" → ",").
-#   6. TIDY SPACING   Remove stray spaces around the inserted punctuation.
-#   7. DEDUP PUNCT    Collapse runs of adjacent punctuation. Whisper emits its
+#                     inside numbers (10.23, 11.). Regex driven by
+#                     cfg.STRIP_AND_LOWERCASE_REGEX. Skipped when empty or
+#                     when cfg.STRIP_REGEX_DISABLE is True.
+#   3. STRIP — pass B Plain strip — also catches lone ".?!" the paired pass
+#                     missed AND the soft-pause commas that used to be old
+#                     "Step 4" (between digits keeps; "1,000" survives).
+#                     Regex driven by cfg.STRIP_ONLY_REGEX. Same skip rules.
+#   4. DICTATION MAP  Replace German words with symbols ("Komma" → ",").
+#   5. TIDY SPACING   Remove stray spaces around the inserted punctuation.
+#   6. DEDUP PUNCT    Collapse runs of adjacent punctuation. Whisper emits its
 #                     own commas around dictation keywords ("..., Punkt."),
 #                     which after substitution leaves "...,." — keep only the
 #                     dictation-emitted (user-intended) mark.
-#   8. TIDY NEWLINES  Drop Whisper-emitted commas / stray whitespace around the
+#   7. TIDY NEWLINES  Drop Whisper-emitted commas / stray whitespace around the
 #                     newlines inserted by "neue Zeile" / "neuer Absatz".
-#   9. CAPITALIZE     Capitalize the first letter after a dictation-emitted
-#                     ".", "?", "!", or newline. Whisper transcribes audio
-#                     pauses; it doesn't know "Punkt" will become a sentence
-#                     end, so it leaves the next word lowercase.
+#   8. CAPITALIZE     Capitalize the first letter after a dictation-emitted
+#                     ".", "?", "!", or newline.
+#   9. TRIM EDGES     lstrip + rstrip (preserve a single trailing newline).
 #
-# Each step's regex/lookup is precompiled at module load (it would otherwise be
-# rebuilt on every transcription request).
+# Each step's regex/lookup is precompiled in rebuild_caches() (called once at
+# module load and again from the admin WebUI when any cache-affecting field
+# changes — see config_store.CACHE_REBUILD_FIELDS).
 # -----------------------------------------------------------------------------
 
 # --- Step 0: ordered character replacements ---------------------------------
@@ -161,17 +164,19 @@ _PUNCTUATION_STRIP_TABLE: dict = {}
 # Whisper writes ranges as "10-23"; downstream consumers (vowen.ai) want "10/23".
 _NUMBER_RANGE_HYPHEN_PATTERN = re.compile(r"(\d)\s*-\s*(\d)")
 
-# --- Step 3: strip Whisper sentence punctuation + lowercase non-nouns -------
-# Source data: cfg.LOWERCASE_AFTER_STRIPPED_TERMINATOR (the whitelist of
-# German non-noun words that may be lowercased mid-sentence after stripping
-# a Whisper-emitted terminator).
+# --- Step 3: two-pass Whisper noise strip ----------------------------------
+# Both regexes are now driven by config (cfg.STRIP_AND_LOWERCASE_REGEX +
+# cfg.STRIP_ONLY_REGEX) and rebuilt by rebuild_caches() so the patterns are
+# editable from the admin WebUI. None when the corresponding cfg field is
+# empty (that pass becomes a guarded no-op).
 #
-# Whisper terminator (`.` `?` `!`) NOT preceded by digit, optionally followed
-# by whitespace + a capitalized word. We strip the terminator and conditionally
-# lowercase the captured word.
-_WHISPER_TERMINATOR_AND_NEXT = re.compile(r"(?<!\d)[.?!](\s*)([A-ZÄÖÜ])(\w*)")
-# Catches lone .?! (end of text, before non-letter) that the above didn't handle.
-_WHISPER_TERMINATOR = re.compile(r"(?<!\d)[.?!]")
+# Pass A: paired strip — finds a terminator + capital word; strips terminator
+# and conditionally lowercases the next word per cfg.STRIP_AND_LOWERCASE_WORDS.
+# Pass B: plain strip — catches lone terminators the paired pass missed PLUS
+# pause-induced commas (the old standalone "Step 4" — its
+# `(?<!\d),|,(?!\d)` clause now lives in Pass B's default regex).
+_STEP3_PASS_A: "re.Pattern[str] | None" = None
+_STEP3_PASS_B: "re.Pattern[str] | None" = None
 
 # --- Step 4: German dictation map --------------------------------------------
 # Source data: cfg.DICTATION_MAP (spoken word -> literal symbol). Multi-word
@@ -190,12 +195,13 @@ def rebuild_caches() -> None:
     """Rebuild module-level caches that are derived from cfg.* values.
 
     Called once at module load (just below) and again by the admin WebUI
-    after a config change to DICTATION_MAP or PUNCTUATION_TO_KEEP. The other
-    cfg references in this file are read live per-request, so they don't
-    need a rebuild step.
+    after a config change to any name in config_store.CACHE_REBUILD_FIELDS.
+    Other cfg references in this file are read live per-request, so they
+    don't need a rebuild step.
     """
     global _DICTATION_REGEX, _DICTATION_LOWERCASE_LOOKUP
     global _PUNCTUATION_TO_REMOVE, _PUNCTUATION_STRIP_TABLE
+    global _STEP3_PASS_A, _STEP3_PASS_B
 
     _DICTATION_REGEX = re.compile(
         r"\b(" + "|".join(re.escape(k) for k in sorted(cfg.DICTATION_MAP, key=len, reverse=True)) + r")\b",
@@ -206,6 +212,14 @@ def rebuild_caches() -> None:
         "".join(c for c in string.punctuation if c not in cfg.PUNCTUATION_TO_KEEP) + "„"
     )
     _PUNCTUATION_STRIP_TABLE = str.maketrans("", "", _PUNCTUATION_TO_REMOVE)
+
+    # Step 3 passes: compile from config strings. Empty string → that pass
+    # is skipped (None sentinel checked by the pipeline). Failed compile
+    # is a config error caught by config_store's field_validator at save
+    # time, so a runtime re.error here would only happen if config.py was
+    # hand-edited with a bad pattern — we let it surface.
+    _STEP3_PASS_A = re.compile(cfg.STRIP_AND_LOWERCASE_REGEX) if cfg.STRIP_AND_LOWERCASE_REGEX else None
+    _STEP3_PASS_B = re.compile(cfg.STRIP_ONLY_REGEX) if cfg.STRIP_ONLY_REGEX else None
 
 
 rebuild_caches()
@@ -225,13 +239,7 @@ _SPACE_AFTER_OPENING_PUNCT = re.compile(r"([\(\[\{])[ \t]+")
 # Whisper pause). Pure commas collapse to a single comma.
 _PUNCTUATION_RUN_PATTERN = re.compile(r"[,.:;!?]{2,}")
 
-# --- Step 4: strip Whisper noise commas (dictation mode only) ---------------
-# In dictation mode the user explicitly says "Komma" when they want a comma,
-# so anything else is a Whisper soft-pause comma we should drop. We keep
-# commas BETWEEN digits ("1,000") in case numerical content shows up.
-_NOISE_COMMA_PATTERN = re.compile(r"(?<!\d),|,(?!\d)")
-
-# --- Step 8: tidy newline neighborhood ---------------------------------------
+# --- Step 7: tidy newline neighborhood ---------------------------------------
 # Around a dictation-emitted "\n" / "\n\n" we often have residue: a Whisper-
 # emitted comma ("Müller, \n"), trailing space (" \n"), or punctuation that
 # leaked through ("\n , Welt"). Collapse the whole neighborhood — optional
@@ -269,18 +277,32 @@ def _tidy_spacing(text: str) -> str:
     return text
 
 
-def _strip_whisper_terminators(text: str) -> str:
-    """Step 3: strip Whisper-emitted .?! and lowercase the next word if it's
-    a known non-noun. Done before the dictation map so user-emitted punctuation
-    (from "Punkt"/"Fragezeichen"/etc.) is the only sentence punctuation left."""
+def _step3_pass_a(text: str) -> str:
+    """Step 3 Pass A: paired strip — match terminator + capital-word, strip
+    the terminator and lowercase the next word IFF it's in
+    cfg.STRIP_AND_LOWERCASE_WORDS. No-op when the regex is None (empty
+    config → skipped). The regex must produce three groups:
+      group(1) = whitespace between terminator and word
+      group(2) = first letter of the word
+      group(3) = rest of the word
+    """
+    if _STEP3_PASS_A is None:
+        return text
     def replace(m: "re.Match[str]") -> str:
         ws, first, rest = m.group(1), m.group(2), m.group(3)
-        if (first + rest).lower() in cfg.LOWERCASE_AFTER_STRIPPED_TERMINATOR:
+        if (first + rest).lower() in cfg.STRIP_AND_LOWERCASE_WORDS:
             return ws + first.lower() + rest
         return ws + first + rest
-    text = _WHISPER_TERMINATOR_AND_NEXT.sub(replace, text)
-    text = _WHISPER_TERMINATOR.sub("", text)
-    return text
+    return _STEP3_PASS_A.sub(replace, text)
+
+
+def _step3_pass_b(text: str) -> str:
+    """Step 3 Pass B: plain strip — every match is removed, no side effects.
+    Default regex catches lone terminators (digit-protected) AND pause-induced
+    commas (the old standalone Step 4). No-op when None."""
+    if _STEP3_PASS_B is None:
+        return text
+    return _STEP3_PASS_B.sub("", text)
 
 
 def _capitalize_after_sentence(text: str) -> str:
@@ -295,7 +317,7 @@ def _capitalize_after_sentence(text: str) -> str:
 
 
 def _postprocess_text(text: str, trace: "list | None" = None) -> str:
-    """Run the 10-step pipeline above on a single piece of Whisper output.
+    """Run the 9-step pipeline above on a single piece of Whisper output.
 
     If `trace` is provided (a list), each step that *changes* the text appends
     a `(step_name, before, after)` tuple — the request handler uses this to
@@ -309,23 +331,20 @@ def _postprocess_text(text: str, trace: "list | None" = None) -> str:
             trace.append((name, before, text))
 
     step("0 REPLACE",        _apply_replacements)
-    step("1 STRIP",          lambda t: t.translate(_PUNCTUATION_STRIP_TABLE))
-    step("2 NORMALIZE",      lambda t: _NUMBER_RANGE_HYPHEN_PATTERN.sub(r"\1/\2", t))
-    # When TRUST_MODEL_PUNCTUATION is on, the model's own .?! are preserved
-    # — skip the pause-induced-terminator strip entirely.
-    if not cfg.TRUST_MODEL_PUNCTUATION:
-        step("3 STRIP TERMS",    _strip_whisper_terminators)
+    step("1 STRIP",           lambda t: t.translate(_PUNCTUATION_STRIP_TABLE))
+    step("2 NORMALIZE",       lambda t: _NUMBER_RANGE_HYPHEN_PATTERN.sub(r"\1/\2", t))
+    # Step 3: two regex passes. Skipped entirely when STRIP_REGEX_DISABLE
+    # is set; otherwise each pass runs only when its config regex is non-empty
+    # (the helper functions guard on the compiled-regex sentinel themselves).
+    if not cfg.STRIP_REGEX_DISABLE:
+        step("3 STRIP — pass A",  _step3_pass_a)
+        step("3 STRIP — pass B",  _step3_pass_b)
     if cfg.DICTATION_ENABLED:
-        # Same idea as step 3: when TRUST_MODEL_PUNCTUATION is on, the model's
-        # own commas pass through. Step 8 still cleans commas next to dictation-
-        # emitted newlines, so "Müller, neuer Absatz" → "Müller\n\n" still works.
-        if not cfg.TRUST_MODEL_PUNCTUATION:
-            step("4 STRIP COMMAS",   lambda t: _NOISE_COMMA_PATTERN.sub("", t))
-        step("5 DICTATION",      _apply_dictation)
-        step("6 TIDY SPACING",   _tidy_spacing)
-        step("7 DEDUP PUNCT",    lambda t: _PUNCTUATION_RUN_PATTERN.sub(_collapse_punctuation_run, t))
-        step("8 TIDY NEWLINES",  lambda t: _NEWLINE_NEIGHBORHOOD_PATTERN.sub(r"\1", t))
-        step("9 CAPITALIZE",     _capitalize_after_sentence)
+        step("4 DICTATION",       _apply_dictation)
+        step("5 TIDY SPACING",    _tidy_spacing)
+        step("6 DEDUP PUNCT",     lambda t: _PUNCTUATION_RUN_PATTERN.sub(_collapse_punctuation_run, t))
+        step("7 TIDY NEWLINES",   lambda t: _NEWLINE_NEIGHBORHOOD_PATTERN.sub(r"\1", t))
+        step("8 CAPITALIZE",      _capitalize_after_sentence)
     return text
 
 
@@ -885,7 +904,7 @@ async def transcribe(
             before_trim = full_text_str
             full_text_str = full_text_str.lstrip().rstrip(" \t\r")
             if trace is not None and before_trim != full_text_str:
-                trace.append(("10 TRIM EDGES", before_trim, full_text_str))
+                trace.append(("9 TRIM EDGES", before_trim, full_text_str))
 
             # Always emit the rich diagnostic block — it's how empty-output
             # failures are debugged. The per-pipeline transformation trace

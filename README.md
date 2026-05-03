@@ -122,21 +122,20 @@ Get-Service     WhisperAPI
 
 ## Post-processing pipeline
 
-`_postprocess_text()` in `main.py` runs each request's text through 10 ordered steps:
+`_postprocess_text()` in `main.py` runs each request's text through 9 ordered steps:
 
 | # | Step | What it does |
 |---|---|---|
 | 0 | REPLACE | Apply `CHARACTER_REPLACEMENTS` (ordered str.replace pairs; default `ß`→`ss`, `ẞ`→`SS`) |
 | 1 | STRIP | Drop punctuation except `./-:,?!` |
 | 2 | NORMALIZE | `10-23` → `10/23` |
-| 3 | STRIP TERMS | Strip Whisper-emitted `.?!` and lowercase the next word if it's a known German non-noun. **Skipped when `TRUST_MODEL_PUNCTUATION=True`.** |
-| 4 | STRIP COMMAS | Drop Whisper soft-pause commas (keeps `1,000`). **Skipped when `TRUST_MODEL_PUNCTUATION=True`.** |
-| 5 | DICTATION | Replace spoken words: `Punkt` → `.`, `Komma` → `,`, `neue Zeile` → `\n`, etc. |
-| 6 | TIDY SPACING | Collapse spaces around inserted punctuation |
-| 7 | DEDUP PUNCT | Collapse `,.` / `,;` / `,:,` runs to one mark |
-| 8 | TIDY NEWLINES | Strip residue around `\n` / `\n\n` |
-| 9 | CAPITALIZE | Capitalize after `.?!` and after `\n+` |
-| 10 | TRIM EDGES | `lstrip()` + `rstrip(" \t\r")` (preserves trailing newline) |
+| 3 | STRIP — pass A + B | Two regex passes — Pass A: strip + lowercase next non-noun (uses `STRIP_AND_LOWERCASE_REGEX` + `STRIP_AND_LOWERCASE_WORDS`); Pass B: plain strip (uses `STRIP_ONLY_REGEX`, includes commas via the digit-protected pattern). **Skipped when `STRIP_REGEX_DISABLE=True`.** |
+| 4 | DICTATION | Replace spoken words: `Punkt` → `.`, `Komma` → `,`, `neue Zeile` → `\n`, etc. |
+| 5 | TIDY SPACING | Collapse spaces around inserted punctuation |
+| 6 | DEDUP PUNCT | Collapse `,.` / `,;` / `,:,` runs to one mark |
+| 7 | TIDY NEWLINES | Strip residue around `\n` / `\n\n` |
+| 8 | CAPITALIZE | Capitalize after `.?!` and after `\n+` |
+| 9 | TRIM EDGES | `lstrip()` + `rstrip(" \t\r")` (preserves trailing newline) |
 
 Customize the dictation map by editing `DICTATION_MAP` and `PUNCTUATION_TO_KEEP` in `config.py` — or, with the admin WebUI enabled, from the browser at `/config`.
 

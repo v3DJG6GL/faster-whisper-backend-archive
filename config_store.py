@@ -63,7 +63,160 @@ RESTART_REQUIRED_FIELDS: frozenset[str] = frozenset({
 # calls main.rebuild_caches() when any of these change.
 CACHE_REBUILD_FIELDS: frozenset[str] = frozenset({
     "DICTATION_MAP", "PUNCTUATION_TO_KEEP",
+    "STRIP_AND_LOWERCASE_REGEX", "STRIP_ONLY_REGEX", "STRIP_AND_LOWERCASE_WORDS",
 })
+
+
+# =============================================================================
+# Single source of truth for field descriptions
+# =============================================================================
+# Surfaced everywhere a description is shown:
+#   - Pydantic Field(description=…) — see _F() helper below
+#   - /config/state payload — admin_routes.py adds .description from the
+#     Pydantic model_fields
+#   - /config admin WebUI — fieldRow() renders it as a <div class="help">
+#     line under each editor
+# Edit a string here, every consumer reflects it on next reload. Wording is
+# cross-validated against upstream docs (faster-whisper, OpenAI Whisper,
+# Silero VAD, CTranslate2, uvicorn, Python logging) where authoritative.
+FIELD_DESCRIPTIONS: dict[str, str] = {
+    # --- Models ---
+    "DEFAULT_MODEL":
+        "Model loaded when a request sends 'whisper-1' or omits 'model'. "
+        "Accepts any faster-whisper short name or HF repo id.",
+    "ALLOWED_MODELS":
+        "Allowlist of model names clients may request. Empty set lets any name "
+        "pass — risks unknown multi-GB downloads.",
+    "MAX_LOADED_MODELS":
+        "Max models kept hot in VRAM (LRU evicts beyond this). large-v3 "
+        "~1.5 GB fp16, turbo/distill ~600 MB.",
+    "PRELOAD_MODELS":
+        "Models eagerly loaded at startup so the first request skips the "
+        "5-30 s warm-up. Empty = only DEFAULT_MODEL.",
+    "MODEL_DEVICE":
+        "Hardware to run the model on. 'cuda' uses GPU, 'cpu' uses CPU.",
+    "MODEL_COMPUTE_TYPE":
+        "Numerical precision. float16=fast/GPU, int8=smallest/fastest CPU, "
+        "int8_float16=GPU memory-saver.",
+    "MODEL_DEVICE_FALLBACK":
+        "Backup hardware target if the primary device fails to load "
+        "(e.g. fall back to 'cpu' if CUDA is unavailable).",
+    "MODEL_COMPUTE_TYPE_FALLBACK":
+        "Backup precision used when the primary compute type isn't supported "
+        "on the fallback device.",
+
+    # --- Decode params (transcribe-time) ---
+    "DEFAULT_LANGUAGE":
+        "ISO 639-1 language code (e.g. 'en', 'de'). Leave empty to auto-detect "
+        "from the first 30 seconds.",
+    "DEFAULT_PROMPT":
+        "Seed text injected as initial_prompt — use for custom vocab, names, "
+        "or jargon to bias recognition.",
+    "BEAM_SIZE":
+        "Beam-search width. Higher = better quality but slower. "
+        "faster-whisper default 5; OpenAI default 1.",
+    "BEST_OF":
+        "How many candidates to sample when temperature > 0. Only takes "
+        "effect during fallback retries.",
+    "VAD_FILTER":
+        "Skip silent regions before transcription using Silero VAD. "
+        "Reduces hallucinations in quiet audio.",
+    "VAD_MIN_SILENCE_MS":
+        "How much silence (ms) ends a speech chunk. Smaller splits more "
+        "aggressively. Silero default 2000 ms.",
+    "VAD_SPEECH_PAD_MS":
+        "Extra audio (ms) kept on both sides of each speech chunk so word "
+        "edges aren't clipped. Silero default 400 ms.",
+    "VAD_THRESHOLD":
+        "Probability cutoff (0-1) above which audio counts as speech. "
+        "Lower = more inclusive. Silero default 0.5.",
+    "CONDITION_ON_PREVIOUS_TEXT":
+        "Feed prior text as context to next window. Off reduces repetition "
+        "loops but may hurt cross-window consistency.",
+    "WORD_TIMESTAMPS_ENABLED":
+        "Compute per-word start/end times via cross-attention DTW. Slower "
+        "but enables word-aligned output.",
+    "NO_SPEECH_THRESHOLD":
+        "If silence-probability exceeds this AND log-prob is low, segment "
+        "is dropped as silence. Default 0.6.",
+    "LOG_PROB_THRESHOLD":
+        "Floor for average token log-probability. Below this triggers a "
+        "temperature-fallback retry. Default -1.0.",
+    "COMPRESSION_RATIO_THRESHOLD":
+        "Detects repetition loops: if output compresses too well, retry "
+        "decoding. Default 2.4.",
+
+    # --- Pipeline ---
+    "CHARACTER_REPLACEMENTS":
+        "Step 0: ordered (from,to) str.replace pairs run before all other "
+        "steps. Default ß→ss, ẞ→SS for Swiss German.",
+    "PUNCTUATION_TO_KEEP":
+        "Step 1 whitelist: chars kept from string.punctuation. Defaults "
+        "cover date/number separators and ?!.",
+    "STRIP_REGEX_DISABLE":
+        "One-click master bypass: when on, both Step 3 passes are skipped "
+        "(instead of clearing both regex fields).",
+    "STRIP_AND_LOWERCASE_REGEX":
+        "Step 3 Pass A regex: strips matched terminator AND lowercases the "
+        "next word if it's in STRIP_AND_LOWERCASE_WORDS. Empty = skip.",
+    "STRIP_AND_LOWERCASE_WORDS":
+        "German non-nouns (wie, und, der, aber, weil, …) lowercased by "
+        "Pass A after a stripped terminator. Lowercase entries.",
+    "STRIP_ONLY_REGEX":
+        "Step 3 Pass B regex: plain strip with no casing side-effects "
+        "(also covers commas via the digit-protected pattern). Empty = skip.",
+    "DICTATION_ENABLED":
+        "Master switch for dictation post-processing (Steps 4-8). Off = "
+        "Steps 0/1/3 still run; everything else skipped.",
+    "DICTATION_MAP":
+        "Spoken-word to symbol map (e.g. 'Punkt'→'.', 'neue Zeile'→newline). "
+        "Case-insensitive, longest match wins.",
+    "TRACE_ENABLED":
+        "Emit a multi-line trace block per transcription request. Disable "
+        "on busy servers to control log volume.",
+
+    # --- Logging ---
+    "LOG_FILE":
+        "Path to the rotating log file. Parent directory is auto-created "
+        "at startup if missing.",
+    "LOG_MAX_BYTES":
+        "Rotate the log file when it reaches this size in bytes. "
+        "0 disables rotation.",
+    "LOG_BACKUP_COUNT":
+        "Number of rotated log files to retain (.1, .2, …). Older files "
+        "are deleted. 0 disables rotation.",
+
+    # --- Server (uvicorn) ---
+    "SERVER_HOST":
+        "uvicorn bind address. 0.0.0.0 = listen on all interfaces "
+        "(LAN-reachable); 127.0.0.1 = loopback only.",
+    "SERVER_PORT":
+        "uvicorn TCP port to bind. Default 8000.",
+    "SERVER_WORKERS":
+        "uvicorn worker processes. Keep at 1 — each worker reloads models "
+        "into VRAM and multiplies GPU memory.",
+    "SERVER_LOG_LEVEL":
+        "uvicorn log verbosity: critical | error | warning | info | debug.",
+
+    # --- Access (allowlists) ---
+    "ADMIN_ALLOWED_HOSTS":
+        "IP/CIDR allowlist for /config admin endpoints. Loopback "
+        "(127.0.0.1, ::1) is always implicitly allowed.",
+    "STATS_ALLOWED_HOSTS":
+        "IP/CIDR allowlist for /stats endpoints. Loopback always allowed; "
+        "default is loopback only.",
+}
+
+
+def _F(name: str, **kwargs: Any) -> Any:
+    """`Field(default=None, description=FIELD_DESCRIPTIONS[name], **kwargs)`.
+
+    Single-source-of-truth helper: every editable field passes its name to
+    this and gets its description wired up automatically. Raises KeyError
+    at import time if a name is missing — keeps schema and descriptions
+    in lockstep.
+    """
+    return Field(default=None, description=FIELD_DESCRIPTIONS[name], **kwargs)
 
 # faster-whisper short name OR HuggingFace repo id (org/name).
 _MODEL_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.\-]*(/[A-Za-z0-9_.\-]+)?$"
@@ -85,63 +238,67 @@ ComputeLit = Literal["float16", "int8_float16", "int8", "float32", "bfloat16"]
 class AdminConfig(BaseModel):
     """Pydantic schema for config.local.json. Every field is Optional; absent
     means "do not override". Bounds and patterns enforce resource caps and
-    cheap input hygiene at validation time."""
+    cheap input hygiene at validation time. Per-field user-facing descriptions
+    live in FIELD_DESCRIPTIONS above (single source of truth — change there,
+    every consumer reflects it on next reload)."""
 
     # `protected_namespaces=()` disables Pydantic's "model_*" reserved-prefix
     # warning so we can use MODEL_DEVICE / MODEL_COMPUTE_TYPE field names.
     model_config = {"extra": "forbid", "protected_namespaces": ()}
 
     # --- Models ---
-    DEFAULT_MODEL: ModelId | None = None
+    DEFAULT_MODEL: ModelId | None = _F("DEFAULT_MODEL")
     # Sets serialize as JSON arrays; convert back on load. List type here lets
     # us validate per-element via the ModelId Annotated type.
-    ALLOWED_MODELS: list[ModelId] | None = None
-    MAX_LOADED_MODELS: Annotated[int, Field(ge=1, le=8)] | None = None
-    PRELOAD_MODELS: list[ModelId] | None = None
-    MODEL_DEVICE: DeviceLit | None = None
-    MODEL_COMPUTE_TYPE: ComputeLit | None = None
-    MODEL_DEVICE_FALLBACK: DeviceLit | None = None
-    MODEL_COMPUTE_TYPE_FALLBACK: ComputeLit | None = None
+    ALLOWED_MODELS: list[ModelId] | None = _F("ALLOWED_MODELS")
+    MAX_LOADED_MODELS: Annotated[int, Field(ge=1, le=8)] | None = _F("MAX_LOADED_MODELS")
+    PRELOAD_MODELS: list[ModelId] | None = _F("PRELOAD_MODELS")
+    MODEL_DEVICE: DeviceLit | None = _F("MODEL_DEVICE")
+    MODEL_COMPUTE_TYPE: ComputeLit | None = _F("MODEL_COMPUTE_TYPE")
+    MODEL_DEVICE_FALLBACK: DeviceLit | None = _F("MODEL_DEVICE_FALLBACK")
+    MODEL_COMPUTE_TYPE_FALLBACK: ComputeLit | None = _F("MODEL_COMPUTE_TYPE_FALLBACK")
 
-    # --- Locale ---
-    DEFAULT_LANGUAGE: Annotated[str, Field(pattern=r"^[a-z]{2}$")] | None = None
-    DEFAULT_PROMPT: Annotated[str, Field(max_length=2048)] | None = None
+    # --- Decode params (transcribe-time) ---
+    DEFAULT_LANGUAGE: Annotated[str, Field(pattern=r"^[a-z]{2}$")] | None = _F("DEFAULT_LANGUAGE")
+    DEFAULT_PROMPT: Annotated[str, Field(max_length=2048)] | None = _F("DEFAULT_PROMPT")
+    BEAM_SIZE: Annotated[int, Field(ge=1, le=20)] | None = _F("BEAM_SIZE")
+    BEST_OF: Annotated[int, Field(ge=1, le=20)] | None = _F("BEST_OF")
+    VAD_FILTER: bool | None = _F("VAD_FILTER")
+    VAD_MIN_SILENCE_MS: Annotated[int, Field(ge=0, le=10000)] | None = _F("VAD_MIN_SILENCE_MS")
+    VAD_SPEECH_PAD_MS: Annotated[int, Field(ge=0, le=2000)] | None = _F("VAD_SPEECH_PAD_MS")
+    VAD_THRESHOLD: Annotated[float, Field(ge=0.0, le=1.0)] | None = _F("VAD_THRESHOLD")
+    CONDITION_ON_PREVIOUS_TEXT: bool | None = _F("CONDITION_ON_PREVIOUS_TEXT")
+    WORD_TIMESTAMPS_ENABLED: bool | None = _F("WORD_TIMESTAMPS_ENABLED")
+    NO_SPEECH_THRESHOLD: Annotated[float, Field(ge=0.0, le=1.0)] | None = _F("NO_SPEECH_THRESHOLD")
+    LOG_PROB_THRESHOLD: Annotated[float, Field(ge=-10.0, le=0.0)] | None = _F("LOG_PROB_THRESHOLD")
+    COMPRESSION_RATIO_THRESHOLD: Annotated[float, Field(ge=0.0, le=10.0)] | None = _F("COMPRESSION_RATIO_THRESHOLD")
+
+    # --- Pipeline ---
     CHARACTER_REPLACEMENTS: list[tuple[
         Annotated[str, Field(min_length=1, max_length=4)],
         Annotated[str, Field(max_length=8)],
-    ]] | None = None
-
-    # --- Pipeline ---
-    DICTATION_ENABLED: bool | None = None
-    TRUST_MODEL_PUNCTUATION: bool | None = None
-    TRACE_ENABLED: bool | None = None
-    PUNCTUATION_TO_KEEP: Annotated[str, Field(max_length=32)] | None = None
-    DICTATION_MAP: dict[DictKey, DictVal] | None = None
-    LOWERCASE_AFTER_STRIPPED_TERMINATOR: list[
+    ]] | None = _F("CHARACTER_REPLACEMENTS")
+    PUNCTUATION_TO_KEEP: Annotated[str, Field(max_length=32)] | None = _F("PUNCTUATION_TO_KEEP")
+    STRIP_REGEX_DISABLE: bool | None = _F("STRIP_REGEX_DISABLE")
+    STRIP_AND_LOWERCASE_REGEX: Annotated[str, Field(max_length=256)] | None = _F("STRIP_AND_LOWERCASE_REGEX", max_length=256)
+    STRIP_AND_LOWERCASE_WORDS: list[
         Annotated[str, Field(min_length=1, max_length=32, pattern=r"^[A-Za-zäöüß]+$")]
-    ] | None = None
-    BEAM_SIZE: Annotated[int, Field(ge=1, le=20)] | None = None
-    BEST_OF: Annotated[int, Field(ge=1, le=20)] | None = None
-    VAD_FILTER: bool | None = None
-    VAD_MIN_SILENCE_MS: Annotated[int, Field(ge=0, le=10000)] | None = None
-    VAD_SPEECH_PAD_MS: Annotated[int, Field(ge=0, le=2000)] | None = None
-    VAD_THRESHOLD: Annotated[float, Field(ge=0.0, le=1.0)] | None = None
-    CONDITION_ON_PREVIOUS_TEXT: bool | None = None
-    WORD_TIMESTAMPS_ENABLED: bool | None = None
-    NO_SPEECH_THRESHOLD: Annotated[float, Field(ge=0.0, le=1.0)] | None = None
-    LOG_PROB_THRESHOLD: Annotated[float, Field(ge=-10.0, le=0.0)] | None = None
-    COMPRESSION_RATIO_THRESHOLD: Annotated[float, Field(ge=0.0, le=10.0)] | None = None
+    ] | None = _F("STRIP_AND_LOWERCASE_WORDS")
+    STRIP_ONLY_REGEX: Annotated[str, Field(max_length=256)] | None = _F("STRIP_ONLY_REGEX", max_length=256)
+    DICTATION_ENABLED: bool | None = _F("DICTATION_ENABLED")
+    DICTATION_MAP: dict[DictKey, DictVal] | None = _F("DICTATION_MAP")
+    TRACE_ENABLED: bool | None = _F("TRACE_ENABLED")
 
     # --- Logging ---
-    LOG_FILE: Annotated[str, Field(min_length=1, max_length=512)] | None = None
-    LOG_MAX_BYTES: Annotated[int, Field(ge=1024 * 1024, le=1024 * 1024 * 1024)] | None = None
-    LOG_BACKUP_COUNT: Annotated[int, Field(ge=1, le=100)] | None = None
+    LOG_FILE: Annotated[str, Field(min_length=1, max_length=512)] | None = _F("LOG_FILE")
+    LOG_MAX_BYTES: Annotated[int, Field(ge=1024 * 1024, le=1024 * 1024 * 1024)] | None = _F("LOG_MAX_BYTES")
+    LOG_BACKUP_COUNT: Annotated[int, Field(ge=1, le=100)] | None = _F("LOG_BACKUP_COUNT")
 
     # --- Server ---
-    SERVER_HOST: Annotated[str, Field(min_length=1, max_length=64)] | None = None
-    SERVER_PORT: Annotated[int, Field(ge=1, le=65535)] | None = None
-    SERVER_WORKERS: Annotated[int, Field(ge=1, le=8)] | None = None
-    SERVER_LOG_LEVEL: LogLevel | None = None
+    SERVER_HOST: Annotated[str, Field(min_length=1, max_length=64)] | None = _F("SERVER_HOST")
+    SERVER_PORT: Annotated[int, Field(ge=1, le=65535)] | None = _F("SERVER_PORT")
+    SERVER_WORKERS: Annotated[int, Field(ge=1, le=8)] | None = _F("SERVER_WORKERS")
+    SERVER_LOG_LEVEL: LogLevel | None = _F("SERVER_LOG_LEVEL")
 
     # --- Admin / stats access control ---
     # Each entry must be parseable by ipaddress.ip_network(strict=False) — bare
@@ -149,11 +306,11 @@ class AdminConfig(BaseModel):
     ADMIN_ALLOWED_HOSTS: Annotated[
         list[Annotated[str, Field(min_length=1, max_length=64)]],
         Field(max_length=64),
-    ] | None = None
+    ] | None = _F("ADMIN_ALLOWED_HOSTS")
     STATS_ALLOWED_HOSTS: Annotated[
         list[Annotated[str, Field(min_length=1, max_length=64)]],
         Field(max_length=64),
-    ] | None = None
+    ] | None = _F("STATS_ALLOWED_HOSTS")
 
     @field_validator("LOG_FILE")
     @classmethod
@@ -190,13 +347,50 @@ class AdminConfig(BaseModel):
             raise ValueError(f"DICTATION_MAP capped at 500 entries (got {len(v)})")
         return v
 
-    @field_validator("ALLOWED_MODELS", "PRELOAD_MODELS", "LOWERCASE_AFTER_STRIPPED_TERMINATOR")
+    @field_validator("ALLOWED_MODELS", "PRELOAD_MODELS", "STRIP_AND_LOWERCASE_WORDS")
     @classmethod
     def _cap_list(cls, v: list[Any] | None) -> list[Any] | None:
         if v is None:
             return v
         if len(v) > 1000:
             raise ValueError(f"capped at 1000 entries (got {len(v)})")
+        return v
+
+    @field_validator("STRIP_AND_LOWERCASE_REGEX", "STRIP_ONLY_REGEX")
+    @classmethod
+    def _validate_regex(cls, v: str | None) -> str | None:
+        # Empty string = "skip this pass". Always valid.
+        if v is None or v == "":
+            return v
+        # Compile-time validation: surface re.error as a Pydantic ValueError so
+        # the WebUI's inline-error display picks it up.
+        try:
+            compiled = re.compile(v)
+        except re.error as e:
+            raise ValueError(f"invalid regex: {e}")
+        # Catastrophic-backtracking guard: run against a 1 KB fixture under a
+        # 2 s timeout. threading.Timer + a cancel-flag works on both Linux and
+        # Windows (re module has no native timeout). We use re.sub() since
+        # that's what main.py calls — same behaviour, same failure mode.
+        import threading
+        fixture = "Hallo. Wie geht's? 10.23 Uhr! Bitte. " * 32   # ~1 KB
+        result_holder: dict[str, Any] = {"done": False, "err": None}
+        def _run() -> None:
+            try:
+                compiled.sub("", fixture)
+                result_holder["done"] = True
+            except Exception as e:
+                result_holder["err"] = e
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        t.join(timeout=2.0)
+        if not result_holder["done"]:
+            raise ValueError(
+                "regex took > 2 s on a 1 KB fixture (likely catastrophic "
+                "backtracking). Simplify the pattern or use possessive quantifiers."
+            )
+        if result_holder["err"] is not None:
+            raise ValueError(f"regex test run failed: {result_holder['err']}")
         return v
 
     @field_validator("CHARACTER_REPLACEMENTS")
@@ -229,7 +423,7 @@ class AdminConfig(BaseModel):
 # were defined inline in config.py.
 _POST_LOAD_COERCERS: dict[str, Any] = {
     "ALLOWED_MODELS": set,
-    "LOWERCASE_AFTER_STRIPPED_TERMINATOR": frozenset,
+    "STRIP_AND_LOWERCASE_WORDS": frozenset,
     "CHARACTER_REPLACEMENTS": lambda items: tuple(tuple(p) for p in items),
 }
 
