@@ -147,8 +147,16 @@ NAV_CSS = """
   --fs-lg:    1rem;       /* 15px (= base) */
   --fs-xl:    1.2rem;     /* ~18px */
   --fs-xxl:   1.467rem;   /* ~22px */
-  --font-sans: "Segoe UI", -apple-system, BlinkMacSystemFont, "Helvetica Neue",
-               Arial, sans-serif;
+  /* system-ui resolves to the OS's actual UI font on every modern browser:
+     Segoe UI on Windows, San Francisco on macOS, Plasma's chosen font on
+     KDE (typically Noto Sans), Cantarell on GNOME. Explicit Linux names
+     (Cantarell / Ubuntu / Noto Sans / DejaVu Sans / Liberation Sans) come
+     before the generic `sans-serif` keyword because some Linux fontconfig
+     setups alias `sans-serif` to a serif (DejaVu Serif / Liberation Serif),
+     which previously rendered the WebUI as a "newspaper". */
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, Inter,
+               "Helvetica Neue", Cantarell, Ubuntu, "Noto Sans",
+               "DejaVu Sans", "Liberation Sans", Arial, sans-serif;
   --font-mono: Consolas, "Cascadia Code", "JetBrains Mono", Menlo,
                ui-monospace, monospace;
   --help: #8b949e;

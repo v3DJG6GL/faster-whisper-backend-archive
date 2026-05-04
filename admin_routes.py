@@ -743,7 +743,7 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
   }
   .rule-row.disabled { opacity: 0.55; }
   .rule-row .row-header { display: flex; align-items: center; gap: 0.5rem;
-    font-family: ui-monospace, Menlo, Consolas, monospace; font-size: var(--fs-sm); }
+    font-family: var(--font-mono); font-size: var(--fs-sm); }
   .rule-row .drag-handle { cursor: grab; user-select: none; color: var(--dim);
     padding: 0.125rem 0.25rem; }
   .rule-row .drag-handle:active { cursor: grabbing; }
@@ -762,7 +762,7 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
   .rule-row.expanded .row-body { display: block; }
   .rule-row.terminal .row-body { display: block; padding-top: 0.25rem; }
   .rule-editor { display: flex; flex-direction: column; gap: 0.25rem; }
-  .rule-editor .map-table { font-family: ui-monospace, monospace; font-size: var(--fs-sm); }
+  .rule-editor .map-table { font-family: var(--font-mono); font-size: var(--fs-sm); }
   .rule-editor .map-table input { background: transparent; color: var(--fg);
     border: 1px solid var(--border); padding: 0.125rem 0.25rem; }
   /* Full-pipeline test table */
@@ -773,7 +773,7 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
     text-align: left; vertical-align: top; }
   .pipeline-test-table th { color: var(--dim); font-weight: 500; }
   .pipeline-test-table tr:nth-child(even) { background: #0d1117; }
-  .pipeline-test-table .out { font-family: ui-monospace, Menlo, monospace;
+  .pipeline-test-table .out { font-family: var(--font-mono);
     white-space: pre-wrap; word-break: break-word; }
   .pipeline-test-table .out mark { background: #033a16; color: #7ee787; }
   .pipeline-test-table .nochange { color: var(--dim); font-style: italic; }
@@ -784,7 +784,7 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
   .pipeline-test-table .tag.warn { background: #2d1f0a; color: #f2cc60; }
   .pipeline-test-table .tag.empty { background: #21262d; color: var(--dim); font-style: italic; }
   .preset-select { margin-bottom: 0.375rem; }
-  .preset-select select { font-family: ui-monospace, monospace; font-size: var(--fs-sm); }
+  .preset-select select { font-family: var(--font-mono); font-size: var(--fs-sm); }
   /* Nullable-number editor in its disabled (null) state — greyed input,
      enable/disable button labelled accordingly. */
   .nullable-wrap input:disabled { opacity: 0.4; cursor: not-allowed; }

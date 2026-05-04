@@ -1051,6 +1051,8 @@ _LOG_VIEWER_HTML = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>faster-whisper-backend · live logs</title>
 {{SCALE_BOOTSTRAP_HEAD}}
+<script>(function(){var v=localStorage.getItem('whisper-log-zoom');
+  if(v)document.documentElement.style.setProperty('--log-zoom',v);})();</script>
 <style>
   :root {
     --bg: #0d1117; --fg: #c9d1d9; --dim: #6e7681;
@@ -1089,14 +1091,29 @@ _LOG_VIEWER_HTML = """<!doctype html>
      1100px max-width sits on a content-sized box that overflows the
      viewport. pre-wrap (was: pre) wraps long lines inside the visible
      column instead of forcing a horizontal scrollbar that hides the start
-     of every line. */
+     of every line. font-size = global rem * --log-zoom is the multiplicative
+     log-only zoom; bumping the global picker grows logs and chrome together,
+     and the [-]/[+] buttons in the header then scale logs only on top. */
   #log { padding: 0.5rem 0.875rem;
     width: 100%; max-width: 1100px; margin: 0 auto;
     box-sizing: border-box;
     font-family: var(--font-mono);
+    font-size: calc(1rem * var(--log-zoom, 1));
     white-space: pre-wrap; overflow-wrap: anywhere;
     overflow-anchor: none; }
   .line { display: block; word-break: break-word; }
+  /* Log-zoom control — independent from the global UI scale picker. */
+  .log-zoom { display: inline-flex; align-items: center; gap: 0.25rem;
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 0.125rem 0.25rem; flex-shrink: 0;
+    font-size: var(--fs-xs); }
+  .log-zoom button { background: transparent; border: none; color: var(--fg);
+    cursor: pointer; padding: 0 0.375rem; line-height: 1;
+    font-size: var(--fs-md); font-family: var(--font-mono); }
+  .log-zoom button:hover:not(:disabled) { color: var(--cyan); }
+  .log-zoom button:disabled { opacity: 0.35; cursor: not-allowed; }
+  .log-zoom #log-zoom-pct { color: var(--dim); font-variant-numeric: tabular-nums;
+    min-width: 2.75rem; text-align: center; }
   .line.hidden { display: none; }
   .line.rule    { color: var(--dim); }
   .line.title   { color: var(--bold); font-weight: 600; }
@@ -1116,6 +1133,11 @@ _LOG_VIEWER_HTML = """<!doctype html>
   <span class="title">faster-whisper-backend · logs</span>
   {{NAV}}
   <input id="filter" type="text" placeholder="filter (case-insensitive substring)…">
+  <span class="log-zoom" title="zoom log content only">
+    <button id="log-zoom-out" type="button" aria-label="decrease log size">−</button>
+    <span id="log-zoom-pct">100%</span>
+    <button id="log-zoom-in" type="button" aria-label="increase log size">+</button>
+  </span>
   {{SCALE_PICKER}}
   <button id="pauseBtn">pause</button>
   <button id="clearBtn">clear</button>
@@ -1234,6 +1256,35 @@ _LOG_VIEWER_HTML = """<!doctype html>
       statusEl.className = 'pill live';
     }
   };
+
+  // --- Log-only zoom (independent of the global UI scale picker) ---------
+  // Multiplies on top of --fs-base via #log { font-size: calc(1rem * --log-zoom) }.
+  // Discrete steps so clicks "snap" to recognizable sizes like browser zoom.
+  (function(){
+    const KEY='whisper-log-zoom';
+    const STEPS=[0.7, 0.85, 1, 1.2, 1.4, 1.6, 1.8, 2.0];
+    const minus=document.getElementById('log-zoom-out');
+    const plus =document.getElementById('log-zoom-in');
+    const pct  =document.getElementById('log-zoom-pct');
+    if(!minus||!plus||!pct) return;
+    function nearestIdx(v){
+      let best=2, dist=Infinity;
+      STEPS.forEach((s,i)=>{ const d=Math.abs(s-v); if(d<dist){dist=d;best=i;} });
+      return best;
+    }
+    let idx = nearestIdx(parseFloat(localStorage.getItem(KEY)) || 1);
+    function apply(){
+      const v = STEPS[idx];
+      document.documentElement.style.setProperty('--log-zoom', v);
+      pct.textContent = Math.round(v*100) + '%';
+      minus.disabled = idx === 0;
+      plus.disabled  = idx === STEPS.length - 1;
+      localStorage.setItem(KEY, v);
+    }
+    minus.addEventListener('click', () => { if(idx>0){idx--; apply();} });
+    plus .addEventListener('click', () => { if(idx<STEPS.length-1){idx++; apply();} });
+    apply();
+  })();
 </script>
 {{SCALE_PICKER_JS}}
 </body></html>"""
