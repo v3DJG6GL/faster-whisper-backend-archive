@@ -503,6 +503,7 @@ async def post_restart(request: Request) -> JSONResponse:
 _CONFIG_VIEWER_HTML = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <title>faster-whisper-backend · config</title>
+{{SCALE_BOOTSTRAP_HEAD}}
 <style>
   :root {
     --bg: #0d1117; --panel: #161b22; --fg: #c9d1d9; --dim: #6e7681;
@@ -510,39 +511,48 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
     --red: #ff7b72; --magenta: #d2a8ff; --bold: #f0f6fc;
     --border: #30363d; --input-bg: #0d1117;
   }
-  html { color-scheme: dark; }
+  /* Font-size tokens + html { font-size: var(--fs-base); color-scheme: dark }
+     live in {{NAV_CSS}} so all pages share one scaling knob. */
   html, body { background: var(--bg); color: var(--fg);
-    font: 16px/1.5 ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+    font: 1rem/1.5 ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
     margin: 0; padding: 0; min-height: 100%; }
   header { position: sticky; top: 0; background: var(--panel); border-bottom: 1px solid var(--border);
     z-index: 10; padding: 0; }
-  header > .header-inner { display: flex; gap: 12px; align-items: center;
-    max-width: 1100px; margin: 0 auto; width: 100%; padding: 8px 14px;
+  header > .header-inner { display: flex; gap: 0.75rem; align-items: center;
+    max-width: 1100px; margin: 0 auto; width: 100%; padding: 0.5rem 0.875rem;
     box-sizing: border-box; }
-  header .title { font-weight: 600; color: var(--bold); }
-  header .pill { padding: 2px 8px; border-radius: 999px; background: #21262d; color: var(--dim);
-    font-size: 11px; }
+  header .title { font-weight: 600; color: var(--bold);
+    white-space: nowrap; flex-shrink: 0; }
+  header .pill { padding: 0.125rem 0.5rem; border-radius: 4px; background: #21262d; color: var(--dim);
+    font-size: var(--fs-xs); white-space: nowrap; flex-shrink: 0; }
   header .pill.ok { color: var(--green); border: 1px solid #1f4d2a; }
   header .pill.warn { color: var(--yellow); border: 1px solid #4d3e1f; }
   header .pill.err { color: var(--red); border: 1px solid #5a2424; }
   header button { background: #21262d; color: var(--fg); border: 1px solid var(--border);
-    padding: 4px 10px; border-radius: 4px; cursor: pointer; font: inherit; }
+    padding: 0.25rem 0.625rem; border-radius: 4px; cursor: pointer; font: inherit;
+    flex-shrink: 0; }
   header button:hover { background: #30363d; }
   header button.primary { background: #238636; border-color: #2ea043; color: var(--bold); }
   header button.primary:hover { background: #2ea043; }
+  /* Discard button: red-tinted "warning" feel when there are unsaved edits.
+     Disabled state inherits the generic header button:disabled (opacity 0.4). */
+  header button#discard-btn:not(:disabled) { background: #3a0d0d;
+    border-color: #5a2424; color: var(--red); }
+  header button#discard-btn:not(:disabled):hover { background: #531f1f;
+    border-color: #7d2d2d; }
   header button:disabled { opacity: 0.4; cursor: not-allowed; }
-  main { padding: 14px; max-width: 1100px; margin: 0 auto; }
+  main { padding: 0.875rem; max-width: 1100px; margin: 0 auto; }
   section { background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
-    padding: 10px 14px 12px; margin-bottom: 14px; }
-  h2 { color: var(--bold); font-size: 14px; margin: 0 0 8px; padding-bottom: 6px;
+    padding: 0.625rem 0.875rem 0.75rem; margin-bottom: 0.875rem; }
+  h2 { color: var(--bold); font-size: 0.933rem; margin: 0 0 0.5rem; padding-bottom: 0.375rem;
     border-bottom: 1px solid var(--border); }
-  .field { display: grid; grid-template-columns: 230px 1fr; gap: 10px;
-    align-items: start; padding: 6px 0; border-bottom: 1px dashed #21262d; }
+  .field { display: grid; grid-template-columns: 230px 1fr; gap: 0.625rem;
+    align-items: start; padding: 0.375rem 0; border-bottom: 1px dashed #21262d; }
   .field:last-child { border-bottom: none; }
-  .label-col { display: flex; flex-direction: column; gap: 4px; }
+  .label-col { display: flex; flex-direction: column; gap: 0.25rem; }
   .label-col .name { color: var(--bold); }
-  .badges { display: flex; gap: 4px; flex-wrap: wrap; }
-  .badge { font-size: 10px; padding: 1px 6px; border-radius: 999px;
+  .badges { display: flex; gap: 0.25rem; flex-wrap: wrap; }
+  .badge { font-size: 0.667rem; padding: 0.0625rem 0.375rem; border-radius: 999px;
     border: 1px solid var(--border); color: var(--dim); }
   .badge.live { color: var(--green); border-color: #1f4d2a; }
   .badge.restart { color: var(--yellow); border-color: #4d3e1f; }
@@ -551,9 +561,9 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
   .input-col input, .input-col textarea, .input-col select {
     width: 100%; box-sizing: border-box;
     background: var(--input-bg); color: var(--fg); border: 1px solid var(--border);
-    padding: 5px 8px; border-radius: 4px; font: inherit; }
+    padding: 0.3125rem 0.5rem; border-radius: 4px; font: inherit; }
   .input-col input[type=checkbox] { width: auto; }
-  .input-col textarea { font-family: inherit; min-height: 60px; resize: vertical; }
+  .input-col textarea { font-family: inherit; min-height: 4rem; resize: vertical; }
   /* --- Native widget overrides — bring all browser-default controls
      (checkbox, number-spinner, select, textarea, unclassed buttons)
      into the GitHub-dark palette. ----------------------------------- */
@@ -584,16 +594,16 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
   input[type="number"]::-webkit-outer-spin-button {
     -webkit-appearance: none; margin: 0;
   }
-  /* Select: replace native white triangle with a custom dim-grey SVG arrow. */
-  select {
+  /* Select: replace native white triangle with a custom dim-grey SVG arrow.
+     Scoped to .input-col so the header scale-picker (which has its own
+     style) isn't double-overridden. */
+  .input-col select {
     appearance: none; -webkit-appearance: none;
-    background: var(--input-bg) url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path fill='%236e7681' d='M0 0l5 6 5-6z'/></svg>") no-repeat right 8px center;
-    color: var(--fg);
-    border: 1px solid var(--border); border-radius: 4px;
-    padding: 5px 24px 5px 8px;
-    font: inherit; cursor: pointer;
+    background: var(--input-bg) url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path fill='%236e7681' d='M0 0l5 6 5-6z'/></svg>") no-repeat right 0.5rem center;
+    padding: 0.3125rem 1.5rem 0.3125rem 0.5rem;
+    cursor: pointer;
   }
-  select:focus { outline: 1px solid var(--cyan); outline-offset: -1px; }
+  .input-col select:focus { outline: 1px solid var(--cyan); outline-offset: -1px; }
   /* Generic dark button styling for unclassed <button> elements (Add /
      Cancel in custom-rule dialog, "+ Add custom rule", etc.). Scoped to
      not override existing classed buttons (.reset-link, .delete-btn,
@@ -601,14 +611,14 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
   main button:not([class]) {
     background: #21262d; color: var(--fg);
     border: 1px solid var(--border); border-radius: 4px;
-    padding: 4px 12px; font: inherit; cursor: pointer;
+    padding: 0.25rem 0.75rem; font: inherit; cursor: pointer;
     transition: background 120ms ease, border-color 120ms ease;
   }
   main button:not([class]):hover { background: #30363d; border-color: #484f58; }
   main button:not([class]):active { background: #161b22; }
   main button:not([class]):disabled { opacity: 0.45; cursor: not-allowed; }
-  .input-col .help { color: var(--dim); font-size: 11px; margin-top: 3px; }
-  .err { color: var(--red); font-size: 11px; margin-top: 3px; }
+  .input-col .help { color: var(--dim); font-size: var(--fs-xs); margin-top: 0.1875rem; }
+  .err { color: var(--red); font-size: var(--fs-xs); margin-top: 0.1875rem; }
   /* Field row dimming when a parent toggle makes this row irrelevant.
      pointer-events stays alive so the user can still see the contents and
      edit if they want — we just signal "this is currently unused". */
@@ -617,53 +627,54 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
   /* Subgroup heading inside a section: smaller than h2, lighter weight,
      small dividing line so it's visibly distinct from the section header
      but doesn't draw the eye like a top-level section change. */
-  h3.subgroup { color: var(--dim); font-size: 12px; font-weight: 500;
+  h3.subgroup { color: var(--dim); font-size: var(--fs-sm); font-weight: 500;
     text-transform: uppercase; letter-spacing: 0.06em;
-    margin: 14px 0 6px 0; padding-bottom: 3px;
+    margin: 0.875rem 0 0.375rem 0; padding-bottom: 0.1875rem;
     border-bottom: 1px solid var(--border); }
   /* Reset-to-default link button — small, italic, only visible when the
      current value differs from the in-repo default. Sits below the help
      text, so it doesn't crowd the editor itself. */
-  .reset-wrap { margin-top: 4px; }
+  .reset-wrap { margin-top: 0.25rem; }
   .reset-link { background: none; border: none; padding: 0;
-    color: var(--cyan); cursor: pointer; font: inherit; font-size: 11px;
+    color: var(--cyan); cursor: pointer; font: inherit; font-size: var(--fs-xs);
     font-style: italic; text-decoration: underline; text-underline-offset: 2px; }
   .reset-link:hover { color: var(--bold); }
   /* Regex editor + status badge */
-  .regex-wrap { display: flex; flex-direction: column; gap: 4px; }
-  .regex-status { font-size: 11px; font-family: ui-monospace, Menlo, monospace; }
+  .regex-wrap { display: flex; flex-direction: column; gap: 0.25rem; }
+  .regex-status { font-size: var(--fs-xs); font-family: ui-monospace, Menlo, monospace; }
   .regex-status.ok { color: var(--green); }
   .regex-status.err { color: var(--red); }
   .regex-status.warn { color: var(--yellow); }
   .regex-status.empty { color: var(--dim); font-style: italic; }
   /* Advanced warning banner above the Step 3 fields */
   .advanced-warn { background: #2d1f0a; color: #f2cc60; border-left: 3px solid #f2cc60;
-    padding: 6px 10px; margin: 8px 0; border-radius: 3px; font-size: 12px; }
+    padding: 0.375rem 0.625rem; margin: 0.5rem 0; border-radius: 3px; font-size: var(--fs-sm); }
   /* Test panel */
   .regex-test-panel { background: #161b22; border: 1px solid var(--border);
-    border-radius: 4px; padding: 10px 12px; margin: 8px 0 14px 0; }
-  .regex-test-out { margin-top: 10px; }
-  .regex-test-pass { margin: 6px 0; }
-  .regex-test-head { font-family: ui-monospace, Menlo, monospace; font-size: 12px;
+    border-radius: 4px; padding: 0.625rem 0.75rem; margin: 0.5rem 0 0.875rem 0; }
+  .regex-test-panel textarea { resize: vertical; max-width: 100%; }
+  .regex-test-out { margin-top: 0.625rem; }
+  .regex-test-pass { margin: 0.375rem 0; }
+  .regex-test-head { font-family: ui-monospace, Menlo, monospace; font-size: var(--fs-sm);
     color: var(--dim); }
-  .regex-test-head .tag { display: inline-block; padding: 0 6px; margin-left: 6px;
-    border-radius: 3px; font-size: 11px; }
+  .regex-test-head .tag { display: inline-block; padding: 0 0.375rem; margin-left: 0.375rem;
+    border-radius: 3px; font-size: var(--fs-xs); }
   .regex-test-head .tag.ok { background: #033a16; color: #7ee787; }
   .regex-test-head .tag.err { background: #3a0d0d; color: #ff7b72; }
   .regex-test-head .tag.warn { background: #2d1f0a; color: #f2cc60; }
   .regex-test-head .tag.empty { background: #21262d; color: var(--dim); font-style: italic; }
   .regex-test-result { background: #0d1117; border: 1px solid var(--border);
-    padding: 4px 8px; border-radius: 3px; margin: 4px 0;
-    font-family: ui-monospace, Menlo, monospace; font-size: 12px;
-    white-space: pre-wrap; word-break: break-word; max-height: 120px; overflow: auto; }
-  .regex-test-final { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
-  .field .dep-note { color: var(--dim); font-size: 11px; margin-top: 3px;
+    padding: 0.25rem 0.5rem; border-radius: 3px; margin: 0.25rem 0;
+    font-family: ui-monospace, Menlo, monospace; font-size: var(--fs-sm);
+    white-space: pre-wrap; word-break: break-word; max-height: 7.5rem; overflow: auto; }
+  .regex-test-final { margin-top: 0.625rem; padding-top: 0.625rem; border-top: 1px solid var(--border); }
+  .field .dep-note { color: var(--dim); font-size: var(--fs-xs); margin-top: 0.1875rem;
     font-style: italic; }
   /* Pipeline rules editor */
-  .pipeline-rules-wrap { display: flex; flex-direction: column; gap: 6px; }
-  .rule-list { display: flex; flex-direction: column; gap: 4px; }
+  .pipeline-rules-wrap { display: flex; flex-direction: column; gap: 0.375rem; }
+  .rule-list { display: flex; flex-direction: column; gap: 0.25rem; }
   .rule-row { background: #161b22; border: 1px solid var(--border); border-radius: 4px;
-    padding: 6px 10px; }
+    padding: 0.375rem 0.625rem; }
   .rule-row.locked { border-left: 3px solid #f2cc60; }
   .rule-row.terminal { border-left: 3px solid var(--dim); opacity: 0.85; }
   /* Button-like interactive feel on every rule row. :active propagates
@@ -683,38 +694,38 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
     border: 1px dashed var(--cyan);
     background: rgba(56, 189, 248, 0.08);
     border-radius: 4px;
-    margin-bottom: 4px;
+    margin-bottom: 0.25rem;
     transition: height 120ms ease;
   }
   .rule-row.disabled { opacity: 0.55; }
-  .rule-row .row-header { display: flex; align-items: center; gap: 8px;
-    font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
+  .rule-row .row-header { display: flex; align-items: center; gap: 0.5rem;
+    font-family: ui-monospace, Menlo, Consolas, monospace; font-size: var(--fs-sm); }
   .rule-row .drag-handle { cursor: grab; user-select: none; color: var(--dim);
-    padding: 2px 4px; }
+    padding: 0.125rem 0.25rem; }
   .rule-row .drag-handle:active { cursor: grabbing; }
   .rule-row.locked .drag-handle { cursor: not-allowed; }
-  .rule-row .ordinal { color: var(--dim); min-width: 24px; text-align: right; }
+  .rule-row .ordinal { color: var(--dim); min-width: 1.5rem; text-align: right; }
   .rule-row .rule-label { flex: 1; color: var(--fg); }
-  .rule-row .rule-slug { color: var(--dim); font-size: 11px; font-style: italic; }
-  .rule-row .type-pill { display: inline-block; padding: 0 6px; border-radius: 3px;
-    font-size: 11px; background: #21262d; color: var(--cyan); }
+  .rule-row .rule-slug { color: var(--dim); font-size: var(--fs-xs); font-style: italic; }
+  .rule-row .type-pill { display: inline-block; padding: 0 0.375rem; border-radius: 3px;
+    font-size: var(--fs-xs); background: #21262d; color: var(--cyan); }
   .rule-row .expand-btn, .rule-row .delete-btn {
     background: transparent; border: 1px solid var(--border);
-    color: var(--fg); padding: 2px 6px; border-radius: 3px; cursor: pointer;
-    font: inherit; font-size: 11px; }
+    color: var(--fg); padding: 0.125rem 0.375rem; border-radius: 3px; cursor: pointer;
+    font: inherit; font-size: var(--fs-xs); }
   .rule-row .delete-btn { color: var(--red); }
-  .rule-row .row-body { padding-left: 32px; padding-top: 6px; display: none; }
+  .rule-row .row-body { padding-left: 2rem; padding-top: 0.375rem; display: none; }
   .rule-row.expanded .row-body { display: block; }
-  .rule-row.terminal .row-body { display: block; padding-top: 4px; }
-  .rule-editor { display: flex; flex-direction: column; gap: 4px; }
-  .rule-editor .map-table { font-family: ui-monospace, monospace; font-size: 12px; }
+  .rule-row.terminal .row-body { display: block; padding-top: 0.25rem; }
+  .rule-editor { display: flex; flex-direction: column; gap: 0.25rem; }
+  .rule-editor .map-table { font-family: ui-monospace, monospace; font-size: var(--fs-sm); }
   .rule-editor .map-table input { background: transparent; color: var(--fg);
-    border: 1px solid var(--border); padding: 2px 4px; }
+    border: 1px solid var(--border); padding: 0.125rem 0.25rem; }
   /* Full-pipeline test table */
-  .pipeline-test-table { width: 100%; border-collapse: collapse; font-size: 12px;
-    margin-top: 6px; }
+  .pipeline-test-table { width: 100%; border-collapse: collapse; font-size: var(--fs-sm);
+    margin-top: 0.375rem; }
   .pipeline-test-table th, .pipeline-test-table td {
-    border-bottom: 1px solid var(--border); padding: 4px 6px;
+    border-bottom: 1px solid var(--border); padding: 0.25rem 0.375rem;
     text-align: left; vertical-align: top; }
   .pipeline-test-table th { color: var(--dim); font-weight: 500; }
   .pipeline-test-table tr:nth-child(even) { background: #0d1117; }
@@ -722,50 +733,50 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
     white-space: pre-wrap; word-break: break-word; }
   .pipeline-test-table .out mark { background: #033a16; color: #7ee787; }
   .pipeline-test-table .nochange { color: var(--dim); font-style: italic; }
-  .pipeline-test-table .tag { display: inline-block; padding: 0 6px;
-    border-radius: 3px; font-size: 11px; }
+  .pipeline-test-table .tag { display: inline-block; padding: 0 0.375rem;
+    border-radius: 3px; font-size: var(--fs-xs); }
   .pipeline-test-table .tag.ok { background: #033a16; color: #7ee787; }
   .pipeline-test-table .tag.err { background: #3a0d0d; color: #ff7b72; }
   .pipeline-test-table .tag.warn { background: #2d1f0a; color: #f2cc60; }
   .pipeline-test-table .tag.empty { background: #21262d; color: var(--dim); font-style: italic; }
-  .preset-select { margin-bottom: 6px; }
-  .preset-select select { font-family: ui-monospace, monospace; font-size: 12px; }
+  .preset-select { margin-bottom: 0.375rem; }
+  .preset-select select { font-family: ui-monospace, monospace; font-size: var(--fs-sm); }
   /* Nullable-number editor in its disabled (null) state — greyed input,
      enable/disable button labelled accordingly. */
   .nullable-wrap input:disabled { opacity: 0.4; cursor: not-allowed; }
   table.dict { width: 100%; border-collapse: collapse; }
-  table.dict th, table.dict td { border: 1px solid var(--border); padding: 4px 8px;
+  table.dict th, table.dict td { border: 1px solid var(--border); padding: 0.25rem 0.5rem;
     text-align: left; }
-  table.dict th { background: #1c2129; color: var(--dim); font-weight: 500; font-size: 11px; }
+  table.dict th { background: #1c2129; color: var(--dim); font-weight: 500; font-size: var(--fs-xs); }
   table.dict td input { width: 100%; box-sizing: border-box; background: transparent;
     color: var(--fg); border: none; padding: 0; font: inherit; }
   table.dict td input:focus { outline: 1px solid var(--cyan); outline-offset: -1px; }
   table.dict button.del { background: transparent; border: 1px solid var(--border);
-    color: var(--red); padding: 2px 6px; border-radius: 3px; cursor: pointer; font-size: 11px; }
-  .add-row { margin-top: 6px; }
+    color: var(--red); padding: 0.125rem 0.375rem; border-radius: 3px; cursor: pointer; font-size: var(--fs-xs); }
+  .add-row { margin-top: 0.375rem; }
   .add-row button { background: #21262d; border: 1px solid var(--border); color: var(--fg);
-    padding: 3px 10px; border-radius: 4px; cursor: pointer; font: inherit; }
+    padding: 0.1875rem 0.625rem; border-radius: 4px; cursor: pointer; font: inherit; }
   .modal { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: none;
     align-items: center; justify-content: center; z-index: 100; }
   .modal.show { display: flex; }
   .modal-box { background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
-    padding: 16px 20px; max-width: 520px; }
-  .modal-box h3 { margin: 0 0 10px; color: var(--bold); }
-  .modal-box ul { margin: 6px 0 12px; padding-left: 20px; }
-  .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
-  .modal-actions button { padding: 5px 12px; }
-  .login { max-width: 480px; margin: 60px auto; background: var(--panel);
-    border: 1px solid var(--border); border-radius: 6px; padding: 20px 24px; }
-  .login h1 { color: var(--bold); margin: 0 0 6px; font-size: 18px; }
-  .login p { color: var(--dim); margin: 6px 0 12px; }
+    padding: 1rem 1.25rem; max-width: 32.5rem; }
+  .modal-box h3 { margin: 0 0 0.625rem; color: var(--bold); }
+  .modal-box ul { margin: 0.375rem 0 0.75rem; padding-left: 1.25rem; }
+  .modal-actions { display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 0.875rem; }
+  .modal-actions button { padding: 0.3125rem 0.75rem; }
+  .login { max-width: 30rem; margin: 3.75rem auto; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 6px; padding: 1.25rem 1.5rem; }
+  .login h1 { color: var(--bold); margin: 0 0 0.375rem; font-size: var(--fs-xl); }
+  .login p { color: var(--dim); margin: 0.375rem 0 0.75rem; }
   .login input { width: 100%; box-sizing: border-box; background: var(--input-bg);
-    color: var(--fg); border: 1px solid var(--border); padding: 8px;
+    color: var(--fg); border: 1px solid var(--border); padding: 0.5rem;
     border-radius: 4px; font: inherit; }
-  .login button { margin-top: 10px; background: #238636; border: 1px solid #2ea043;
-    color: var(--bold); padding: 7px 14px; border-radius: 4px; cursor: pointer;
+  .login button { margin-top: 0.625rem; background: #238636; border: 1px solid #2ea043;
+    color: var(--bold); padding: 0.4375rem 0.875rem; border-radius: 4px; cursor: pointer;
     font: inherit; }
-  #toast { position: fixed; bottom: 16px; right: 16px; background: var(--panel);
-    border: 1px solid var(--border); border-radius: 4px; padding: 8px 12px;
+  #toast { position: fixed; bottom: 1rem; right: 1rem; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 4px; padding: 0.5rem 0.75rem;
     color: var(--fg); display: none; }
   #toast.show { display: block; }
   #toast.err { border-color: #5a2424; color: var(--red); }
@@ -787,6 +798,7 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
     <span class="title">faster-whisper-backend · config</span>
     {{NAV}}
     <span class="spacer"></span>
+    {{SCALE_PICKER}}
     <button id="logout-btn" title="forget token in this tab">logout</button>
     <button id="reload-btn">reload</button>
     <button id="restart-btn" title="restart the WhisperAPI Windows Service">restart</button>
@@ -2473,4 +2485,5 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 })();
 </script>
+{{SCALE_PICKER_JS}}
 </body></html>"""

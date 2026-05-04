@@ -1049,29 +1049,38 @@ async def _stream_log_lines():
 _LOG_VIEWER_HTML = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <title>faster-whisper-backend · live logs</title>
+{{SCALE_BOOTSTRAP_HEAD}}
 <style>
   :root {
     --bg: #0d1117; --fg: #c9d1d9; --dim: #6e7681;
     --cyan: #79c0ff; --green: #7ee787; --yellow: #f2cc60;
     --red: #ff7b72; --magenta: #d2a8ff; --bold: #f0f6fc;
+    --border: #30363d;
   }
+  /* Font tokens + html font-size + color-scheme live in {{NAV_CSS}}. */
   html { height: 100%; }
   body { background: var(--bg); color: var(--fg);
-    font: 13px/1.45 ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+    font: 1rem/1.5 ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
     margin: 0; padding: 0; min-height: 100%; }
   header { position: sticky; top: 0; background: #161b22; border-bottom: 1px solid #30363d;
-    padding: 8px 14px; display: flex; gap: 12px; align-items: center; z-index: 10; }
-  header .title { font-weight: 600; color: var(--bold); }
-  header .pill { padding: 2px 8px; border-radius: 999px; background: #21262d; color: var(--dim);
-    font-size: 11px; }
+    z-index: 10; padding: 0; }
+  header > .header-inner { display: flex; gap: 0.75rem; align-items: center;
+    max-width: 1100px; margin: 0 auto; width: 100%; padding: 0.5rem 0.875rem;
+    box-sizing: border-box; }
+  header .title { font-weight: 600; color: var(--bold);
+    white-space: nowrap; flex-shrink: 0; }
+  header .pill { padding: 0.125rem 0.5rem; border-radius: 4px; background: #21262d; color: var(--dim);
+    font-size: var(--fs-xs); white-space: nowrap; flex-shrink: 0; }
   header .pill.live { color: var(--green); border: 1px solid #1f4d2a; }
   header .pill.paused { color: var(--yellow); border: 1px solid #4d3e1f; }
   header input { flex: 1; background: #0d1117; color: var(--fg); border: 1px solid #30363d;
-    padding: 4px 8px; border-radius: 4px; font: inherit; }
+    padding: 0.25rem 0.5rem; border-radius: 4px; font: inherit; min-width: 0; }
   header button { background: #21262d; color: var(--fg); border: 1px solid #30363d;
-    padding: 4px 10px; border-radius: 4px; cursor: pointer; font: inherit; }
+    padding: 0.25rem 0.625rem; border-radius: 4px; cursor: pointer; font: inherit;
+    flex-shrink: 0; }
   header button:hover { background: #30363d; }
-  #log { padding: 8px 14px; white-space: pre; overflow-anchor: none; }
+  #log { padding: 0.5rem 0.875rem; max-width: 1100px; margin: 0 auto;
+    white-space: pre; overflow-anchor: none; }
   .line { display: block; }
   .line.hidden { display: none; }
   .line.rule    { color: var(--dim); }
@@ -1088,14 +1097,15 @@ _LOG_VIEWER_HTML = """<!doctype html>
   {{NAV_CSS}}
 </style></head>
 <body>
-<header>
+<header><div class="header-inner">
   <span class="title">faster-whisper-backend · logs</span>
   {{NAV}}
   <input id="filter" type="text" placeholder="filter (case-insensitive substring)…">
+  {{SCALE_PICKER}}
   <button id="pauseBtn">pause</button>
   <button id="clearBtn">clear</button>
   <span id="status" class="pill live">live</span>
-</header>
+</div></header>
 <div id="log"></div>
 <script>
   const log = document.getElementById('log');
@@ -1210,6 +1220,7 @@ _LOG_VIEWER_HTML = """<!doctype html>
     }
   };
 </script>
+{{SCALE_PICKER_JS}}
 </body></html>"""
 
 

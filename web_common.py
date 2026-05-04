@@ -130,16 +130,32 @@ def severity_counts(window_sec: float = 60.0) -> dict[str, int]:
 # so the right side stays right-aligned regardless of how many actions a page
 # has.
 NAV_CSS = """
+/* Global scaling tokens — every page uses these so a single :root knob
+   (`--fs-base`) re-scales the WHOLE UI. Bump --fs-base to scale up; the
+   scale-picker dropdown writes inline-style to override at runtime.
+   Spacing/padding everywhere uses rem so it scales with font. */
+:root {
+  --fs-base:  15px;
+  --fs-xs:    0.733rem;   /* ~11px @ 15px base */
+  --fs-sm:    0.8rem;     /* ~12px */
+  --fs-md:    0.867rem;   /* ~13px */
+  --fs-lg:    1rem;       /* 15px (= base) */
+  --fs-xl:    1.2rem;     /* ~18px */
+  --fs-xxl:   1.467rem;   /* ~22px */
+}
+html { font-size: var(--fs-base); color-scheme: dark; }
 header .spacer { flex: 1; }
-header .navrow { display: flex; gap: 4px; }
-header .navlink { padding: 3px 10px; border-radius: 4px; color: var(--dim);
-  text-decoration: none; font-size: 12px; border: 1px solid transparent; }
+header .navrow { display: flex; gap: 0.25rem; }
+header .navlink { padding: 0.1875rem 0.625rem; border-radius: 4px; color: var(--dim);
+  text-decoration: none; font-size: var(--fs-sm); border: 1px solid transparent;
+  flex-shrink: 0; white-space: nowrap; }
 header .navlink:hover { background: #21262d; color: var(--fg); }
 header .navlink.active { color: var(--bold); background: #21262d;
   border-color: var(--border); }
-header .sevpill { font-size: 11px; padding: 2px 8px; border-radius: 999px;
+header .sevpill { font-size: var(--fs-xs); padding: 0.125rem 0.5rem; border-radius: 4px;
   border: 1px solid var(--border); color: var(--dim); text-decoration: none;
-  display: inline-flex; gap: 4px; align-items: baseline; }
+  display: inline-flex; gap: 0.25rem; align-items: baseline;
+  flex-shrink: 0; white-space: nowrap; }
 header .sevpill .n { font-variant-numeric: tabular-nums; }
 header .sevpill.warn.hot { color: var(--yellow); border-color: #4d3e1f; }
 header .sevpill.err.hot  { color: var(--red);    border-color: #5a2424; }
@@ -148,6 +164,56 @@ header .sevpill.crit.hot { color: var(--red);    border-color: #5a2424;
 header .sevpill.zero { opacity: 0.45; }
 @keyframes sev-flash { 0% { background: #5a2424 } 100% { background: transparent } }
 header .sevpill.flash { animation: sev-flash .6s ease-out; }
+/* Scale picker dropdown — same dark-themed look as other selects.
+   Inline SVG arrow keeps it portable across pages. */
+header .scale-picker {
+  background: #0d1117 url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path fill='%236e7681' d='M0 0l5 6 5-6z'/></svg>")
+    no-repeat right 0.375rem center;
+  color: var(--fg); border: 1px solid var(--border); border-radius: 4px;
+  padding: 0.125rem 1.25rem 0.125rem 0.5rem;
+  font: inherit; font-size: var(--fs-xs); cursor: pointer;
+  appearance: none; -webkit-appearance: none;
+  flex-shrink: 0;
+}
+"""
+
+
+# Bootstrap script — applies the persisted UI scale BEFORE the page's CSS
+# parses, avoiding a flash-of-default-size on every navigation. Belongs in
+# <head> as the very first <script>.
+SCALE_BOOTSTRAP_HEAD = (
+    "<script>(function(){var v=localStorage.getItem('whisper-ui-fs-base');"
+    "if(v)document.documentElement.style.setProperty('--fs-base',v+'px');})();</script>"
+)
+
+
+# Header dropdown HTML — placed just before the action cluster (logout etc.).
+SCALE_PICKER_HTML = (
+    '<select id="scale-picker" class="scale-picker" title="UI scale">'
+    '<option value="13">90%</option>'
+    '<option value="15" selected>100%</option>'
+    '<option value="17">110%</option>'
+    '<option value="18">120%</option>'
+    '<option value="20">130%</option>'
+    '</select>'
+)
+
+
+# Wire-up JS — placed at the end of <body>. Restores the saved value into
+# the dropdown and persists future selections. Independent of the <head>
+# bootstrap (which only sets the inline style); this binds the change handler.
+SCALE_PICKER_JS = """
+<script>(function(){
+  var KEY='whisper-ui-fs-base';
+  var sel=document.getElementById('scale-picker');
+  if(!sel)return;
+  var saved=localStorage.getItem(KEY);
+  if(saved){sel.value=saved;}
+  sel.addEventListener('change',function(){
+    document.documentElement.style.setProperty('--fs-base',sel.value+'px');
+    localStorage.setItem(KEY,sel.value);
+  });
+})();</script>
 """
 
 
@@ -192,7 +258,19 @@ def nav_html(current: str) -> str:
 
 
 def render_page(template: str, current: str) -> str:
-    """Substitute {{NAV}} and {{NAV_CSS}} placeholders in a page template.
+    """Substitute placeholders in a page template:
+      - {{NAV}}                  → nav row + severity pills
+      - {{NAV_CSS}}              → shared header/scale-token CSS
+      - {{SCALE_PICKER}}         → scale dropdown (header)
+      - {{SCALE_PICKER_JS}}      → wire-up script (end of body)
+      - {{SCALE_BOOTSTRAP_HEAD}} → tiny pre-paint script (top of <head>)
 
-    Pages that don't include the placeholders are returned unchanged."""
-    return template.replace("{{NAV}}", nav_html(current)).replace("{{NAV_CSS}}", NAV_CSS)
+    Pages that don't include a given placeholder are returned unchanged."""
+    return (
+        template
+        .replace("{{NAV}}", nav_html(current))
+        .replace("{{NAV_CSS}}", NAV_CSS)
+        .replace("{{SCALE_PICKER}}", SCALE_PICKER_HTML)
+        .replace("{{SCALE_PICKER_JS}}", SCALE_PICKER_JS)
+        .replace("{{SCALE_BOOTSTRAP_HEAD}}", SCALE_BOOTSTRAP_HEAD)
+    )

@@ -93,8 +93,11 @@ async def stats_stream() -> StreamingResponse:
 _STATS_VIEWER_HTML = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <title>faster-whisper-backend · stats</title>
+{{SCALE_BOOTSTRAP_HEAD}}
 <link rel="stylesheet" href="/static/uplot.min.css">
+<link rel="stylesheet" href="/static/gridstack.min.css">
 <script src="/static/uplot.iife.min.js"></script>
+<script src="/static/gridstack.min.js"></script>
 <style>
   :root {
     --bg: #0d1117; --panel: #161b22; --fg: #c9d1d9; --dim: #6e7681;
@@ -102,42 +105,45 @@ _STATS_VIEWER_HTML = r"""<!doctype html>
     --red: #ff7b72; --magenta: #d2a8ff; --bold: #f0f6fc;
     --border: #30363d;
   }
-  html { color-scheme: dark; }
+  /* Font tokens + html font-size + color-scheme live in {{NAV_CSS}}. */
   html, body { background: var(--bg); color: var(--fg);
-    font: 16px/1.5 ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+    font: 1rem/1.5 ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
     margin: 0; padding: 0; min-height: 100%; }
   header { position: sticky; top: 0; background: var(--panel); border-bottom: 1px solid var(--border);
     z-index: 10; padding: 0; }
-  header > .header-inner { display: flex; gap: 12px; align-items: center;
-    max-width: 1100px; margin: 0 auto; width: 100%; padding: 8px 14px;
+  header > .header-inner { display: flex; gap: 0.75rem; align-items: center;
+    max-width: 1100px; margin: 0 auto; width: 100%; padding: 0.5rem 0.875rem;
     box-sizing: border-box; }
-  header .title { font-weight: 600; color: var(--bold); }
-  header .pill { padding: 2px 8px; border-radius: 999px; background: #21262d; color: var(--dim);
-    font-size: 11px; }
+  header .title { font-weight: 600; color: var(--bold);
+    white-space: nowrap; flex-shrink: 0; }
+  header .pill { padding: 0.125rem 0.5rem; border-radius: 4px; background: #21262d; color: var(--dim);
+    font-size: var(--fs-xs); white-space: nowrap; flex-shrink: 0; }
   header .pill.live { color: var(--green); border: 1px solid #1f4d2a; }
   header .pill.paused { color: var(--yellow); border: 1px solid #4d3e1f; }
+  header button { background: #21262d; color: var(--fg); border: 1px solid var(--border);
+    padding: 0.25rem 0.625rem; border-radius: 4px; cursor: pointer; font: inherit;
+    flex-shrink: 0; }
+  header button:hover { background: #30363d; }
   {{NAV_CSS}}
-  .grid { display: grid; gap: 12px;
-    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-    padding: 14px; max-width: 1100px; margin: 0 auto;
-    box-sizing: border-box; }
+  .grid { padding: 0.875rem; max-width: 1100px; margin: 0 auto;
+    box-sizing: border-box; min-height: 60vh; }
   .card { background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
-    padding: 10px 12px; }
-  .card.span2 { grid-column: span 2; }
-  .card h3 { font-size: 11px; color: var(--dim); margin: 0 0 6px;
+    padding: 0.625rem 0.75rem; min-width: 0; height: 100%; box-sizing: border-box;
+    overflow: auto; }
+  .card h3 { font-size: var(--fs-xs); color: var(--dim); margin: 0 0 0.375rem;
     text-transform: uppercase; letter-spacing: .05em; font-weight: 500; }
-  .card .val { color: var(--bold); font-size: 22px; font-weight: 600; line-height: 1.1; }
-  .card .val .sub { color: var(--dim); font-size: 12px; font-weight: normal; margin-left: 6px; }
-  .card .meta { color: var(--dim); font-size: 11px; margin-top: 4px; }
+  .card .val { color: var(--bold); font-size: var(--fs-xxl); font-weight: 600; line-height: 1.1; }
+  .card .val .sub { color: var(--dim); font-size: var(--fs-sm); font-weight: normal; margin-left: 0.375rem; }
+  .card .meta { color: var(--dim); font-size: var(--fs-xs); margin-top: 0.25rem; }
   .card .meta b { color: var(--fg); font-weight: 500; }
-  .bar { height: 6px; background: #21262d; border-radius: 3px; margin-top: 6px; overflow: hidden; }
+  .bar { height: 6px; background: #21262d; border-radius: 3px; margin-top: 0.375rem; overflow: hidden; }
   .bar > i { display: block; height: 100%; background: var(--cyan);
     transition: width .3s ease; }
   .bar.warn > i { background: var(--yellow); }
   .bar.crit > i { background: var(--red); }
-  .spark-wrap  { margin-top: 10px; }
+  .spark-wrap  { margin-top: 0.625rem; min-width: 0; }
   .spark-head  { display: flex; justify-content: space-between; align-items: baseline;
-                 font: 11px ui-monospace, "Cascadia Code", Menlo, monospace;
+                 font: var(--fs-xs) ui-monospace, "Cascadia Code", Menlo, monospace;
                  color: var(--dim); margin-bottom: 2px; }
   .spark-label { letter-spacing: .03em; text-transform: uppercase; }
   .spark-now   { color: var(--bold); font-weight: 600;
@@ -146,43 +152,71 @@ _STATS_VIEWER_HTML = r"""<!doctype html>
   .uplot, .u-wrap { background: transparent !important; }
   .u-legend { display: none; }
   .u-axis { color: var(--dim); }
-  table.tbl { width: 100%; border-collapse: collapse; font-size: 12px; }
-  table.tbl th, table.tbl td { padding: 4px 6px; text-align: left;
+  table.tbl { width: 100%; border-collapse: collapse; font-size: var(--fs-sm); }
+  table.tbl th, table.tbl td { padding: 0.25rem 0.375rem; text-align: left;
     border-bottom: 1px solid #21262d; }
-  table.tbl th { color: var(--dim); font-weight: 500; font-size: 11px;
+  table.tbl th { color: var(--dim); font-weight: 500; font-size: var(--fs-xs);
     text-transform: uppercase; }
   table.tbl td.num { text-align: right; font-variant-numeric: tabular-nums; }
-  .badge { display: inline-block; font-size: 10px; padding: 1px 6px;
+  .badge { display: inline-block; font-size: 0.667rem; padding: 0.0625rem 0.375rem;
     border-radius: 999px; border: 1px solid var(--border); color: var(--dim); }
   .badge.warm { color: var(--green); border-color: #1f4d2a; }
   .badge.cold { color: var(--yellow); border-color: #4d3e1f; }
   .badge.ok { color: var(--green); border-color: #1f4d2a; }
   .badge.err { color: var(--red); border-color: #5a2424; }
   .ts { color: var(--dim); font-variant-numeric: tabular-nums; }
-  .core-strip { display: flex; gap: 2px; margin-top: 6px; height: 24px;
+  .core-strip { display: flex; gap: 2px; margin-top: 0.375rem; height: 1.5rem;
     align-items: flex-end; }
   .core-strip > div { flex: 1; background: var(--cyan); border-radius: 1px;
     min-height: 2px; transition: height .3s ease; }
-  .err-strip { display: flex; gap: 4px; margin-top: 6px; }
-  .err-strip .seg { flex: 1; text-align: center; padding: 6px;
+  .err-strip { display: flex; gap: 0.25rem; margin-top: 0.375rem; }
+  .err-strip .seg { flex: 1; text-align: center; padding: 0.375rem;
     background: #21262d; border-radius: 4px; }
-  .err-strip .seg b { color: var(--bold); display: block; font-size: 18px; }
+  .err-strip .seg b { color: var(--bold); display: block; font-size: var(--fs-xl); }
   .err-strip .seg.hot { background: #2d1414; }
   .err-strip .seg.hot b { color: var(--red); }
   .empty { color: var(--dim); font-style: italic; }
   .hidden { display: none !important; }
+  /* GridStack integration — drag-to-reorder + click-to-resize tiles. */
+  .grid-stack { background: transparent; }
+  .grid-stack-item-content { background: transparent; padding: 0; overflow: visible; }
+  .grid-stack-item .card { cursor: default; }
+  .grid-stack-item .card h3 { cursor: grab; user-select: none; }
+  .grid-stack-item .card h3:active { cursor: grabbing; }
+  .grid-stack-placeholder > .placeholder-content {
+    background: rgba(56, 189, 248, 0.08);
+    border: 1px dashed var(--cyan);
+    border-radius: 6px;
+  }
+  .grid-stack > .grid-stack-item > .ui-resizable-handle {
+    background-image: none;
+    color: var(--dim);
+    opacity: 0;
+    transition: opacity 120ms ease;
+  }
+  .grid-stack > .grid-stack-item:hover > .ui-resizable-handle { opacity: 0.6; }
+  .grid-stack > .grid-stack-item > .ui-resizable-se {
+    width: 12px; height: 12px;
+    border-right: 2px solid var(--dim);
+    border-bottom: 2px solid var(--dim);
+    transform: none;
+  }
 </style></head>
 <body>
 <header><div class="header-inner">
   <span class="title">faster-whisper-backend · stats</span>
   {{NAV}}
   <span class="spacer"></span>
+  {{SCALE_PICKER}}
+  <button id="reset-layout-btn" title="reset stats tile layout to defaults">↺ layout</button>
   <span id="status" class="pill live">live</span>
 </div></header>
 
 <div id="grid" class="grid">
+ <div class="grid-stack">
   <!-- GPU -->
-  <div id="card-gpu" class="card span2">
+  <div class="grid-stack-item" gs-id="gpu" gs-x="0" gs-y="0" gs-w="6" gs-h="9">
+   <div class="grid-stack-item-content"><div id="card-gpu" class="card">
     <h3>GPU</h3>
     <div id="gpu-name" class="val">—</div>
     <div id="gpu-meta" class="meta"></div>
@@ -203,16 +237,20 @@ _STATS_VIEWER_HTML = r"""<!doctype html>
         <span id="gpu-temp-now" class="spark-now">—</span></div>
       <div id="gpu-spark-temp" class="spark"></div>
     </div>
+   </div></div>
   </div>
 
-  <div id="card-gpu-missing" class="card hidden">
+  <div class="grid-stack-item hidden" gs-id="gpu-missing" gs-x="0" gs-y="0" gs-w="6" gs-h="3">
+   <div class="grid-stack-item-content"><div id="card-gpu-missing" class="card">
     <h3>GPU</h3>
     <div class="empty">NVML unavailable — running on CPU or pynvml not installed.</div>
     <div id="gpu-error" class="meta"></div>
+   </div></div>
   </div>
 
   <!-- Host CPU -->
-  <div class="card">
+  <div class="grid-stack-item" gs-id="cpu" gs-x="6" gs-y="0" gs-w="6" gs-h="5">
+   <div class="grid-stack-item-content"><div class="card">
     <h3>CPU (host)</h3>
     <div id="cpu-pct" class="val">—<span class="sub">%</span></div>
     <div id="cpu-cores" class="core-strip"></div>
@@ -221,10 +259,12 @@ _STATS_VIEWER_HTML = r"""<!doctype html>
         <span id="cpu-now" class="spark-now">—</span></div>
       <div id="cpu-spark" class="spark"></div>
     </div>
+   </div></div>
   </div>
 
   <!-- Host RAM -->
-  <div class="card">
+  <div class="grid-stack-item" gs-id="ram" gs-x="6" gs-y="5" gs-w="6" gs-h="4">
+   <div class="grid-stack-item-content"><div class="card">
     <h3>RAM</h3>
     <div id="ram-val" class="val">— <span class="sub">/ — GB</span></div>
     <div id="ram-bar" class="bar"><i style="width:0"></i></div>
@@ -234,24 +274,43 @@ _STATS_VIEWER_HTML = r"""<!doctype html>
         <span id="ram-now" class="spark-now">—</span></div>
       <div id="ram-spark" class="spark"></div>
     </div>
+   </div></div>
   </div>
 
   <!-- Process -->
-  <div class="card">
+  <div class="grid-stack-item" gs-id="process" gs-x="0" gs-y="9" gs-w="4" gs-h="3">
+   <div class="grid-stack-item-content"><div class="card">
     <h3>Process</h3>
     <div id="proc-rss" class="val">—<span class="sub">MB RSS</span></div>
     <div id="proc-meta" class="meta"></div>
+   </div></div>
   </div>
 
   <!-- In-flight + uptime -->
-  <div class="card">
+  <div class="grid-stack-item" gs-id="activity" gs-x="4" gs-y="9" gs-w="4" gs-h="3">
+   <div class="grid-stack-item-content"><div class="card">
     <h3>Activity</h3>
     <div id="inflight-val" class="val">0<span class="sub">in flight</span></div>
     <div id="activity-meta" class="meta"></div>
+   </div></div>
+  </div>
+
+  <!-- Errors window -->
+  <div class="grid-stack-item" gs-id="errors" gs-x="8" gs-y="9" gs-w="4" gs-h="3">
+   <div class="grid-stack-item-content"><div class="card">
+    <h3>Errors (5xx)</h3>
+    <div class="err-strip">
+      <div id="err-1m" class="seg"><b>0</b>1 min</div>
+      <div id="err-5m" class="seg"><b>0</b>5 min</div>
+      <div id="err-15m" class="seg"><b>0</b>15 min</div>
+    </div>
+    <div id="err-meta" class="meta"></div>
+   </div></div>
   </div>
 
   <!-- Latency -->
-  <div class="card">
+  <div class="grid-stack-item" gs-id="latency" gs-x="0" gs-y="12" gs-w="6" gs-h="5">
+   <div class="grid-stack-item-content"><div class="card">
     <h3>Request latency (last <span id="lat-n">0</span>)</h3>
     <div id="lat-val" class="val">— <span class="sub">ms p50</span></div>
     <div id="lat-meta" class="meta"></div>
@@ -260,28 +319,21 @@ _STATS_VIEWER_HTML = r"""<!doctype html>
         <span id="lat-now" class="spark-now">—</span></div>
       <div id="lat-spark" class="spark"></div>
     </div>
-  </div>
-
-  <!-- Errors window -->
-  <div class="card">
-    <h3>Errors (5xx)</h3>
-    <div class="err-strip">
-      <div id="err-1m" class="seg"><b>0</b>1 min</div>
-      <div id="err-5m" class="seg"><b>0</b>5 min</div>
-      <div id="err-15m" class="seg"><b>0</b>15 min</div>
-    </div>
-    <div id="err-meta" class="meta"></div>
+   </div></div>
   </div>
 
   <!-- Endpoint counters -->
-  <div class="card span2">
+  <div class="grid-stack-item" gs-id="endpoints" gs-x="6" gs-y="12" gs-w="6" gs-h="5">
+   <div class="grid-stack-item-content"><div class="card">
     <h3>Endpoint counters</h3>
     <table class="tbl"><thead><tr><th>path</th><th class="num">requests</th><th class="num">5xx</th></tr></thead>
     <tbody id="endpoints-rows"></tbody></table>
+   </div></div>
   </div>
 
   <!-- Loaded models -->
-  <div class="card span2">
+  <div class="grid-stack-item" gs-id="models" gs-x="0" gs-y="17" gs-w="12" gs-h="4">
+   <div class="grid-stack-item-content"><div class="card">
     <h3>Loaded models</h3>
     <table class="tbl"><thead><tr>
       <th>name</th><th>device</th><th>compute</th>
@@ -289,22 +341,76 @@ _STATS_VIEWER_HTML = r"""<!doctype html>
       <th class="num">age</th><th class="num">idle</th>
       <th class="num">cold-load</th>
     </tr></thead><tbody id="models-rows"></tbody></table>
+   </div></div>
   </div>
 
   <!-- Recent transcriptions -->
-  <div class="card span2">
+  <div class="grid-stack-item" gs-id="recent" gs-x="0" gs-y="21" gs-w="12" gs-h="6">
+   <div class="grid-stack-item-content"><div class="card">
     <h3>Recent transcriptions (last <span id="rt-n">0</span>)</h3>
     <table class="tbl"><thead><tr>
       <th>when</th><th>model</th>
       <th class="num">audio</th><th class="num">wall</th><th class="num">RTF</th>
       <th class="num">words</th><th>status</th>
     </tr></thead><tbody id="rt-rows"><tr><td colspan="7" class="empty">— no requests yet —</td></tr></tbody></table>
+   </div></div>
   </div>
+ </div>
 </div>
 
 <script>
 (() => {
 'use strict';
+
+// --- GridStack init: drag-to-reorder + click-to-resize tiles ---------------
+// Layout state persists in localStorage; [↺ layout] in the header clears it.
+// uPlot sparklines re-fit on resizestop via setSize().
+const GS_LAYOUT_KEY = 'whisper-stats-layout';
+const grid = GridStack.init({
+  column: 12,
+  cellHeight: 60,
+  margin: 6,
+  float: false,
+  resizable: { handles: 'se,s,e' },
+  draggable: { handle: '.card h3' },
+  alwaysShowResizeHandle: false,
+});
+// Restore saved layout if present (best-effort — schema mismatches are
+// silently ignored; user can hit [↺ layout] to recover defaults).
+try {
+  const saved = localStorage.getItem(GS_LAYOUT_KEY);
+  if (saved) grid.load(JSON.parse(saved));
+} catch (_) {}
+// Persist on every change (debounced via setTimeout to coalesce rapid drags).
+let _saveTimer = null;
+function _saveLayout() {
+  if (_saveTimer) clearTimeout(_saveTimer);
+  _saveTimer = setTimeout(() => {
+    try { localStorage.setItem(GS_LAYOUT_KEY, JSON.stringify(grid.save(false))); } catch (_) {}
+  }, 200);
+}
+grid.on('change added removed', _saveLayout);
+// Resize-stop: re-fit any uPlot inside the resized item so sparklines fill.
+// `sparks` is declared later in the IIFE; at event-time the closure has it.
+grid.on('resizestop', (event, el) => {
+  el.querySelectorAll('.spark').forEach(spark => {
+    for (const k in sparks) {
+      const inst = sparks[k];
+      if (inst && inst.root && el.contains(inst.root)) {
+        inst.setSize({ width: spark.clientWidth || 240, height: spark.clientHeight || 72 });
+      }
+    }
+  });
+});
+// Header reset-layout button.
+const resetLayoutBtn = document.getElementById('reset-layout-btn');
+if (resetLayoutBtn) {
+  resetLayoutBtn.addEventListener('click', () => {
+    if (!confirm('Reset stats tile layout to defaults?')) return;
+    localStorage.removeItem(GS_LAYOUT_KEY);
+    location.reload();
+  });
+}
 
 // --- per-metric history rings ----------------------------------------------
 const HISTORY_LEN = 120;     // 2 min @ 1 Hz
@@ -434,8 +540,9 @@ function render(snap) {
 
   // --- GPU ---
   if (snap.gpu) {
-    $('card-gpu').classList.remove('hidden');
-    $('card-gpu-missing').classList.add('hidden');
+    // Toggle the GridStack wrapper (.grid-stack-item) so layout reflows.
+    $('card-gpu').closest('.grid-stack-item').classList.remove('hidden');
+    $('card-gpu-missing').closest('.grid-stack-item').classList.add('hidden');
     $('gpu-name').textContent = snap.gpu.name || 'GPU';
     $('gpu-meta').innerHTML =
       `<b>util</b> ${snap.gpu.util_pct ?? '—'}% &nbsp; ` +
@@ -457,8 +564,8 @@ function render(snap) {
     $('gpu-mem-now').textContent  = memPct.toFixed(0) + '%';
     $('gpu-temp-now').textContent = (snap.gpu.temp_c ?? 0).toFixed(0) + '°C';
   } else {
-    $('card-gpu').classList.add('hidden');
-    $('card-gpu-missing').classList.remove('hidden');
+    $('card-gpu').closest('.grid-stack-item').classList.add('hidden');
+    $('card-gpu-missing').closest('.grid-stack-item').classList.remove('hidden');
     $('gpu-error').textContent = snap.gpu_error || '';
   }
 
@@ -656,4 +763,5 @@ fetch('/stats/snapshot', { cache: 'no-store' })
 
 })();
 </script>
+{{SCALE_PICKER_JS}}
 </body></html>"""
