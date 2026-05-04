@@ -96,10 +96,15 @@ FIELD_DESCRIPTIONS: dict[str, str] = {
         "Models eagerly loaded at startup so the first request skips the "
         "5-30 s warm-up. Empty = only DEFAULT_MODEL.",
     "MODEL_DEVICE":
-        "Hardware to run the model on. 'cuda' uses GPU, 'cpu' uses CPU.",
+        "Device to use for computation. cuda = NVIDIA GPU; cpu = host CPU. "
+        "(faster-whisper)",
     "MODEL_COMPUTE_TYPE":
-        "Numerical precision. float16=fast/GPU, int8=smallest/fastest CPU, "
-        "int8_float16=GPU memory-saver.",
+        "Numerical precision (CTranslate2). "
+        "float16: half-precision, weights + layers in FP16 (NVIDIA CC ≥ 7.0). "
+        "bfloat16: brain-float, half-precision (NVIDIA Ampere+ / CC ≥ 8.0). "
+        "int8: 8-bit weight quantization (smallest, fastest on CPU). "
+        "int8_float16: int8 weights + FP16 activations (smallest GPU footprint). "
+        "float32: full precision, largest + slowest.",
     "MODEL_DEVICE_FALLBACK":
         "Backup hardware target if the primary device fails to load "
         "(e.g. fall back to 'cpu' if CUDA is unavailable).",
@@ -109,44 +114,58 @@ FIELD_DESCRIPTIONS: dict[str, str] = {
 
     # --- Decode params (transcribe-time) ---
     "DEFAULT_LANGUAGE":
-        "ISO 639-1 language code (e.g. 'en', 'de'). Leave empty to auto-detect "
-        "from the first 30 seconds.",
+        "Language code such as 'en' or 'de'. If empty, the language is "
+        "detected in the first 30 seconds of audio. (faster-whisper)",
     "DEFAULT_PROMPT":
-        "Seed text injected as initial_prompt — use for custom vocab, names, "
-        "or jargon to bias recognition.",
+        "Optional text passed as initial_prompt for the first window — "
+        "useful for custom vocabularies or proper nouns to make those "
+        "words more likely to be predicted. (OpenAI Whisper)",
     "BEAM_SIZE":
-        "Beam-search width. Higher = better quality but slower. "
-        "faster-whisper default 5; OpenAI default 1.",
+        "Beam size to use for decoding. Higher = better quality but slower. "
+        "faster-whisper default 5.",
     "BEST_OF":
-        "How many candidates to sample when temperature > 0. Only takes "
-        "effect during fallback retries.",
+        "Number of independent sample trajectories when temperature > 0 "
+        "(only on fallback-retry passes; the initial T=0 pass uses beam "
+        "search instead). faster-whisper default 5.",
     "VAD_FILTER":
-        "Skip silent regions before transcription using Silero VAD. "
-        "Reduces hallucinations in quiet audio.",
+        "Enable voice activity detection (VAD) to filter out parts of the "
+        "audio without speech. Uses the Silero VAD model. Reduces "
+        "hallucinations in quiet audio.",
     "VAD_MIN_SILENCE_MS":
-        "How much silence (ms) ends a speech chunk. Smaller splits more "
-        "aggressively. Silero default 2000 ms.",
+        "In the end of each speech chunk, wait this long before separating "
+        "it. Default 2000 ms (faster-whisper override; tuned to avoid "
+        "splitting on short breaths).",
     "VAD_SPEECH_PAD_MS":
-        "Extra audio (ms) kept on both sides of each speech chunk so word "
-        "edges aren't clipped. Silero default 400 ms.",
+        "Final speech chunks are padded by this much on each side. "
+        "Default 400 ms (faster-whisper override; prevents word-edge "
+        "consonants from being clipped).",
     "VAD_THRESHOLD":
-        "Probability cutoff (0-1) above which audio counts as speech. "
-        "Lower = more inclusive. Silero default 0.5.",
+        "Speech threshold. Silero VAD outputs speech probabilities for "
+        "each audio chunk; probabilities ABOVE this value are considered "
+        "as SPEECH. Default 0.5; tune per dataset if needed.",
     "CONDITION_ON_PREVIOUS_TEXT":
-        "Feed prior text as context to next window. Off reduces repetition "
-        "loops but may hurt cross-window consistency.",
+        "If true, the previous output of the model is provided as a "
+        "prompt for the next window. Disabling may make the text "
+        "inconsistent across windows, but the model becomes less prone "
+        "to getting stuck in failure loops (repetition; timestamps "
+        "drifting out of sync). Default true.",
     "WORD_TIMESTAMPS_ENABLED":
-        "Compute per-word start/end times via cross-attention DTW. Slower "
-        "but enables word-aligned output.",
+        "Extract word-level timestamps using the cross-attention pattern "
+        "and dynamic time warping, and include the timestamps for each "
+        "word in each segment. Slower.",
     "NO_SPEECH_THRESHOLD":
-        "If silence-probability exceeds this AND log-prob is low, segment "
-        "is dropped as silence. Default 0.6.",
+        "If the no_speech probability is higher than this value AND the "
+        "average log-probability over sampled tokens is below "
+        "LOG_PROB_THRESHOLD, the segment is dropped as silent. Default 0.6.",
     "LOG_PROB_THRESHOLD":
-        "Floor for average token log-probability. Below this triggers a "
-        "temperature-fallback retry. Default -1.0.",
+        "If the average log-probability over sampled tokens is below "
+        "this value, treat the decode as failed (triggers a temperature-"
+        "fallback retry). Default -1.0.",
     "COMPRESSION_RATIO_THRESHOLD":
-        "Detects repetition loops: if output compresses too well, retry "
-        "decoding. Default 2.4.",
+        "If the gzip-compression ratio (zlib in the implementation) of "
+        "the decoded text is above this value, treat the decode as "
+        "failed (triggers a temperature-fallback retry). Catches "
+        "repetition loops. Default 2.4.",
 
     # --- Pipeline ---
     "PIPELINE_RULES":

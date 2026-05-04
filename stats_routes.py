@@ -482,10 +482,13 @@ function makeSpark(elId, color, opts={}) {
   const axisFontPx = _axisFontPx();
   return new uPlot({
     width: w, height: 72,
-    // Left padding (was 0) plus axis size (was 28, now ~3rem) gives uPlot
-    // room to draw "100%" without GridStack's overflow-x:hidden clipping
-    // the leading "1" against the tile edge.
-    padding: [4, 6, 0, _remPx(0.25)],
+    // [top, right, bottom, left] in px. Bottom > 0 gives the lowest y-axis
+    // tick label ("0%" / "30°") room for its descender / lower half — was 0,
+    // so the label was clipped by the canvas's bottom edge. Left padding
+    // (was 0) plus axis size (was 28, now ~3rem) gives uPlot room to draw
+    // "100%" without GridStack's overflow-x:hidden clipping the leading "1"
+    // against the tile edge.
+    padding: [_remPx(0.25), 6, _remPx(0.4), _remPx(0.25)],
     cursor: { show: false },
     legend: { show: false },
     select: { show: false },
