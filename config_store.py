@@ -302,9 +302,15 @@ FIELD_DESCRIPTIONS: dict[str, str] = {
         "disable, or add custom rules. Reset to defaults if anything breaks. "
         "The final 'trim edges' row always runs last.",
     "PIPELINE_RULES_EXCLUDE":
-        "(Per-model only) List of pipeline rule slugs to skip when this "
-        "model is serving the request. Use to drop e.g. 'dictation-map' "
-        "for German fine-tunes that already emit punctuation symbols.",
+        "(Per-model only) List of pipeline rule slugs to FORCE-DISABLE when "
+        "this model is serving the request — even if the rule is enabled "
+        "globally. Use to drop e.g. 'dictation-map' for German fine-tunes "
+        "that already emit punctuation symbols.",
+    "PIPELINE_RULES_INCLUDE":
+        "(Per-model only) List of pipeline rule slugs to FORCE-ENABLE when "
+        "this model is serving the request — even if the rule is disabled "
+        "globally. Inverse of PIPELINE_RULES_EXCLUDE; a slug cannot appear "
+        "in both lists at once.",
     "MODEL_OVERRIDES":
         "Per-model override bundle. Maps model id → override dict. Each "
         "override may set any of the per-model-overrideable fields; "
@@ -528,10 +534,34 @@ class ModelOverride(BaseModel):
     OUTPUT_SUFFIX: Annotated[str, Field(max_length=512)] | None = None
 
     # --- Pipeline scoping (PM-only) ---
+    # EXCLUDE: force-DISABLE rules that are enabled globally.
+    # INCLUDE: force-ENABLE rules that are disabled globally. Inverse list.
+    # A rule slug must not appear in both — enforced by _no_overlap_… validator.
     PIPELINE_RULES_EXCLUDE: Annotated[
         list[RuleSlug],
         Field(max_length=200),
     ] | None = None
+    PIPELINE_RULES_INCLUDE: Annotated[
+        list[RuleSlug],
+        Field(max_length=200),
+    ] | None = None
+
+    @model_validator(mode="after")
+    def _no_overlap_include_exclude(self) -> "ModelOverride":
+        """A rule slug cannot be both force-disabled AND force-enabled for the
+        same model — admin must pick one. Catches obvious misconfiguration
+        (e.g. typed both lists then forgot to clean one up)."""
+        ex = set(self.PIPELINE_RULES_EXCLUDE or [])
+        inc = set(self.PIPELINE_RULES_INCLUDE or [])
+        overlap = ex & inc
+        if overlap:
+            raise ValueError(
+                f"PIPELINE_RULES_EXCLUDE and PIPELINE_RULES_INCLUDE overlap: "
+                f"{sorted(overlap)} — a rule cannot be both force-disabled "
+                f"and force-enabled for the same model. Remove from one of "
+                f"the lists."
+            )
+        return self
 
 
 class AdminConfig(BaseModel):
@@ -772,6 +802,35 @@ class AdminConfig(BaseModel):
                 f"{orphans}. Remove the override(s) first or add them back "
                 f"to the allowlist."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_pipeline_rule_slugs(self) -> "AdminConfig":
+        """Reject any per-model EXCLUDE / INCLUDE that references a rule slug
+        not present in the canonical PIPELINE_RULES list. Closes the silent-
+        typo footgun where 'dictashion-map' would save cleanly and quietly do
+        nothing at runtime.
+
+        Only fires when both PIPELINE_RULES *and* MODEL_OVERRIDES are present
+        in the same payload — partial saves (just MODEL_OVERRIDES) skip the
+        check. The merged-with-existing payload built by save_overrides()
+        catches it on the next full validation pass.
+        """
+        if self.PIPELINE_RULES is None or self.MODEL_OVERRIDES is None:
+            return self
+        canonical = {r.name for r in self.PIPELINE_RULES}
+        if not canonical:
+            return self
+        for model_id, override in self.MODEL_OVERRIDES.items():
+            for list_name in ("PIPELINE_RULES_EXCLUDE", "PIPELINE_RULES_INCLUDE"):
+                slugs = getattr(override, list_name, None) or []
+                unknown = [s for s in slugs if s not in canonical]
+                if unknown:
+                    raise ValueError(
+                        f"MODEL_OVERRIDES[{model_id!r}].{list_name} "
+                        f"references unknown rule slugs: {unknown}. "
+                        f"Valid: {sorted(canonical)}."
+                    )
         return self
 
     @field_validator("MODEL_OVERRIDES")

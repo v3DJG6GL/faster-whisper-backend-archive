@@ -19,6 +19,7 @@ Security model (layered):
 from __future__ import annotations
 
 import logging
+import os
 import re
 import secrets
 import time
@@ -436,6 +437,20 @@ async def post_state(payload: dict[str, Any], request: Request) -> JSONResponse:
         # Never let eviction failure break the save response. The user's
         # change still persisted; worst case they restart manually.
         logger.error("[config] eviction-on-edit failed: %s", e)
+
+    # Re-sync os.environ["HF_TOKEN"] whenever USE_AUTH_TOKEN changed. The
+    # token is set process-wide at startup (main.py) so non-WhisperModel HF
+    # calls (Silero VAD, tokenizer fetches) inherit it; live edits via the
+    # admin UI need to re-set the env var or those callers stay on the old
+    # value until next service restart.
+    if "USE_AUTH_TOKEN" in written:
+        new_token = getattr(cfg, "USE_AUTH_TOKEN", None) or ""
+        if new_token:
+            os.environ["HF_TOKEN"] = new_token
+            logger.info("[config] HF_TOKEN updated from USE_AUTH_TOKEN edit")
+        else:
+            os.environ.pop("HF_TOKEN", None)
+            logger.info("[config] HF_TOKEN cleared (USE_AUTH_TOKEN unset)")
 
     client_host = request.client.host if request.client else "?"
     logger.info(
@@ -1083,6 +1098,23 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
     font-size: var(--fs-xs); color: var(--yellow); font-style: italic; }
   .pipeline-rules-wrap.checklist-mode .rule-row.terminal {
     border-left-color: var(--dim); }
+  /* Globally-disabled, NOT force-included → dim the row so the admin sees
+     "this is dormant unless I act". On hover it brightens slightly so the
+     row remains scannable. Once force-included, the .globally-disabled
+     class is removed → row returns to full opacity. */
+  .pipeline-rules-wrap.checklist-mode .rule-row.globally-disabled {
+    opacity: 0.5; filter: grayscale(0.6); }
+  .pipeline-rules-wrap.checklist-mode .rule-row.globally-disabled:hover {
+    opacity: 0.85; filter: grayscale(0.3); }
+  /* Tags: small italic badges sitting after the rule label/pill. */
+  .pipeline-rules-wrap.checklist-mode .rule-globally-disabled-tag,
+  .pipeline-rules-wrap.checklist-mode .rule-force-included-tag {
+    font-size: var(--fs-xs); padding: 0 0.4rem;
+    border-radius: 3px; font-style: italic; margin-left: 0.25rem; }
+  .pipeline-rules-wrap.checklist-mode .rule-globally-disabled-tag {
+    color: var(--dim); border: 1px solid var(--border); }
+  .pipeline-rules-wrap.checklist-mode .rule-force-included-tag {
+    color: var(--cyan); border: 1px solid #194f73; }
   .rule-checklist-footer { color: var(--dim); margin-top: 0.4rem;
     font-size: var(--fs-sm); }
   /* Narrow viewport: stack sidebar above main pane; let it scroll
@@ -2008,22 +2040,43 @@ function modelOverridesEditor(name, v) {
     secEl.appendChild(h4);
     const note = document.createElement('div');
     note.className = 'help';
-    note.textContent = 'Exclude pipeline rules for this model. Rule bodies are edited globally — toggle here only controls whether each rule runs in this model\'s pipeline.';
+    note.textContent = 'Per-model pipeline scoping. Rule bodies are edited globally — '
+      + 'the checkbox here decides whether each rule runs in THIS model\'s pipeline. '
+      + 'Globally-enabled rules can be force-disabled by unchecking; globally-disabled '
+      + 'rules can be force-enabled by checking. The two modes are mutually exclusive '
+      + 'per slug (a rule cannot be both force-disabled and force-enabled).';
     secEl.appendChild(note);
 
     let rules = [];
     try { rules = currentValue('PIPELINE_RULES') || []; } catch (_) { rules = []; }
-    const cur = (overrides[selectedId] && overrides[selectedId].PIPELINE_RULES_EXCLUDE) || [];
-    const excludeSet = new Set(cur);
+    const curEx = (overrides[selectedId] && overrides[selectedId].PIPELINE_RULES_EXCLUDE) || [];
+    const curIn = (overrides[selectedId] && overrides[selectedId].PIPELINE_RULES_INCLUDE) || [];
+    const excludeSet = new Set(curEx);
+    const includeSet = new Set(curIn);
     const ruleOpts = {
       excludeSet,
-      onToggle: (slug, excluded) => {
-        if (excluded) excludeSet.add(slug);
-        else excludeSet.delete(slug);
-        const list = [...excludeSet];
+      includeSet,
+      // Single callback for both lists. globallyEnabled is the rule's
+      // current global state; we mutate the appropriate list:
+      //   globallyEnabled=true  → toggle EXCLUDE (uncheck adds to EXCLUDE)
+      //   globallyEnabled=false → toggle INCLUDE (check adds to INCLUDE)
+      // The pydantic validator forbids same-slug overlap so we never
+      // need to worry about a slug ending up in both.
+      onToggle: (slug, wantActive, globallyEnabled) => {
+        if (globallyEnabled) {
+          if (wantActive) excludeSet.delete(slug);
+          else            excludeSet.add(slug);
+        } else {
+          if (wantActive) includeSet.add(slug);
+          else            includeSet.delete(slug);
+        }
         if (!overrides[selectedId]) overrides[selectedId] = {};
-        if (list.length) overrides[selectedId].PIPELINE_RULES_EXCLUDE = list;
-        else delete overrides[selectedId].PIPELINE_RULES_EXCLUDE;
+        const ex = [...excludeSet];
+        const inc = [...includeSet];
+        if (ex.length)  overrides[selectedId].PIPELINE_RULES_EXCLUDE = ex;
+        else            delete overrides[selectedId].PIPELINE_RULES_EXCLUDE;
+        if (inc.length) overrides[selectedId].PIPELINE_RULES_INCLUDE = inc;
+        else            delete overrides[selectedId].PIPELINE_RULES_INCLUDE;
         persist();
         renderSidebar();   // override count changed
       },
@@ -2488,31 +2541,67 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
 
     // -------- Checklist mode: compact one-checkbox row + jump-link --------
     // No drag handle, no body, no test badge, no add/delete/reset. Bodies
-    // are still edited globally; this row is just an exclusion toggle for
-    // the model selected in the master-detail UI.
+    // are still edited globally; this row is just an inclusion/exclusion
+    // toggle for the model selected in the master-detail UI.
+    //
+    // Effective state: (rule.enabled && !forcedOut) || forcedIn.
+    //   forcedOut = slug in PIPELINE_RULES_EXCLUDE → force-disable
+    //   forcedIn  = slug in PIPELINE_RULES_INCLUDE → force-enable a globally-
+    //               disabled rule (the only way an off rule can run for one model)
+    // The pydantic validator forbids same-slug overlap so the two are
+    // mutually exclusive on the wire.
     if (isChecklist) {
-      const excluded = !!(opts.excludeSet && opts.excludeSet.has(rule.name));
+      const globallyEnabled = !!rule.enabled;
+      const forcedOut = !!(opts.excludeSet && opts.excludeSet.has(rule.name));
+      const forcedIn  = !!(opts.includeSet && opts.includeSet.has(rule.name));
+      const effective = (globallyEnabled && !forcedOut) || forcedIn;
       const isTerminal = rule.type === 'terminal';
+
       if (isTerminal) row.classList.add('terminal');
-      if (excluded) row.classList.add('excluded');
+      if (forcedOut) row.classList.add('excluded');
+      // Globally-disabled rules render dimmed UNTIL the admin force-includes
+      // them. Once force-included the row is "alive" — undim it so the
+      // effective state is visible at a glance.
+      if (!globallyEnabled && !forcedIn) row.classList.add('globally-disabled');
+      if (!globallyEnabled && forcedIn) row.classList.add('force-included');
+
       const head = document.createElement('div');
       head.className = 'row-header';
 
       const cb = document.createElement('input');
       cb.type = 'checkbox';
-      cb.checked = !excluded;
-      // Terminal can't be excluded (it's the always-last hardcoded trim).
+      cb.checked = effective;
       if (isTerminal) {
         cb.disabled = true;
         cb.title = 'Terminal trim — always runs, cannot be excluded per model';
       } else {
-        cb.title = excluded
-          ? 'Excluded for this model — will not run in its pipeline'
-          : 'Active for this model — will run in its pipeline';
+        // Tooltip combines all the state so the admin sees WHY the box is
+        // checked or not at a glance.
+        if (!globallyEnabled && forcedIn) {
+          cb.title = 'Globally disabled, force-included for this model. '
+                   + 'Uncheck to fall back to the global default (off).';
+        } else if (!globallyEnabled) {
+          cb.title = 'Globally disabled. Check to force-enable for this model.';
+        } else if (forcedOut) {
+          cb.title = 'Force-disabled for this model. Check to inherit the '
+                   + 'global default (on).';
+        } else {
+          cb.title = 'Active for this model (inherits global enabled).';
+        }
         cb.addEventListener('change', () => {
-          if (opts.onToggle) opts.onToggle(rule.name, !cb.checked);
-          row.classList.toggle('excluded', !cb.checked);
-          // Update footer count.
+          // Hand the global state to onToggle so the parent picks the right
+          // list to mutate (EXCLUDE vs INCLUDE). Single callback, two paths.
+          if (opts.onToggle) opts.onToggle(rule.name, cb.checked, globallyEnabled);
+          // Local re-class without a full repaint — keeps focus / scroll.
+          const newForcedOut = globallyEnabled && !cb.checked;
+          const newForcedIn  = !globallyEnabled && cb.checked;
+          row.classList.toggle('excluded', newForcedOut);
+          row.classList.toggle('globally-disabled', !globallyEnabled && !newForcedIn);
+          row.classList.toggle('force-included', newForcedIn);
+          // Update tags + status text.
+          status.textContent = newForcedOut ? 'EXCLUDED' : '';
+          if (gdTag) gdTag.style.display = (!globallyEnabled && !newForcedIn) ? '' : 'none';
+          if (fiTag) fiTag.style.display = (!globallyEnabled && newForcedIn) ? '' : 'none';
           if (footer) footer.textContent = _footerText();
         });
       }
@@ -2540,14 +2629,32 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
         head.appendChild(view);
       }
 
+      // Tags: surface global state alongside per-model overrides. Visible
+      // only when the relevant condition holds; toggled live by the change
+      // handler above.
+      let gdTag = null;
+      let fiTag = null;
+      if (!isTerminal) {
+        gdTag = document.createElement('span');
+        gdTag.className = 'rule-globally-disabled-tag';
+        gdTag.textContent = 'globally disabled';
+        gdTag.title = 'This rule is disabled in the global pipeline. '
+                    + 'Check the box to force-enable it for this model only.';
+        gdTag.style.display = (!globallyEnabled && !forcedIn) ? '' : 'none';
+        head.appendChild(gdTag);
+
+        fiTag = document.createElement('span');
+        fiTag.className = 'rule-force-included-tag';
+        fiTag.textContent = 'force-included';
+        fiTag.title = 'Globally disabled but force-enabled for this model.';
+        fiTag.style.display = (!globallyEnabled && forcedIn) ? '' : 'none';
+        head.appendChild(fiTag);
+      }
+
       const status = document.createElement('span');
       status.className = 'rule-checklist-status';
-      status.textContent = excluded ? 'EXCLUDED' : '';
+      status.textContent = forcedOut ? 'EXCLUDED' : '';
       head.appendChild(status);
-      // Re-update the EXCLUDED text whenever the checkbox changes.
-      cb.addEventListener('change', () => {
-        status.textContent = cb.checked ? '' : 'EXCLUDED';
-      });
 
       row.appendChild(head);
       return row;
@@ -2891,11 +2998,23 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
 
   // Footer + bottom controls. In checklist mode we ONLY show the footer
   // count; full mode adds add-rule + reset-order + reset-all buttons.
+  // Footer reflects EFFECTIVE state: globally-disabled rules don't count
+  // unless the model force-includes them; globally-enabled rules count
+  // unless the model force-excludes them.
   let footer = null;
   function _footerText() {
-    const total = rules.filter(r => r.type !== 'terminal').length;
-    const excluded = (opts.excludeSet ? opts.excludeSet.size : 0);
-    const active = total - excluded;
+    const ex = (opts.excludeSet || new Set());
+    const inc = (opts.includeSet || new Set());
+    let total = 0;
+    let active = 0;
+    for (const r of rules) {
+      if (r.type === 'terminal') continue;
+      total++;
+      const forcedOut = ex.has(r.name);
+      const forcedIn  = inc.has(r.name);
+      const effective = (r.enabled && !forcedOut) || forcedIn;
+      if (effective) active++;
+    }
     return total + ' rule' + (total === 1 ? '' : 's') + ' total · '
       + active + ' active for this model';
   }

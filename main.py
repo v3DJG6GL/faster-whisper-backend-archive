@@ -58,6 +58,28 @@ _root.addHandler(SeverityCounter())
 logger = logging.getLogger("whisper-api")
 
 
+# =============================================================================
+# Hugging Face token propagation
+# =============================================================================
+# faster-whisper accepts `use_auth_token=` per-WhisperModel-call and forwards
+# it to huggingface_hub.snapshot_download(token=...). That covers the model
+# weights download. But OTHER HF calls in the process — Silero VAD model
+# load, tokenizer fetches, metadata pings — don't see that kwarg and would
+# log "unauthenticated requests" warnings + hit the lower anonymous rate
+# limit. Promoting cfg.USE_AUTH_TOKEN to os.environ["HF_TOKEN"] silences
+# those calls AND lifts the ceiling. Per-model USE_AUTH_TOKEN overrides
+# still win at the per-WhisperModel-call kwarg level, so a model that
+# needs a different token (rare) still works.
+#
+# Live edits: admin_routes.post_state re-syncs HF_TOKEN whenever
+# USE_AUTH_TOKEN changes via the admin UI, so a save takes effect without
+# a service restart. Clearing USE_AUTH_TOKEN unsets HF_TOKEN.
+if cfg.USE_AUTH_TOKEN:
+    os.environ["HF_TOKEN"] = cfg.USE_AUTH_TOKEN
+    logger.info("HF_TOKEN set from cfg.USE_AUTH_TOKEN (silences HF rate-limit "
+                "warnings for non-WhisperModel calls)")
+
+
 def _preload_windows_cuda_dlls() -> None:
     base_path = os.path.dirname(sys.executable)
     if os.path.basename(base_path).lower() == "scripts":
@@ -130,13 +152,17 @@ class _CompiledRule:
       callback:map                → dict[str_lower, str] lookup
       callback:dedup              → None (callback hardcoded)
       callback:upper              → None (callback hardcoded)
-    `name` is the rule slug used for per-model PIPELINE_RULES_EXCLUDE matching.
+    `name` is the rule slug used for per-model EXCLUDE / INCLUDE matching.
+    `enabled` mirrors the global `rule.enabled` flag — checked at runtime
+    rather than at compile time so per-model PIPELINE_RULES_INCLUDE can
+    force-enable a globally-disabled rule.
     """
     name: str
     label: str
     type: str
     pattern: "re.Pattern[str]"
     payload: object
+    enabled: bool
 
 
 _COMPILED_RULES: list[_CompiledRule] = []
@@ -201,10 +227,13 @@ def rebuild_caches() -> None:
     Called once at module load (just below) and again by the admin WebUI
     after a config change to PIPELINE_RULES (CACHE_REBUILD_FIELDS).
 
-    Disabled rules and the terminal row are filtered out — they don't run
-    via the walker. A rule with an invalid regex is logged + skipped (the
-    save-time validator usually catches these, but a hand-edited config.py
-    or a runtime catastrophic-backtracking case might surface here).
+    The terminal row is filtered out (it runs as the implicit final trim,
+    not via the walker). Globally-DISABLED rules are still compiled — the
+    runtime filter consults `rule.enabled` per-call so per-model
+    PIPELINE_RULES_INCLUDE can force-enable a globally-disabled rule. Rules
+    with invalid regex are logged + skipped (the save-time validator
+    usually catches these, but a hand-edited config.py or a runtime
+    catastrophic-backtracking case might surface here).
     """
     global _COMPILED_RULES, _TERMINAL_LABEL
     compiled: list[_CompiledRule] = []
@@ -214,8 +243,7 @@ def rebuild_caches() -> None:
         if rtype == "terminal":
             terminal_label = rule.get("label", terminal_label)
             continue
-        if not rule.get("enabled", True):
-            continue
+        rule_enabled = bool(rule.get("enabled", True))
 
         try:
             if rtype == "callback:map":
@@ -249,7 +277,7 @@ def rebuild_caches() -> None:
             continue
         compiled.append(_CompiledRule(rule.get("name", "?"),
                                        rule.get("label", rule.get("name", "?")),
-                                       rtype, cre, payload))
+                                       rtype, cre, payload, rule_enabled))
     _COMPILED_RULES = compiled
     _TERMINAL_LABEL = terminal_label
 
@@ -278,29 +306,57 @@ def _postprocess_text(text: str, model_name: "str | None" = None,
     each rule that changes the text appends `(label_with_ordinal, before, after)`
     so the per-request log block can render a diff view.
 
-    Per-model PIPELINE_RULES_EXCLUDE: the rule is skipped (no-op) when its
-    slug appears in MODEL_OVERRIDES[model_name]['PIPELINE_RULES_EXCLUDE'].
-    Bodies still live in the global PIPELINE_RULES list — only inclusion
-    differs per model.
+    Per-model scoping (precedence top-down):
+      1. PIPELINE_RULES_EXCLUDE — force-DISABLE for this model (highest priority).
+      2. PIPELINE_RULES_INCLUDE — force-ENABLE for this model, even if globally
+         disabled.
+      3. Otherwise inherit `rule.enabled` from the global PIPELINE_RULES list.
+
+    Effective:  (rule.enabled AND slug NOT in EXCLUDE) OR (slug IN INCLUDE).
+    A rule cannot appear in both lists — pydantic validator rejects that.
     """
     exclude: "set[str]" = set()
+    include: "set[str]" = set()
     if model_name:
         overrides = getattr(cfg, "MODEL_OVERRIDES", None) or {}
         m_over = overrides.get(model_name) if isinstance(overrides, dict) else None
         if isinstance(m_over, dict):
             ex = m_over.get("PIPELINE_RULES_EXCLUDE") or []
+            inc = m_over.get("PIPELINE_RULES_INCLUDE") or []
             if isinstance(ex, list):
                 exclude = set(ex)
+            if isinstance(inc, list):
+                include = set(inc)
     for ordinal, rule in enumerate(_COMPILED_RULES, start=1):
+        # Force-EXCLUDE wins outright — admin explicitly turned this off.
         if rule.name in exclude:
             if trace is not None:
-                trace.append((f"{ordinal} {rule.label} [SKIPPED for {model_name}]",
+                trace.append((f"{ordinal} {rule.label} [EXCLUDED for {model_name}]",
+                              text, text))
+            continue
+        forced_in = rule.name in include
+        # Globally disabled and not force-included → skip silently.
+        # When tracing, surface the skip so the log explains why a rule
+        # didn't run.
+        if not rule.enabled and not forced_in:
+            if trace is not None:
+                trace.append((f"{ordinal} {rule.label} [SKIPPED globally disabled]",
                               text, text))
             continue
         before = text
         text = _apply_rule(rule, before)
-        if trace is not None and before != text:
-            trace.append((f"{ordinal} {rule.label}", before, text))
+        if trace is not None:
+            # Force-included rule: tag the trace line so the admin sees the
+            # rule ran *because of* the per-model override, not the global
+            # state. Always emit even when before == after, to make the
+            # override path visible.
+            if forced_in and not rule.enabled:
+                trace.append(
+                    (f"{ordinal} {rule.label} [FORCED on for {model_name}]",
+                     before, text)
+                )
+            elif before != text:
+                trace.append((f"{ordinal} {rule.label}", before, text))
     return text
 
 
