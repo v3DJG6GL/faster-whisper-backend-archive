@@ -1102,6 +1102,13 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
      Reuses the same opacity/grayscale recipe as .field.dep-irrelevant. */
   .mo-mainpane.diff-mode .mo-row[data-matches-global="true"] {
     opacity: 0.45; filter: grayscale(0.6); }
+  /* Pipeline rules (scoping only) inherit the same diff-mode treatment as
+     .mo-row: a rule whose slug is in neither EXCLUDE nor INCLUDE for this
+     model is "functionally inherited" and dims identically. Independent
+     selector because .rule-row lives in its own class namespace. */
+  .mo-mainpane.diff-mode .pipeline-rules-wrap.checklist-mode
+    .rule-row[data-matches-global="true"] {
+    opacity: 0.45; filter: grayscale(0.6); }
   /* Per-model pipeline rules checklist: makeRuleListEditor renders each
      rule with .rule-row; checklist mode adds .checklist-mode on the wrap
      and per-row .excluded marker. Compact layout: checkbox | label | pill | view.   */
@@ -2599,6 +2606,10 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
       // effective state is visible at a glance.
       if (!globallyEnabled && !forcedIn) row.classList.add('globally-disabled');
       if (!globallyEnabled && forcedIn) row.classList.add('force-included');
+      // Diff-to-global hook: a rule whose slug is in neither EXCLUDE nor
+      // INCLUDE is "functionally inherited" — same contract as .mo-row's
+      // data-matches-global. The diff-mode CSS dims rows tagged 'true'.
+      row.dataset.matchesGlobal = (!forcedOut && !forcedIn) ? 'true' : 'false';
 
       const head = document.createElement('div');
       head.className = 'row-header';
