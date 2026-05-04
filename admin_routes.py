@@ -581,6 +581,10 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
   .rule-row.locked { border-left: 3px solid #f2cc60; }
   .rule-row.terminal { border-left: 3px solid var(--dim); opacity: 0.85; }
   .rule-row.dragging { opacity: 0.4; outline: 2px dashed var(--cyan); }
+  /* Drop-target indicator: thin colored line above the row to show the
+     insertion point. Box-shadow avoids layout shift (vs. border-top). */
+  .rule-row.drag-over-top { box-shadow: 0 -2px 0 0 var(--cyan); }
+  .rule-row.drag-over-bottom { box-shadow: 0 2px 0 0 var(--cyan); }
   .rule-row.disabled { opacity: 0.55; }
   .rule-row .row-header { display: flex; align-items: center; gap: 8px;
     font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
@@ -1172,8 +1176,58 @@ function pipelineRulesEditor(name, initialRules) {
 
   // Drag state across rule rows.
   let dragSrcIdx = null;
+  // Expanded-row state, keyed by rule.name (slug). Survives full repaints.
+  const expandedNames = new Set();
 
-  function commit() {
+  // --- baseline / dirtiness helpers (drive reset-button visibility) ----
+  function _baselineList() { return fieldDef(name).default_value || []; }
+  function _baselineByName() {
+    const m = new Map();
+    _baselineList().forEach(b => m.set(b.name, b));
+    return m;
+  }
+  function _isRuleDirty(rule) {
+    if (!rule || !rule.seeded) return false;
+    const baseline = _baselineByName().get(rule.name);
+    if (!baseline) return false;
+    return JSON.stringify(rule) !== JSON.stringify(baseline);
+  }
+  function _seededOrderDirty() {
+    const baseSeeded = _baselineList().filter(b => b.seeded).map(b => b.name);
+    const curSeeded = rules.filter(r => r.seeded).map(r => r.name);
+    return JSON.stringify(curSeeded) !== JSON.stringify(baseSeeded);
+  }
+  function _anyRuleDirty() { return rules.some(r => _isRuleDirty(r)); }
+
+  function refreshControlsVisibility() {
+    // Per-row reset buttons: hide when rule matches its baseline.
+    list.querySelectorAll('.rule-row').forEach(r => {
+      const idx = parseInt(r.dataset.idx, 10);
+      const rule = rules[idx];
+      if (!rule) return;
+      const btn = r.querySelector(':scope > .row-header > .reset-link');
+      if (btn) btn.style.display = _isRuleDirty(rule) ? '' : 'none';
+    });
+    // List-wide controls: hide when nothing to reset.
+    if (resetOrderBtn) {
+      resetOrderBtn.style.display = _seededOrderDirty() ? '' : 'none';
+    }
+    if (resetAllBtn) {
+      resetAllBtn.style.display = (_anyRuleDirty() || _seededOrderDirty())
+        ? '' : 'none';
+    }
+  }
+
+  // --- commit helpers --------------------------------------------------
+  // Inline edits (typing into pattern/replacement/wordlist/map) MUST NOT
+  // rebuild the DOM — that would steal focus mid-keystroke and collapse
+  // any other expanded rows. Structural changes (add/delete/reorder/reset/
+  // toggle-enabled) DO rebuild because the visible row layout changes.
+  function commitData() {
+    setDirty(name, JSON.parse(JSON.stringify(rules)));
+    refreshControlsVisibility();
+  }
+  function commitFull() {
     setDirty(name, JSON.parse(JSON.stringify(rules)));
     paintAll();
   }
@@ -1181,6 +1235,7 @@ function pipelineRulesEditor(name, initialRules) {
   function paintAll() {
     list.innerHTML = '';
     rules.forEach((rule, idx) => list.appendChild(renderRow(rule, idx)));
+    refreshControlsVisibility();
   }
 
   function renderRow(rule, idx) {
@@ -1190,6 +1245,8 @@ function pipelineRulesEditor(name, initialRules) {
     if (rule.locked) row.classList.add('locked');
     if (!rule.enabled) row.classList.add('disabled');
     if (rule.type === 'terminal') row.classList.add('terminal');
+    // Restore expansion across repaints (state lives in expandedNames Set).
+    if (expandedNames.has(rule.name)) row.classList.add('expanded');
 
     // Header row.
     const head = document.createElement('div');
@@ -1205,11 +1262,24 @@ function pipelineRulesEditor(name, initialRules) {
       drag.draggable = true;
       drag.addEventListener('dragstart', (e) => {
         dragSrcIdx = idx;
-        row.classList.add('dragging');
+        // Firefox requires setData() — without it, the drag never fires.
+        try { e.dataTransfer.setData('text/plain', String(idx)); } catch (_) {}
         e.dataTransfer.effectAllowed = 'move';
+        // Use the WHOLE row as the drag ghost (not just the handle glyph)
+        // so the user sees what they're moving. setDragImage must run
+        // synchronously inside dragstart.
+        try { e.dataTransfer.setDragImage(row, 12, 12); } catch (_) {}
+        // Apply .dragging on the next tick — browsers snapshot the drag
+        // ghost synchronously at dragstart, before any class change in
+        // the same frame would take effect. The class still applies to
+        // the source row visible in the list (faded look).
+        setTimeout(() => row.classList.add('dragging'), 0);
       });
       drag.addEventListener('dragend', () => {
         row.classList.remove('dragging');
+        // Clear any lingering drop indicators across all rows.
+        list.querySelectorAll('.drag-over-top, .drag-over-bottom')
+          .forEach(r => r.classList.remove('drag-over-top', 'drag-over-bottom'));
         dragSrcIdx = null;
       });
     }
@@ -1221,7 +1291,7 @@ function pipelineRulesEditor(name, initialRules) {
     if (rule.type === 'terminal') cb.disabled = true;
     cb.addEventListener('change', () => {
       rule.enabled = cb.checked;
-      commit();
+      commitFull();
     });
     head.appendChild(cb);
 
@@ -1248,10 +1318,15 @@ function pipelineRulesEditor(name, initialRules) {
     const expandBtn = document.createElement('button');
     expandBtn.type = 'button';
     expandBtn.className = 'expand-btn';
-    expandBtn.textContent = 'edit ▾';
+    const _setExpandLabel = () => {
+      expandBtn.textContent = row.classList.contains('expanded') ? 'edit ▴' : 'edit ▾';
+    };
+    _setExpandLabel();
     expandBtn.addEventListener('click', () => {
       row.classList.toggle('expanded');
-      expandBtn.textContent = row.classList.contains('expanded') ? 'edit ▴' : 'edit ▾';
+      if (row.classList.contains('expanded')) expandedNames.add(rule.name);
+      else expandedNames.delete(rule.name);
+      _setExpandLabel();
     });
     head.appendChild(expandBtn);
 
@@ -1262,10 +1337,10 @@ function pipelineRulesEditor(name, initialRules) {
       reset.textContent = '↺ reset';
       reset.title = 'Restore this rule to its in-repo default';
       reset.addEventListener('click', () => {
-        const baseline = (fieldDef(name).default_value || []).find(b => b.name === rule.name);
+        const baseline = _baselineByName().get(rule.name);
         if (!baseline) return;
         rules[idx] = JSON.parse(JSON.stringify(baseline));
-        commit();
+        commitFull();
       });
       head.appendChild(reset);
     } else {
@@ -1275,21 +1350,41 @@ function pipelineRulesEditor(name, initialRules) {
       del.textContent = '× delete';
       del.title = 'Remove this custom rule';
       del.addEventListener('click', () => {
+        expandedNames.delete(rule.name);
         rules.splice(idx, 1);
-        commit();
+        commitFull();
       });
       head.appendChild(del);
     }
     row.appendChild(head);
 
-    // Drop zone (whole row accepts drops).
+    // Drop zone (whole row accepts drops). dragenter/dragleave paint a
+    // colored insertion line above or below the target so the user sees
+    // where the dragged row will land.
+    row.addEventListener('dragenter', (e) => {
+      if (dragSrcIdx === null || dragSrcIdx === idx) return;
+      e.preventDefault();
+      // Insertion-line side: above when dragging downward into a higher
+      // index, below otherwise. Falls back to top for terminal rows.
+      const above = dragSrcIdx > idx || rule.type === 'terminal';
+      row.classList.add(above ? 'drag-over-top' : 'drag-over-bottom');
+      row.classList.remove(above ? 'drag-over-bottom' : 'drag-over-top');
+    });
     row.addEventListener('dragover', (e) => {
       if (dragSrcIdx === null || dragSrcIdx === idx) return;
+      // preventDefault is required for drop to fire.
       e.preventDefault();
       e.dataTransfer.dropEffect = 'move';
     });
+    row.addEventListener('dragleave', (e) => {
+      // Only clear when the cursor truly leaves the row, not when it
+      // enters a child element. relatedTarget is the element entered.
+      if (e.relatedTarget && row.contains(e.relatedTarget)) return;
+      row.classList.remove('drag-over-top', 'drag-over-bottom');
+    });
     row.addEventListener('drop', (e) => {
       e.preventDefault();
+      row.classList.remove('drag-over-top', 'drag-over-bottom');
       if (dragSrcIdx === null || dragSrcIdx === idx) return;
       const src = rules[dragSrcIdx];
       let target = idx;
@@ -1316,7 +1411,7 @@ function pipelineRulesEditor(name, initialRules) {
         const [tr] = rules.splice(tIdx, 1);
         rules.push(tr);
       }
-      commit();
+      commitFull();
     });
 
     // Body (collapsed by default).
@@ -1384,17 +1479,17 @@ function pipelineRulesEditor(name, initialRules) {
 
     if (rule.type === 'regex') {
       box.appendChild(_makeMonoLabeledInput('pattern', rule.pattern, (v) => {
-        rule.pattern = v; commit();
+        rule.pattern = v; commitData();
       }));
       box.appendChild(_makeMonoLabeledInput('replacement', rule.replacement, (v) => {
-        rule.replacement = v; commit();
+        rule.replacement = v; commitData();
       }));
       return box;
     }
 
     if (rule.type === 'callback:lowercase-wordlist') {
       box.appendChild(_makeMonoLabeledInput('pattern', rule.pattern, (v) => {
-        rule.pattern = v; commit();
+        rule.pattern = v; commitData();
       }));
       const wlLbl = document.createElement('div');
       wlLbl.className = 'help';
@@ -1408,7 +1503,7 @@ function pipelineRulesEditor(name, initialRules) {
       ta.style.fontSize = '12px';
       ta.addEventListener('input', () => {
         rule.wordlist = ta.value.split('\n').map(s => s.trim()).filter(Boolean);
-        commit();
+        commitData();
       });
       box.appendChild(ta);
       return box;
@@ -1431,10 +1526,17 @@ function pipelineRulesEditor(name, initialRules) {
       addBtn.textContent = '+ add entry';
       addBtn.style.marginTop = '6px';
       addBtn.addEventListener('click', () => {
+        // Append a new <tr> directly so the surrounding row body stays
+        // expanded and other expanded rows keep their input state.
         if (!rule.map) rule.map = {};
         const k = '_new_' + Object.keys(rule.map).length;
         rule.map[k] = '';
-        commit();
+        const newTr = _makeMapRow(rule, k, '');
+        tbl.appendChild(newTr);
+        commitData();
+        // Focus the new key cell so the user can start typing immediately.
+        const ki = newTr.querySelector('td:first-child input');
+        if (ki) { ki.focus(); ki.select(); }
       });
       box.appendChild(addBtn);
       return box;
@@ -1442,7 +1544,7 @@ function pipelineRulesEditor(name, initialRules) {
 
     if (rule.type === 'callback:dedup' || rule.type === 'callback:upper') {
       box.appendChild(_makeMonoLabeledInput('pattern', rule.pattern, (v) => {
-        rule.pattern = v; commit();
+        rule.pattern = v; commitData();
       }));
       const note = document.createElement('div');
       note.className = 'help';
@@ -1487,20 +1589,38 @@ function pipelineRulesEditor(name, initialRules) {
     vi.type = 'text'; vi.value = val; vi.style.fontFamily = 'ui-monospace, monospace'; vi.style.width = '100%';
     function rebuild() {
       const m = {};
-      const trs = tr.parentNode.querySelectorAll('tr');
+      // tr.parentNode may be null briefly (just after tr.remove() and
+      // before reattach) — caller handles this by passing the live tbody.
+      const parent = tr.parentNode;
+      if (!parent) return;
+      const trs = parent.querySelectorAll('tr');
       trs.forEach(r => {
         const k = r.querySelector('td:first-child input').value;
         const v = r.querySelector('td:nth-child(2) input').value;
         if (k) m[k] = v;
       });
       rule.map = m;
-      commit();
+      commitData();
     }
     ki.addEventListener('input', rebuild);
     vi.addEventListener('input', rebuild);
     const del = document.createElement('button');
     del.type = 'button'; del.textContent = '×';
-    del.addEventListener('click', () => { tr.remove(); rebuild(); });
+    del.addEventListener('click', () => {
+      const parent = tr.parentNode;
+      tr.remove();
+      // Recompute map from remaining rows (parent was captured before remove).
+      if (parent) {
+        const m = {};
+        parent.querySelectorAll('tr').forEach(r => {
+          const k = r.querySelector('td:first-child input').value;
+          const v = r.querySelector('td:nth-child(2) input').value;
+          if (k) m[k] = v;
+        });
+        rule.map = m;
+        commitData();
+      }
+    });
     td1.appendChild(ki); td2.appendChild(vi); td3.appendChild(del);
     tr.appendChild(td1); tr.appendChild(td2); tr.appendChild(td3);
     return tr;
@@ -1538,7 +1658,7 @@ function pipelineRulesEditor(name, initialRules) {
     seeded.sort((a, b) => baseOrder.indexOf(a.name) - baseOrder.indexOf(b.name));
     rules = [...seeded, ...customs];
     if (terminal) rules.push(terminal);
-    commit();
+    commitFull();
   });
   ctrls.appendChild(resetOrderBtn);
 
@@ -1561,7 +1681,7 @@ function pipelineRulesEditor(name, initialRules) {
     rules = rules.map(r => r.seeded || r.type === 'terminal'
       ? JSON.parse(JSON.stringify(baseByName.get(r.name) || r))
       : r);
-    commit();
+    commitFull();
   });
   ctrls.appendChild(resetAllBtn);
 
@@ -1637,7 +1757,10 @@ function pipelineRulesEditor(name, initialRules) {
       if (tIdx >= 0) rules.splice(tIdx, 0, newRule);
       else rules.push(newRule);
       form.remove();
-      commit();
+      // Auto-expand the newly added rule so the user lands directly in
+      // its editor body and can fill in pattern/map/etc.
+      expandedNames.add(slug);
+      commitFull();
     });
   }
 
