@@ -662,7 +662,11 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
   main button:not([class]):hover { background: #30363d; border-color: #484f58; }
   main button:not([class]):active { background: #161b22; }
   main button:not([class]):disabled { opacity: 0.45; cursor: not-allowed; }
-  .input-col .help { color: var(--help); font-size: var(--fs-sm); margin-top: 0.1875rem; }
+  /* white-space: pre-line preserves \n in description strings (so a
+     description that enumerates values can render each on its own line)
+     while still collapsing other whitespace and wrapping long lines. */
+  .input-col .help { color: var(--help); font-size: var(--fs-sm);
+    margin-top: 0.1875rem; white-space: pre-line; }
   /* Vertical checkbox list (PRELOAD_MODELS, etc.). Both gaps in rem so they
      scale with --fs-base — fixes "compressed checklist" at higher scales. */
   .cb-list { display: flex; flex-direction: column; gap: 0.4rem; }
@@ -1017,18 +1021,23 @@ function fieldRow(name) {
   nameEl.textContent = name;
   labelCol.appendChild(nameEl);
   labelCol.appendChild(makeBadges(name));
-  if (isEnvPinned(name)) {
-    const note = document.createElement('div');
-    note.className = 'help';
-    note.textContent = 'Currently overridden by env var; saves persist but '
-      + 'only take effect when the env var is unset.';
-    labelCol.appendChild(note);
-  }
   row.appendChild(labelCol);
 
   const inputCol = document.createElement('div');
   inputCol.className = 'input-col';
   inputCol.appendChild(makeEditor(name));
+  // Env-override warning: lives in the input column (not the label column)
+  // so the long line wraps inside the value-column width. If it sits in
+  // .label-col, CSS subgrid sizes the column to this prose's max-content
+  // and blows the whole section's label track wide. .input-col .help
+  // already has the right styling.
+  if (isEnvPinned(name)) {
+    const note = document.createElement('div');
+    note.className = 'help';
+    note.textContent = 'Currently overridden by env var; saves persist but '
+      + 'only take effect when the env var is unset.';
+    inputCol.appendChild(note);
+  }
 
   // Inline description from FIELD_DESCRIPTIONS (single source of truth).
   // Surfaced via /config/state's per-field payload.

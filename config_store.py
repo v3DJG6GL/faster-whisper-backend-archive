@@ -99,12 +99,12 @@ FIELD_DESCRIPTIONS: dict[str, str] = {
         "Device to use for computation. cuda = NVIDIA GPU; cpu = host CPU. "
         "(faster-whisper)",
     "MODEL_COMPUTE_TYPE":
-        "Numerical precision (CTranslate2). "
-        "float16: half-precision, weights + layers in FP16 (NVIDIA CC ≥ 7.0). "
-        "bfloat16: brain-float, half-precision (NVIDIA Ampere+ / CC ≥ 8.0). "
-        "int8: 8-bit weight quantization (smallest, fastest on CPU). "
-        "int8_float16: int8 weights + FP16 activations (smallest GPU footprint). "
-        "float32: full precision, largest + slowest.",
+        "Numerical precision (CTranslate2).\n"
+        "• float16: half-precision, weights + layers in FP16 (NVIDIA CC ≥ 7.0).\n"
+        "• bfloat16: brain-float, half-precision (NVIDIA Ampere+ / CC ≥ 8.0).\n"
+        "• int8: 8-bit weight quantization (smallest, fastest on CPU).\n"
+        "• int8_float16: int8 weights + FP16 activations (smallest GPU footprint).\n"
+        "• float32: full precision, largest + slowest.",
     "MODEL_DEVICE_FALLBACK":
         "Backup hardware target if the primary device fails to load "
         "(e.g. fall back to 'cpu' if CUDA is unavailable).",
