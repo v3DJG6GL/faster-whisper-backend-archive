@@ -102,11 +102,15 @@ _STATS_VIEWER_HTML = r"""<!doctype html>
     --red: #ff7b72; --magenta: #d2a8ff; --bold: #f0f6fc;
     --border: #30363d;
   }
+  html { color-scheme: dark; }
   html, body { background: var(--bg); color: var(--fg);
-    font: 13px/1.45 ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+    font: 16px/1.5 ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
     margin: 0; padding: 0; min-height: 100%; }
   header { position: sticky; top: 0; background: var(--panel); border-bottom: 1px solid var(--border);
-    padding: 8px 14px; display: flex; gap: 12px; align-items: center; z-index: 10; }
+    z-index: 10; padding: 0; }
+  header > .header-inner { display: flex; gap: 12px; align-items: center;
+    max-width: 1100px; margin: 0 auto; width: 100%; padding: 8px 14px;
+    box-sizing: border-box; }
   header .title { font-weight: 600; color: var(--bold); }
   header .pill { padding: 2px 8px; border-radius: 999px; background: #21262d; color: var(--dim);
     font-size: 11px; }
@@ -115,7 +119,8 @@ _STATS_VIEWER_HTML = r"""<!doctype html>
   {{NAV_CSS}}
   .grid { display: grid; gap: 12px;
     grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-    padding: 14px; }
+    padding: 14px; max-width: 1100px; margin: 0 auto;
+    box-sizing: border-box; }
   .card { background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
     padding: 10px 12px; }
   .card.span2 { grid-column: span 2; }
@@ -168,12 +173,12 @@ _STATS_VIEWER_HTML = r"""<!doctype html>
   .hidden { display: none !important; }
 </style></head>
 <body>
-<header>
+<header><div class="header-inner">
   <span class="title">faster-whisper-backend · stats</span>
   {{NAV}}
   <span class="spacer"></span>
   <span id="status" class="pill live">live</span>
-</header>
+</div></header>
 
 <div id="grid" class="grid">
   <!-- GPU -->

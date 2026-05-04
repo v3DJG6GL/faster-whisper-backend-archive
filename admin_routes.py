@@ -44,7 +44,8 @@ logger = logging.getLogger("whisper-api")
 # config knobs by section name with no translation.
 _FIELD_GROUPS: list[tuple[str, list[tuple[str | None, list[str]]]]] = [
     ("Models", [(None, [
-        "DEFAULT_MODEL", "ALLOWED_MODELS", "PRELOAD_MODELS", "MAX_LOADED_MODELS",
+        "DEFAULT_MODEL", "ALLOWED_MODELS", "PRELOAD_MODELS",
+        "MAX_LOADED_MODELS", "MODEL_IDLE_TIMEOUT_S",
         "MODEL_DEVICE", "MODEL_COMPUTE_TYPE",
         "MODEL_DEVICE_FALLBACK", "MODEL_COMPUTE_TYPE_FALLBACK",
     ])]),
@@ -509,11 +510,15 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
     --red: #ff7b72; --magenta: #d2a8ff; --bold: #f0f6fc;
     --border: #30363d; --input-bg: #0d1117;
   }
+  html { color-scheme: dark; }
   html, body { background: var(--bg); color: var(--fg);
-    font: 13px/1.45 ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+    font: 16px/1.5 ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
     margin: 0; padding: 0; min-height: 100%; }
   header { position: sticky; top: 0; background: var(--panel); border-bottom: 1px solid var(--border);
-    padding: 8px 14px; display: flex; gap: 12px; align-items: center; z-index: 10; }
+    z-index: 10; padding: 0; }
+  header > .header-inner { display: flex; gap: 12px; align-items: center;
+    max-width: 1100px; margin: 0 auto; width: 100%; padding: 8px 14px;
+    box-sizing: border-box; }
   header .title { font-weight: 600; color: var(--bold); }
   header .pill { padding: 2px 8px; border-radius: 999px; background: #21262d; color: var(--dim);
     font-size: 11px; }
@@ -526,7 +531,7 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
   header button.primary { background: #238636; border-color: #2ea043; color: var(--bold); }
   header button.primary:hover { background: #2ea043; }
   header button:disabled { opacity: 0.4; cursor: not-allowed; }
-  main { padding: 14px; max-width: 1100px; }
+  main { padding: 14px; max-width: 1100px; margin: 0 auto; }
   section { background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
     padding: 10px 14px 12px; margin-bottom: 14px; }
   h2 { color: var(--bold); font-size: 14px; margin: 0 0 8px; padding-bottom: 6px;
@@ -549,6 +554,59 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
     padding: 5px 8px; border-radius: 4px; font: inherit; }
   .input-col input[type=checkbox] { width: auto; }
   .input-col textarea { font-family: inherit; min-height: 60px; resize: vertical; }
+  /* --- Native widget overrides — bring all browser-default controls
+     (checkbox, number-spinner, select, textarea, unclassed buttons)
+     into the GitHub-dark palette. ----------------------------------- */
+  /* Checkbox: replace native white square with a dark themed one. */
+  input[type="checkbox"] {
+    appearance: none; -webkit-appearance: none;
+    width: 16px; height: 16px;
+    border: 1px solid var(--border); border-radius: 3px;
+    background: var(--input-bg); cursor: pointer;
+    position: relative; vertical-align: middle;
+    transition: background 120ms ease, border-color 120ms ease;
+  }
+  input[type="checkbox"]:hover { border-color: var(--cyan); }
+  input[type="checkbox"]:checked { background: #1f6feb; border-color: #388bfd; }
+  input[type="checkbox"]:checked::after {
+    content: ""; position: absolute; left: 4px; top: 0;
+    width: 4px; height: 9px;
+    border: solid var(--bold); border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+  }
+  input[type="checkbox"]:focus-visible {
+    outline: 2px solid var(--cyan); outline-offset: 1px;
+  }
+  /* Number-input: hide native spinner buttons (Firefox + WebKit/Blink).
+     Field looks like a plain text input; user types or pastes numbers. */
+  input[type="number"] { -moz-appearance: textfield; }
+  input[type="number"]::-webkit-inner-spin-button,
+  input[type="number"]::-webkit-outer-spin-button {
+    -webkit-appearance: none; margin: 0;
+  }
+  /* Select: replace native white triangle with a custom dim-grey SVG arrow. */
+  select {
+    appearance: none; -webkit-appearance: none;
+    background: var(--input-bg) url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path fill='%236e7681' d='M0 0l5 6 5-6z'/></svg>") no-repeat right 8px center;
+    color: var(--fg);
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 5px 24px 5px 8px;
+    font: inherit; cursor: pointer;
+  }
+  select:focus { outline: 1px solid var(--cyan); outline-offset: -1px; }
+  /* Generic dark button styling for unclassed <button> elements (Add /
+     Cancel in custom-rule dialog, "+ Add custom rule", etc.). Scoped to
+     not override existing classed buttons (.reset-link, .delete-btn,
+     .expand-btn, .add-row button, header button, .modal button, etc.). */
+  main button:not([class]) {
+    background: #21262d; color: var(--fg);
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 4px 12px; font: inherit; cursor: pointer;
+    transition: background 120ms ease, border-color 120ms ease;
+  }
+  main button:not([class]):hover { background: #30363d; border-color: #484f58; }
+  main button:not([class]):active { background: #161b22; }
+  main button:not([class]):disabled { opacity: 0.45; cursor: not-allowed; }
   .input-col .help { color: var(--dim); font-size: 11px; margin-top: 3px; }
   .err { color: var(--red); font-size: 11px; margin-top: 3px; }
   /* Field row dimming when a parent toggle makes this row irrelevant.
@@ -725,16 +783,17 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
 </div>
 
 <div id="app-wrap" style="display:none">
-  <header>
+  <header><div class="header-inner">
     <span class="title">faster-whisper-backend · config</span>
     {{NAV}}
     <span class="spacer"></span>
     <button id="logout-btn" title="forget token in this tab">logout</button>
     <button id="reload-btn">reload</button>
     <button id="restart-btn" title="restart the WhisperAPI Windows Service">restart</button>
+    <button id="discard-btn" title="discard all unsaved changes" disabled>discard</button>
     <button id="save-btn" class="primary" disabled>save</button>
     <span id="status" class="pill">loading…</span>
-  </header>
+  </div></header>
   <main id="main"></main>
 </div>
 
@@ -819,6 +878,7 @@ async function loadState() {
   state = await r.json();
   dirty = {};
   $('save-btn').disabled = true;
+  $('discard-btn').disabled = true;
   $('status').textContent = 'loaded ' + Object.keys(state.fields).length + ' fields';
   $('status').className = 'pill ok';
   render();
@@ -846,7 +906,9 @@ function setDirty(name, value) {
   } else {
     dirty[name] = value;
   }
-  $('save-btn').disabled = Object.keys(dirty).length === 0;
+  const empty = Object.keys(dirty).length === 0;
+  $('save-btn').disabled = empty;
+  $('discard-btn').disabled = empty;
   // Notify dependent editors when the model lists change. The DEFAULT_MODEL
   // dropdown + PRELOAD_MODELS multi-select listen for this and re-render.
   if (name === 'ALLOWED_MODELS' || name === 'PRELOAD_MODELS') {
@@ -1166,6 +1228,37 @@ function _slugify(s) {
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 64) || 'rule';
+}
+
+// Display \n, \r, \t, \\ as literal 2-char escape sequences in <input>
+// cells. Single-line inputs strip newlines per WHATWG spec (the value
+// sanitization algorithm), so without this the user sees an empty field
+// for any value containing a newline and would silently overwrite it
+// with "" on save.
+function _esc(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/\\/g, '\\\\')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r')
+    .replace(/\t/g, '\\t');
+}
+function _unesc(s) {
+  if (s == null) return '';
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === '\\' && i + 1 < s.length) {
+      const nxt = s[++i];
+      if (nxt === 'n') out += '\n';
+      else if (nxt === 'r') out += '\r';
+      else if (nxt === 't') out += '\t';
+      else if (nxt === '\\') out += '\\';
+      else out += nxt;       // unknown escape: pass through
+    } else {
+      out += s[i];
+    }
+  }
+  return out;
 }
 
 function _ensureUniqueSlug(slug, existing) {
@@ -1546,7 +1639,7 @@ function pipelineRulesEditor(name, initialRules) {
       }));
       box.appendChild(_makeMonoLabeledInput('replacement', rule.replacement, (v) => {
         rule.replacement = v; commitData();
-      }));
+      }, 'escape'));
       return box;
     }
 
@@ -1621,7 +1714,10 @@ function pipelineRulesEditor(name, initialRules) {
     return box;
   }
 
-  function _makeMonoLabeledInput(label, val, onInput) {
+  function _makeMonoLabeledInput(label, val, onInput, kind) {
+    // kind === 'escape' → display \n/\r/\t/\\ as literal 2-char escapes,
+    // decode on input. Required for fields like regex `replacement` that
+    // can hold real newlines (single-line <input> strips them otherwise).
     const lbl = document.createElement('div');
     lbl.className = 'help';
     lbl.textContent = label + ':';
@@ -1629,12 +1725,15 @@ function pipelineRulesEditor(name, initialRules) {
     inp.type = 'text';
     inp.spellcheck = false;
     inp.autocomplete = 'off';
-    inp.value = val == null ? '' : val;
+    const raw = val == null ? '' : val;
+    inp.value = (kind === 'escape') ? _esc(raw) : raw;
     inp.style.fontFamily = 'ui-monospace, Menlo, Consolas, monospace';
     inp.style.fontSize = '12px';
     inp.style.width = '100%';
     inp.style.boxSizing = 'border-box';
-    inp.addEventListener('input', () => onInput(inp.value));
+    inp.addEventListener('input', () => onInput(
+      kind === 'escape' ? _unesc(inp.value) : inp.value
+    ));
     const wrap = document.createElement('div');
     wrap.appendChild(lbl); wrap.appendChild(inp);
     return wrap;
@@ -1647,22 +1746,24 @@ function pipelineRulesEditor(name, initialRules) {
     const td3 = document.createElement('td');
     td3.style.width = '40px';
     const ki = document.createElement('input');
-    ki.type = 'text'; ki.value = key; ki.style.fontFamily = 'ui-monospace, monospace'; ki.style.width = '100%';
+    ki.type = 'text'; ki.value = _esc(key); ki.style.fontFamily = 'ui-monospace, monospace'; ki.style.width = '100%';
     const vi = document.createElement('input');
-    vi.type = 'text'; vi.value = val; vi.style.fontFamily = 'ui-monospace, monospace'; vi.style.width = '100%';
-    function rebuild() {
+    vi.type = 'text'; vi.value = _esc(val); vi.style.fontFamily = 'ui-monospace, monospace'; vi.style.width = '100%';
+    // Map keys/values may contain \n etc.; <input> strips real newlines,
+    // so we display \n as literal 2-char escape and decode on read.
+    function _readMap(parent) {
       const m = {};
-      // tr.parentNode may be null briefly (just after tr.remove() and
-      // before reattach) — caller handles this by passing the live tbody.
-      const parent = tr.parentNode;
-      if (!parent) return;
-      const trs = parent.querySelectorAll('tr');
-      trs.forEach(r => {
-        const k = r.querySelector('td:first-child input').value;
-        const v = r.querySelector('td:nth-child(2) input').value;
+      parent.querySelectorAll('tr').forEach(r => {
+        const k = _unesc(r.querySelector('td:first-child input').value);
+        const v = _unesc(r.querySelector('td:nth-child(2) input').value);
         if (k) m[k] = v;
       });
-      rule.map = m;
+      return m;
+    }
+    function rebuild() {
+      const parent = tr.parentNode;
+      if (!parent) return;
+      rule.map = _readMap(parent);
       commitData();
     }
     ki.addEventListener('input', rebuild);
@@ -1672,15 +1773,8 @@ function pipelineRulesEditor(name, initialRules) {
     del.addEventListener('click', () => {
       const parent = tr.parentNode;
       tr.remove();
-      // Recompute map from remaining rows (parent was captured before remove).
       if (parent) {
-        const m = {};
-        parent.querySelectorAll('tr').forEach(r => {
-          const k = r.querySelector('td:first-child input').value;
-          const v = r.querySelector('td:nth-child(2) input').value;
-          if (k) m[k] = v;
-        });
-        rule.map = m;
+        rule.map = _readMap(parent);
         commitData();
       }
     });
@@ -1808,7 +1902,7 @@ function pipelineRulesEditor(name, initialRules) {
       };
       if (t === 'regex') {
         newRule.pattern = patInp.value;
-        newRule.replacement = replInp.value;
+        newRule.replacement = _unesc(replInp.value);
       } else if (t === 'callback:map') {
         newRule.map = {};
       } else {
@@ -2236,6 +2330,7 @@ async function save() {
   const result = await r.json();
   dirty = {};
   $('save-btn').disabled = true;
+  $('discard-btn').disabled = true;
 
   if (result.requires_restart && result.cold_pending.length > 0) {
     showRestartModal(result.cold_pending);
@@ -2331,6 +2426,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
   $('reload-btn').addEventListener('click', loadState);
   $('save-btn').addEventListener('click', save);
+  $('discard-btn').addEventListener('click', () => {
+    if (Object.keys(dirty).length === 0) return;
+    dirty = {};
+    $('save-btn').disabled = true;
+    $('discard-btn').disabled = true;
+    render();    // re-render every field from state.fields (server-side values)
+  });
   $('restart-btn').addEventListener('click', () => {
     // Manual-restart entry point. Same flow as the post-save modal but with
     // generic copy and no field list — useful when an earlier save's cold

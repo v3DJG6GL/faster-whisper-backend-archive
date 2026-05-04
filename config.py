@@ -52,6 +52,12 @@ ALLOWED_MODELS: "set[str]" = {
 # ~600 MB. Pick based on free VRAM after the OS / other apps.
 MAX_LOADED_MODELS = 3
 
+# Time-based eviction: unload a model after this many seconds without
+# being used (touched on every transcribe). 0 disables time-based
+# eviction (current behavior — only LRU-evict when MAX_LOADED_MODELS
+# is exceeded). Common values: 1800 (30 min), 3600 (1 h), 14400 (4 h).
+MODEL_IDLE_TIMEOUT_S = 0
+
 # Models to load eagerly at server startup. Listed models stay hot in VRAM
 # from boot, so the first request to each doesn't pay the 5-30 s warm-up.
 # If empty, only DEFAULT_MODEL is preloaded (current/historical behavior).
@@ -502,6 +508,7 @@ if _env_allowed is not None:
     ALLOWED_MODELS = {s.strip() for s in _env_allowed.split(",") if s.strip()}
 
 MAX_LOADED_MODELS = int(os.environ.get("WHISPER_MAX_LOADED_MODELS", str(MAX_LOADED_MODELS)))
+MODEL_IDLE_TIMEOUT_S = int(os.environ.get("WHISPER_MODEL_IDLE_TIMEOUT_S", str(MODEL_IDLE_TIMEOUT_S)))
 
 _env_preload = os.environ.get("WHISPER_PRELOAD_MODELS")
 if _env_preload is not None:

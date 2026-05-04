@@ -92,15 +92,20 @@ def register_loaded_model(name: str, vram_bytes: int | None,
             "vram_bytes": vram_bytes,
             "loaded_at": time.time(),
             "last_used": time.time(),
+            # Monotonic counterpart for the idle-evictor's safe time math
+            # (wall-clock can jump on NTP correction; monotonic cannot).
+            "last_used_monotonic": time.monotonic(),
         }
 
 
 def touch_loaded_model(name: str) -> None:
-    """Bump last_used timestamp on cache hit — drives the warm/cold UI badge."""
+    """Bump last_used timestamp on cache hit — drives the warm/cold UI badge
+    and the idle-evictor's eviction decision."""
     with _loaded_models_lock:
         info = _loaded_models.get(name)
         if info is not None:
             info["last_used"] = time.time()
+            info["last_used_monotonic"] = time.monotonic()
 
 
 def unregister_loaded_model(name: str) -> None:

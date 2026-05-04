@@ -40,6 +40,7 @@ ENV_VAR_MAPPING: dict[str, str] = {
     "DEFAULT_MODEL": "WHISPER_DEFAULT_MODEL",
     "ALLOWED_MODELS": "WHISPER_ALLOWED_MODELS",
     "MAX_LOADED_MODELS": "WHISPER_MAX_LOADED_MODELS",
+    "MODEL_IDLE_TIMEOUT_S": "WHISPER_MODEL_IDLE_TIMEOUT_S",
     "PRELOAD_MODELS": "WHISPER_PRELOAD_MODELS",
     "DEFAULT_PROMPT": "WHISPER_DEFAULT_PROMPT",
     "TRACE_ENABLED": "WHISPER_TRACE",
@@ -87,6 +88,10 @@ FIELD_DESCRIPTIONS: dict[str, str] = {
     "MAX_LOADED_MODELS":
         "Max models kept hot in VRAM (LRU evicts beyond this). large-v3 "
         "~1.5 GB fp16, turbo/distill ~600 MB.",
+    "MODEL_IDLE_TIMEOUT_S":
+        "Unload a model from VRAM/RAM after this many seconds without use. "
+        "0 = disabled (default). Examples: 1800 = 30 min, 3600 = 1 h, "
+        "14400 = 4 h. Background task wakes every 30 s to check.",
     "PRELOAD_MODELS":
         "Models eagerly loaded at startup so the first request skips the "
         "5-30 s warm-up. Empty = only DEFAULT_MODEL.",
@@ -306,6 +311,7 @@ class AdminConfig(BaseModel):
     # us validate per-element via the ModelId Annotated type.
     ALLOWED_MODELS: list[ModelId] | None = _F("ALLOWED_MODELS")
     MAX_LOADED_MODELS: Annotated[int, Field(ge=1, le=8)] | None = _F("MAX_LOADED_MODELS")
+    MODEL_IDLE_TIMEOUT_S: Annotated[int, Field(ge=0, le=86400)] | None = _F("MODEL_IDLE_TIMEOUT_S")
     PRELOAD_MODELS: list[ModelId] | None = _F("PRELOAD_MODELS")
     MODEL_DEVICE: DeviceLit | None = _F("MODEL_DEVICE")
     MODEL_COMPUTE_TYPE: ComputeLit | None = _F("MODEL_COMPUTE_TYPE")

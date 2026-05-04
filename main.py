@@ -634,6 +634,54 @@ async def _get_or_load_model(name: str) -> WhisperModel:
         return new_model
 
 
+async def _idle_evictor() -> None:
+    """Periodically unload models that haven't been touched for
+    cfg.MODEL_IDLE_TIMEOUT_S seconds. Wakes every 30 s; cheap when
+    timeout is 0 (early return) or no models are loaded. Acquires the
+    same _model_load_lock used by _get_or_load_model so concurrent loads
+    can't race with eviction.
+
+    VRAM reclamation: pop the WhisperModel reference from _loaded_models
+    so its CT2 destructor can run, then gc.collect() to break any
+    remaining cycles. If torch is importable and CUDA is active, also
+    call torch.cuda.empty_cache() to release pool-cached blocks.
+    """
+    import gc
+    try:
+        while True:
+            await _asyncio_for_models.sleep(30)
+            timeout = getattr(cfg, "MODEL_IDLE_TIMEOUT_S", 0) or 0
+            if timeout <= 0 or not _loaded_models:
+                continue
+            now = time.monotonic()
+            stale: list[str] = []
+            for name, info in list(system_stats._loaded_models.items()):
+                if name not in _loaded_models:
+                    continue
+                last = info.get("last_used_monotonic", now)
+                if now - last >= timeout:
+                    stale.append(name)
+            if not stale:
+                continue
+            async with _model_load_lock:
+                for name in stale:
+                    if name not in _loaded_models:
+                        continue   # raced with another path
+                    logger.info("[idle-evict] unloading %s after %ds idle",
+                                name, timeout)
+                    _loaded_models.pop(name, None)
+                    system_stats.unregister_loaded_model(name)
+            gc.collect()
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+    except _asyncio_for_models.CancelledError:
+        return
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # If PRELOAD_MODELS is empty, fall back to preloading just DEFAULT_MODEL
@@ -661,7 +709,15 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error("Failed to preload model '%s': %s", name, e)
 
+    evictor_task = _asyncio_for_models.create_task(_idle_evictor())
+
     yield
+
+    evictor_task.cancel()
+    try:
+        await evictor_task
+    except (_asyncio_for_models.CancelledError, Exception):
+        pass
 
     _loaded_models.clear()
     # Best-effort NVML shutdown so the service exit doesn't leak driver
