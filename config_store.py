@@ -100,7 +100,7 @@ LOAD_TIME_FIELDS: frozenset[str] = frozenset({
 
 # Hot settings whose derived caches need rebuild after edit. The admin route
 # calls main.rebuild_caches() when any of these change.
-CACHE_REBUILD_FIELDS: frozenset[str] = frozenset({"PIPELINE_RULES"})
+CACHE_REBUILD_FIELDS: frozenset[str] = frozenset({"PIPELINE_RULES", "TOKEN_RULES"})
 
 
 # =============================================================================
@@ -313,6 +313,28 @@ FIELD_DESCRIPTIONS: dict[str, str] = {
         "this model is serving the request — even if the rule is disabled "
         "globally. Inverse of PIPELINE_RULES_EXCLUDE; a slug cannot appear "
         "in both lists at once.",
+    "TOKEN_RULES":
+        "In-decoding controls — the parallel engine to PIPELINE_RULES, but "
+        "applied at the decoder layer (logit masks + prompt biases) instead "
+        "of post-processing the text. Five rule types: suppress-chars (hard "
+        "logit mask of single-char tokens like '.,?!:;'), suppress-tokens-raw "
+        "(power-user: raw vocab IDs), bias-prompt (soft style steering, "
+        "fades after first window), bias-hotwords (soft boost via the "
+        "<|startofprev|> block, no-op when force-prefix is set), force-prefix "
+        "(hard prefix injection, disables hotwords). Use suppress-chars to "
+        "stop auto-inserted punctuation; use bias-prompt / bias-hotwords for "
+        "soft steering toward Arabic numerals or domain vocab. Hard digit "
+        "substitution belongs in PIPELINE_RULES (post-processing) — multi-"
+        "token sequences cannot be suppressed in the decoder.",
+    "TOKEN_RULES_EXCLUDE":
+        "(Per-model only) List of token-rule slugs to FORCE-DISABLE when "
+        "this model is serving the request — even if the rule is enabled "
+        "globally. Same shape as PIPELINE_RULES_EXCLUDE.",
+    "TOKEN_RULES_INCLUDE":
+        "(Per-model only) List of token-rule slugs to FORCE-ENABLE when "
+        "this model is serving the request — even if the rule is disabled "
+        "globally. Inverse of TOKEN_RULES_EXCLUDE; a slug cannot appear in "
+        "both lists at once.",
     "MODEL_OVERRIDES":
         "Per-model override bundle. Maps model id → override dict. Each "
         "override may set any of the per-model-overrideable fields; "
@@ -467,6 +489,77 @@ PipelineRule = Annotated[
 
 
 # =============================================================================
+# Token rule schema (in-decoding controls; parallel to PIPELINE_RULES)
+# =============================================================================
+# Each rule compiles into faster-whisper kwargs at request time. The realizable
+# rule set is dictated by what reaches the CT2 Whisper struct: only
+# suppress_tokens is a true logit mask. The "soft" rule types (bias-prompt,
+# bias-hotwords) push text into the <|startofprev|> block — boost-only,
+# fading after window 1 (bias-prompt) or capped at max_length//2 tokens
+# (bias-hotwords). force-prefix is a hard prefix injection but disables hotwords.
+TokenRuleSlug = Annotated[str, Field(min_length=1, max_length=64,
+                                     pattern=r"^[a-z0-9-]+$")]
+
+
+class _TokenRuleBase(BaseModel):
+    """Common fields for every TokenRule row."""
+    model_config = {"extra": "forbid"}
+    name: TokenRuleSlug
+    label: Annotated[str, Field(min_length=1, max_length=80)]
+    enabled: bool = False        # default OFF — these change decoding behaviour
+    locked: bool = False
+    seeded: bool = False
+
+
+class SuppressCharsRule(_TokenRuleBase):
+    """Hard logit mask. Each char in `pattern` is encoded both with and
+    without leading space; only single-token encodings are kept. The decoder's
+    logit for each kept ID is set to -inf at every step."""
+    type: Literal["suppress-chars"]
+    pattern: Annotated[str, Field(min_length=1, max_length=64)]
+
+
+class SuppressTokensRawRule(_TokenRuleBase):
+    """Power-user: raw vocabulary IDs to suppress. Tokenizer-version-
+    dependent; prefer `suppress-chars` for portability."""
+    type: Literal["suppress-tokens-raw"]
+    token_ids: Annotated[
+        list[Annotated[int, Field(ge=0, le=200000)]],
+        Field(max_length=256),
+    ] = Field(default_factory=list)
+
+
+class BiasPromptRule(_TokenRuleBase):
+    """Soft style steering. Appended (with separator) to DEFAULT_PROMPT on
+    the first window only. Fades as decoding progresses past window 1."""
+    type: Literal["bias-prompt"]
+    pattern: Annotated[str, Field(min_length=1, max_length=512)]
+
+
+class BiasHotwordsRule(_TokenRuleBase):
+    """Soft boost. Appended to DEFAULT_HOTWORDS — the model sees these as
+    'recently transcribed text' (the <|startofprev|> block). Boost-only.
+    NO-OP when a force-prefix rule is enabled (faster-whisper 1542)."""
+    type: Literal["bias-hotwords"]
+    pattern: Annotated[str, Field(min_length=1, max_length=512)]
+
+
+class ForcePrefixRule(_TokenRuleBase):
+    """Force the decoder to emit `pattern` at the start of every window's
+    output, then continue freely. Stronger than bias-prompt. DISABLES
+    hotwords entirely. At most one enabled force-prefix rule allowed."""
+    type: Literal["force-prefix"]
+    pattern: Annotated[str, Field(min_length=1, max_length=256)]
+
+
+TokenRule = Annotated[
+    Union[SuppressCharsRule, SuppressTokensRawRule, BiasPromptRule,
+          BiasHotwordsRule, ForcePrefixRule],
+    Field(discriminator="type"),
+]
+
+
+# =============================================================================
 # Per-model overrides
 # =============================================================================
 # A ModelOverride bundle lives at MODEL_OVERRIDES[model_id]. Every field is
@@ -548,21 +641,35 @@ class ModelOverride(BaseModel):
         Field(max_length=200),
     ] | None = None
 
+    # --- Token rule scoping (PM-only) — same shape as PIPELINE_RULES_*. ---
+    TOKEN_RULES_EXCLUDE: Annotated[
+        list[TokenRuleSlug],
+        Field(max_length=200),
+    ] | None = None
+    TOKEN_RULES_INCLUDE: Annotated[
+        list[TokenRuleSlug],
+        Field(max_length=200),
+    ] | None = None
+
     @model_validator(mode="after")
     def _no_overlap_include_exclude(self) -> "ModelOverride":
         """A rule slug cannot be both force-disabled AND force-enabled for the
         same model — admin must pick one. Catches obvious misconfiguration
         (e.g. typed both lists then forgot to clean one up)."""
-        ex = set(self.PIPELINE_RULES_EXCLUDE or [])
-        inc = set(self.PIPELINE_RULES_INCLUDE or [])
-        overlap = ex & inc
-        if overlap:
-            raise ValueError(
-                f"PIPELINE_RULES_EXCLUDE and PIPELINE_RULES_INCLUDE overlap: "
-                f"{sorted(overlap)} — a rule cannot be both force-disabled "
-                f"and force-enabled for the same model. Remove from one of "
-                f"the lists."
-            )
+        for kind, ex_attr, inc_attr in (
+            ("PIPELINE_RULES", "PIPELINE_RULES_EXCLUDE", "PIPELINE_RULES_INCLUDE"),
+            ("TOKEN_RULES", "TOKEN_RULES_EXCLUDE", "TOKEN_RULES_INCLUDE"),
+        ):
+            ex = set(getattr(self, ex_attr) or [])
+            inc = set(getattr(self, inc_attr) or [])
+            overlap = ex & inc
+            if overlap:
+                raise ValueError(
+                    f"{ex_attr} and {inc_attr} overlap: "
+                    f"{sorted(overlap)} — a rule cannot be both force-disabled "
+                    f"and force-enabled for the same model. Remove from one of "
+                    f"the lists."
+                )
         return self
 
 
@@ -643,6 +750,8 @@ class AdminConfig(BaseModel):
 
     # --- Pipeline ---
     PIPELINE_RULES: Annotated[list[PipelineRule], Field(max_length=200)] | None = _F("PIPELINE_RULES")
+    # In-decoding controls; parallel engine to PIPELINE_RULES.
+    TOKEN_RULES: Annotated[list[TokenRule], Field(max_length=100)] | None = _F("TOKEN_RULES")
     TRACE_ENABLED: bool | None = _F("TRACE_ENABLED")
 
     # --- Logging ---
@@ -705,6 +814,31 @@ class AdminConfig(BaseModel):
             return v
         if len(v) > 1000:
             raise ValueError(f"capped at 1000 entries (got {len(v)})")
+        return v
+
+    @field_validator("TOKEN_RULES")
+    @classmethod
+    def _validate_token_rules(cls, v: list[Any] | None) -> list[Any] | None:
+        """Slug uniqueness + at-most-one enabled `force-prefix`. The latter is
+        a hard CT2 contract: hotwords are silently no-op'd when prefix is set
+        (faster-whisper transcribe.py:1542), so multiple force-prefix rules
+        would be ambiguous and surprising."""
+        if v is None:
+            return v
+        seen: set[str] = set()
+        forced = 0
+        for idx, rule in enumerate(v):
+            slug = rule.get("name") if isinstance(rule, dict) else getattr(rule, "name", None)
+            rtype = rule.get("type") if isinstance(rule, dict) else getattr(rule, "type", None)
+            enabled = rule.get("enabled") if isinstance(rule, dict) else getattr(rule, "enabled", False)
+            if slug in seen:
+                raise ValueError(f"duplicate token-rule name '{slug}' at index {idx}")
+            if slug is not None:
+                seen.add(slug)
+            if rtype == "force-prefix" and enabled:
+                forced += 1
+        if forced > 1:
+            raise ValueError("at most one enabled `force-prefix` token rule allowed")
         return v
 
     @field_validator("PIPELINE_RULES")
@@ -831,6 +965,27 @@ class AdminConfig(BaseModel):
                     raise ValueError(
                         f"MODEL_OVERRIDES[{model_id!r}].{list_name} "
                         f"references unknown rule slugs: {unknown}. "
+                        f"Valid: {sorted(canonical)}."
+                    )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_token_rule_slugs(self) -> "AdminConfig":
+        """Same orphan-slug check as for PIPELINE_RULES, applied to
+        TOKEN_RULES_EXCLUDE / TOKEN_RULES_INCLUDE."""
+        if self.TOKEN_RULES is None or self.MODEL_OVERRIDES is None:
+            return self
+        canonical = {r.name for r in self.TOKEN_RULES}
+        if not canonical:
+            return self
+        for model_id, override in self.MODEL_OVERRIDES.items():
+            for list_name in ("TOKEN_RULES_EXCLUDE", "TOKEN_RULES_INCLUDE"):
+                slugs = getattr(override, list_name, None) or []
+                unknown = [s for s in slugs if s not in canonical]
+                if unknown:
+                    raise ValueError(
+                        f"MODEL_OVERRIDES[{model_id!r}].{list_name} "
+                        f"references unknown token-rule slugs: {unknown}. "
                         f"Valid: {sorted(canonical)}."
                     )
         return self

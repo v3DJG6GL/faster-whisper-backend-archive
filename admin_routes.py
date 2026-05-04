@@ -84,6 +84,7 @@ _FIELD_GROUPS: list[tuple[str, list[tuple[str | None, list[str]]]]] = [
     ])]),
     ("Per-model overrides", [(None, ["MODEL_OVERRIDES"])]),
     ("Pipeline", [(None, ["PIPELINE_RULES"])]),
+    ("Token rules (decoding)", [(None, ["TOKEN_RULES"])]),
     ("Logging", [(None, [
         "LOG_FILE", "LOG_MAX_BYTES", "LOG_BACKUP_COUNT", "TRACE_ENABLED",
     ])]),
@@ -215,6 +216,22 @@ def _canon_rules(rules: Any) -> Any:
     return out
 
 
+def _canon_token_rules(rules: Any) -> Any:
+    """Same shape contract as _canon_rules but for the TOKEN_RULES list."""
+    if not isinstance(rules, list):
+        return rules
+    from pydantic import TypeAdapter
+    adapter = TypeAdapter(config_store.TokenRule)
+    out: list[Any] = []
+    for r in rules:
+        try:
+            dumped = adapter.validate_python(r).model_dump(exclude_none=True)
+            out.append(_sort_dicts(dumped))
+        except Exception:
+            out.append(r)
+    return out
+
+
 # `model_dump()` preserves insertion order on nested dict fields (e.g. the
 # `map` on a callback:map rule). The resolved value (after a local.json
 # overlay) and the baseline `default_value` (from cfg._BASELINE) can carry
@@ -308,6 +325,9 @@ async def get_state() -> dict[str, Any]:
     if "PIPELINE_RULES" in fields:
         fields["PIPELINE_RULES"]["value"] = _canon_rules(fields["PIPELINE_RULES"]["value"])
         fields["PIPELINE_RULES"]["default_value"] = _canon_rules(fields["PIPELINE_RULES"]["default_value"])
+    if "TOKEN_RULES" in fields:
+        fields["TOKEN_RULES"]["value"] = _canon_token_rules(fields["TOKEN_RULES"]["value"])
+        fields["TOKEN_RULES"]["default_value"] = _canon_token_rules(fields["TOKEN_RULES"]["default_value"])
 
     # Surface the nested group structure to the client. Each group has a list
     # of subgroups: {title, subgroups: [{title: str | None, fields: [...]}]}.
@@ -934,6 +954,25 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
   .rule-row .row-body { padding-left: 2rem; padding-top: 0.375rem; display: none; }
   .rule-row.expanded .row-body { display: block; }
   .rule-row.terminal .row-body { display: block; padding-top: 0.25rem; }
+  /* TOKEN_RULES editor: dedicated fields. Same row card as PIPELINE_RULES
+     but no drag, no expand, body is always visible. */
+  .token-rule-row { padding: 0.375rem 0.5rem; }
+  .token-rule-row .rule-label-input {
+    flex: 1; min-width: 6rem; background: transparent; color: var(--fg);
+    border: 1px solid var(--border); padding: 0.125rem 0.375rem;
+    font: inherit; font-size: var(--fs-sm); border-radius: 3px; }
+  .token-rule-row .rule-type-select {
+    background: #21262d; color: var(--fg); border: 1px solid var(--border);
+    padding: 0.125rem 0.25rem; font: inherit; font-size: var(--fs-xs);
+    border-radius: 3px; }
+  .token-rule-body { padding-top: 0.375rem; padding-left: 2rem; }
+  .token-rule-body .token-rule-input {
+    width: 100%; box-sizing: border-box; background: transparent;
+    color: var(--fg); border: 1px solid var(--border);
+    padding: 0.25rem 0.375rem; font-family: var(--font-mono);
+    font-size: var(--fs-sm); border-radius: 3px; resize: vertical; }
+  .token-rule-row.disabled .rule-label-input,
+  .token-rule-row.disabled .token-rule-input { opacity: 0.55; }
   .rule-editor { display: flex; flex-direction: column; gap: 0.25rem; }
   .rule-editor .map-table { font-family: var(--font-mono); font-size: var(--fs-sm); }
   .rule-editor .map-table input { background: transparent; color: var(--fg);
@@ -1441,6 +1480,10 @@ function makeEditor(name) {
   // drag-to-reorder, per-row test badge). Routed by name BEFORE shape checks
   // since the value is a list.
   if (name === 'PIPELINE_RULES') return makeRuleListEditor(name, v || [], 'full', {});
+  // TOKEN_RULES gets its own dedicated editor — different rule types, no
+  // regex/test panel, no drag-reorder (rule order is meaningless: at most
+  // one force-prefix; suppress IDs are unioned).
+  if (name === 'TOKEN_RULES') return makeTokenRuleListEditor(name, v || [], 'full', {});
   // MODEL_OVERRIDES is a dict[model_id, dict[field, value]] — too freeform
   // for the standard editors. Render as a JSON textarea with parse-validation
   // on every input. Save sends the parsed object; pydantic validates server-
@@ -1597,6 +1640,8 @@ function modelOverridesEditor(name, v) {
   // Live handle to the per-model pipeline section so refreshPipelineSection()
   // can replaceWith() it on global PIPELINE_RULES changes.
   let pipelineSectionEl = null;
+  // Same trick for the per-model TOKEN_RULES section.
+  let tokenSectionEl = null;
 
   // Section / field grouping. Mirrors the plan's master-detail layout.
   const SECTIONS = [
@@ -1780,6 +1825,14 @@ function modelOverridesEditor(name, v) {
     pipelineSectionEl.replaceWith(fresh);
     pipelineSectionEl = fresh;
   }
+  // Same in-place rebuild for the per-model TOKEN_RULES checklist.
+  function refreshTokenSection() {
+    if (!tokenSectionEl || !tokenSectionEl.parentElement) return;
+    if (selectedId === null) return;
+    const fresh = renderTokenSection();
+    tokenSectionEl.replaceWith(fresh);
+    tokenSectionEl = fresh;
+  }
 
   // -------- DOM scaffolding ----------------------------------------------
   const wrap = document.createElement('div');
@@ -1955,6 +2008,8 @@ function modelOverridesEditor(name, v) {
     }
     pipelineSectionEl = renderPipelineSection();
     body.appendChild(pipelineSectionEl);
+    tokenSectionEl = renderTokenSection();
+    body.appendChild(tokenSectionEl);
     mainpane.appendChild(body);
   }
 
@@ -2210,6 +2265,53 @@ function modelOverridesEditor(name, v) {
     return secEl;
   }
 
+  // -------- main pane: token rules checklist -----------------------------
+  function renderTokenSection() {
+    const secEl = document.createElement('div');
+    secEl.className = 'mo-section';
+    const h4 = document.createElement('h4');
+    h4.textContent = 'Token rules (decoding scoping)';
+    secEl.appendChild(h4);
+    const note = document.createElement('div');
+    note.className = 'help';
+    note.textContent = 'Per-model token-rule scoping. Rule bodies are edited globally — '
+      + 'the checkbox here decides whether each token rule applies for THIS model\'s '
+      + 'requests. Same force-disable / force-enable semantics as the pipeline checklist.';
+    secEl.appendChild(note);
+
+    let rules = [];
+    try { rules = currentValue('TOKEN_RULES') || []; } catch (_) { rules = []; }
+    const curEx = (overrides[selectedId] && overrides[selectedId].TOKEN_RULES_EXCLUDE) || [];
+    const curIn = (overrides[selectedId] && overrides[selectedId].TOKEN_RULES_INCLUDE) || [];
+    const excludeSet = new Set(curEx);
+    const includeSet = new Set(curIn);
+    const ruleOpts = {
+      excludeSet,
+      includeSet,
+      onToggle: (slug, wantActive, globallyEnabled) => {
+        if (globallyEnabled) {
+          if (wantActive) excludeSet.delete(slug);
+          else            excludeSet.add(slug);
+        } else {
+          if (wantActive) includeSet.add(slug);
+          else            includeSet.delete(slug);
+        }
+        if (!overrides[selectedId]) overrides[selectedId] = {};
+        const ex = [...excludeSet];
+        const inc = [...includeSet];
+        if (ex.length)  overrides[selectedId].TOKEN_RULES_EXCLUDE = ex;
+        else            delete overrides[selectedId].TOKEN_RULES_EXCLUDE;
+        if (inc.length) overrides[selectedId].TOKEN_RULES_INCLUDE = inc;
+        else            delete overrides[selectedId].TOKEN_RULES_INCLUDE;
+        persist();
+        refreshMarkers();
+      },
+      onJumpToGlobal: (slug) => jumpToTokenRule(slug),
+    };
+    secEl.appendChild(makeTokenRuleListEditor('TOKEN_RULES', rules, 'checklist', ruleOpts));
+    return secEl;
+  }
+
   // -------- jump-link helpers --------------------------------------------
   // The global field row uses `data-field="X"`; per-model rows here use
   // `data-mo-field="X"` to avoid clashing. Scope the global selector to
@@ -2233,6 +2335,13 @@ function modelOverridesEditor(name, v) {
     } else {
       fieldRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
+  }
+  function jumpToTokenRule(slug) {
+    const fieldRow = document.querySelector('main .field[data-field="TOKEN_RULES"]');
+    if (!fieldRow) return;
+    const ruleRow = fieldRow.querySelector('.rule-row[data-slug="' + slug + '"]');
+    if (ruleRow) ruleRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    else fieldRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }
 
   // Initial selection: the alphabetically-first model with overrides;
@@ -2260,10 +2369,11 @@ function modelOverridesEditor(name, v) {
   // refresher instead of refreshMarkers — the per-model rule rows live
   // outside the .mo-row[data-mo-field] world refreshMarkers walks.
   document.addEventListener('admin:dirty', (e) => {
-    if (!e.detail) { refreshMarkers(); refreshPipelineSection(); return; }
+    if (!e.detail) { refreshMarkers(); refreshPipelineSection(); refreshTokenSection(); return; }
     const n = e.detail.name;
     if (n === name) return;
     if (n === 'PIPELINE_RULES') { refreshPipelineSection(); return; }
+    if (n === 'TOKEN_RULES')    { refreshTokenSection(); return; }
     refreshMarkers(n);
   });
   return wrap;
@@ -3318,6 +3428,339 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
     l.className = 'help'; l.textContent = label + ':';
     wr.appendChild(l); wr.appendChild(el);
     return wr;
+  }
+
+  paintAll();
+  return wrap;
+}
+
+
+// =========================================================================
+// TOKEN_RULES editor — parallel engine to PIPELINE_RULES, but operating
+// at the decoder layer (logit masks + prompt biases). 5 realizable rule
+// types: suppress-chars, suppress-tokens-raw, bias-prompt, bias-hotwords,
+// force-prefix. No drag-reorder (rule order is meaningless), no test
+// panel (no regex). Same row-card visual style as makeRuleListEditor so
+// CSS is shared.
+// =========================================================================
+const _TOKEN_TYPES = [
+  { type: 'suppress-chars',      pill: 'suppress-chars',
+    hint: 'Hard logit mask. Each char tokenized; only single-token chars are masked.' },
+  { type: 'suppress-tokens-raw', pill: 'suppress-ids',
+    hint: 'Power-user: raw vocabulary IDs to mask (comma-separated).' },
+  { type: 'bias-prompt',         pill: 'bias-prompt',
+    hint: 'Soft style steering. Appended to DEFAULT_PROMPT; fades after window 1.' },
+  { type: 'bias-hotwords',       pill: 'bias-hotwords',
+    hint: 'Soft boost via <|startofprev|> block. NO-OP when force-prefix is set.' },
+  { type: 'force-prefix',        pill: 'force-prefix',
+    hint: 'Hard prefix at every window. DISABLES hotwords. At most one enabled.' },
+];
+const _tokenTypePill = (t) => (_TOKEN_TYPES.find(x => x.type === t) || {}).pill || t;
+
+function makeTokenRuleListEditor(name, initialRules, mode, opts) {
+  // mode: "full" → editable list. "checklist" → per-model force-include/-exclude.
+  mode = mode || 'full';
+  opts = opts || {};
+  const isChecklist = mode === 'checklist';
+  let rules = JSON.parse(JSON.stringify(initialRules || []));
+
+  const wrap = document.createElement('div');
+  wrap.className = 'pipeline-rules-wrap token-rules-wrap';
+  if (isChecklist) wrap.classList.add('checklist-mode');
+
+  if (!isChecklist) {
+    const note = document.createElement('div');
+    note.className = 'help';
+    note.textContent =
+      'In-decoding controls. Hard rules (suppress-chars, suppress-tokens-raw, '
+      + 'force-prefix) directly mask or inject tokens during decoding. Soft '
+      + 'rules (bias-prompt, bias-hotwords) push text into the model\'s context '
+      + '— effective but not guaranteed. Order does not matter.';
+    wrap.appendChild(note);
+  }
+
+  const list = document.createElement('div');
+  list.className = 'rule-list';
+  wrap.appendChild(list);
+
+  // ---- helpers ---------------------------------------------------------
+  function _baselineList() { return fieldDef(name).default_value || []; }
+  function _baselineByName() {
+    const m = new Map();
+    _baselineList().forEach(b => m.set(b.name, b));
+    return m;
+  }
+  function _isRuleDirty(rule) {
+    if (!rule || !rule.seeded) return false;
+    const b = _baselineByName().get(rule.name);
+    if (!b) return true;
+    return JSON.stringify(rule) !== JSON.stringify(b);
+  }
+  function commitFull() {
+    setDirty(name, JSON.parse(JSON.stringify(rules)));
+    paintAll();
+  }
+  function _slugSet() {
+    const s = new Set();
+    rules.forEach(r => r && r.name && s.add(r.name));
+    return s;
+  }
+
+  // Render a per-type body field. Returns the input/textarea element.
+  function _renderBody(rule, idx, row) {
+    const wrap = document.createElement('div');
+    wrap.className = 'token-rule-body';
+    if (rule.type === 'suppress-tokens-raw') {
+      const ta = document.createElement('input');
+      ta.type = 'text';
+      ta.className = 'token-rule-input';
+      ta.placeholder = 'token IDs, comma-separated (e.g. 13, 11, 30)';
+      ta.value = (rule.token_ids || []).join(', ');
+      ta.addEventListener('input', () => {
+        const ids = ta.value.split(',').map(s => parseInt(s.trim(), 10))
+          .filter(n => Number.isFinite(n) && n >= 0);
+        rules[idx].token_ids = ids;
+        commitFull();
+      });
+      wrap.appendChild(ta);
+    } else {
+      // All other types use `pattern` (text). suppress-chars expects single
+      // chars; the others accept arbitrary text. Use textarea for the
+      // longer-pattern types so multi-line prompts are easy to edit.
+      const useTextarea = rule.type === 'bias-prompt'
+                       || rule.type === 'bias-hotwords'
+                       || rule.type === 'force-prefix';
+      const inp = document.createElement(useTextarea ? 'textarea' : 'input');
+      if (!useTextarea) inp.type = 'text';
+      inp.className = 'token-rule-input';
+      if (useTextarea) inp.rows = 2;
+      inp.placeholder = rule.type === 'suppress-chars'
+        ? 'characters to mask, e.g. .,?!:;'
+        : (rule.type === 'force-prefix' ? 'forced output prefix' : 'pattern text');
+      inp.value = rule.pattern || '';
+      inp.addEventListener('input', () => {
+        rules[idx].pattern = inp.value;
+        commitFull();
+      });
+      wrap.appendChild(inp);
+    }
+    return wrap;
+  }
+
+  function _renderRow(rule, idx) {
+    const row = document.createElement('div');
+    row.className = 'rule-row token-rule-row';
+    row.dataset.idx = idx;
+    row.dataset.slug = rule.name || '';
+    row.dataset.type = rule.type || '';
+    if (rule.locked)         row.classList.add('locked');
+    if (!rule.enabled)       row.classList.add('disabled');
+
+    if (isChecklist) {
+      // ---- Checklist: per-model force-include / force-exclude ----------
+      const globallyEnabled = !!rule.enabled;
+      const forcedOut = !!(opts.excludeSet && opts.excludeSet.has(rule.name));
+      const forcedIn  = !!(opts.includeSet && opts.includeSet.has(rule.name));
+      const effective = (globallyEnabled && !forcedOut) || forcedIn;
+      if (forcedOut)                          row.classList.add('excluded');
+      if (!globallyEnabled && !forcedIn)      row.classList.add('globally-disabled');
+      if (!globallyEnabled && forcedIn)       row.classList.add('force-included');
+      row.dataset.matchesGlobal = (!forcedOut && !forcedIn) ? 'true' : 'false';
+
+      const head = document.createElement('div');
+      head.className = 'row-header';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = effective;
+      cb.addEventListener('change', () => {
+        if (opts.onToggle) opts.onToggle(rule.name, cb.checked, globallyEnabled);
+        const newForcedOut = globallyEnabled && !cb.checked;
+        const newForcedIn  = !globallyEnabled && cb.checked;
+        row.classList.toggle('excluded', newForcedOut);
+        row.classList.toggle('globally-disabled', !globallyEnabled && !newForcedIn);
+        row.classList.toggle('force-included', newForcedIn);
+        row.dataset.matchesGlobal = (!newForcedOut && !newForcedIn) ? 'true' : 'false';
+      });
+      head.appendChild(cb);
+      const lbl = document.createElement('span');
+      lbl.className = 'rule-label';
+      lbl.textContent = rule.label || rule.name;
+      head.appendChild(lbl);
+      const pill = document.createElement('span');
+      pill.className = 'type-pill';
+      pill.textContent = _tokenTypePill(rule.type);
+      head.appendChild(pill);
+      const view = document.createElement('button');
+      view.type = 'button';
+      view.className = 'reset-link';
+      view.textContent = '↑ view';
+      view.title = 'Scroll to global TOKEN_RULES editor';
+      view.addEventListener('click', () => {
+        if (opts.onJumpToGlobal) opts.onJumpToGlobal(rule.name);
+      });
+      head.appendChild(view);
+      row.appendChild(head);
+      return row;
+    }
+
+    // ---- Full mode -------------------------------------------------
+    const head = document.createElement('div');
+    head.className = 'row-header';
+
+    // Enabled checkbox
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = !!rule.enabled;
+    cb.title = 'Enable this rule globally';
+    cb.addEventListener('change', () => {
+      rules[idx].enabled = cb.checked;
+      commitFull();
+    });
+    head.appendChild(cb);
+
+    // Label input
+    const lbl = document.createElement('input');
+    lbl.type = 'text';
+    lbl.className = 'rule-label-input';
+    lbl.value = rule.label || '';
+    lbl.placeholder = 'rule label';
+    lbl.addEventListener('input', () => {
+      rules[idx].label = lbl.value;
+      commitFull();
+    });
+    head.appendChild(lbl);
+
+    // Slug display (read-only)
+    const slug = document.createElement('span');
+    slug.className = 'rule-slug';
+    slug.textContent = rule.name;
+    slug.title = 'rule slug — auto-generated from label on add';
+    head.appendChild(slug);
+
+    // Type dropdown
+    const typeSel = document.createElement('select');
+    typeSel.className = 'rule-type-select';
+    for (const t of _TOKEN_TYPES) {
+      const opt = document.createElement('option');
+      opt.value = t.type;
+      opt.textContent = t.pill;
+      if (t.type === rule.type) opt.selected = true;
+      typeSel.appendChild(opt);
+    }
+    typeSel.title = (_TOKEN_TYPES.find(t => t.type === rule.type) || {}).hint || '';
+    typeSel.addEventListener('change', () => {
+      const newType = typeSel.value;
+      const cur = rules[idx];
+      // Reset body fields when switching type.
+      const next = {
+        name: cur.name, label: cur.label, enabled: cur.enabled,
+        locked: cur.locked || false, seeded: cur.seeded || false,
+        type: newType,
+      };
+      if (newType === 'suppress-tokens-raw') next.token_ids = [];
+      else next.pattern = '';
+      rules[idx] = next;
+      commitFull();
+    });
+    head.appendChild(typeSel);
+
+    // Reset / delete buttons
+    if (rule.seeded && _isRuleDirty(rule)) {
+      const reset = document.createElement('button');
+      reset.type = 'button';
+      reset.className = 'reset-link';
+      reset.textContent = '↺ reset';
+      reset.title = 'Reset this seeded rule to factory defaults';
+      reset.addEventListener('click', () => {
+        const baseline = _baselineByName().get(rule.name);
+        if (!baseline) return;
+        rules[idx] = JSON.parse(JSON.stringify(baseline));
+        commitFull();
+      });
+      head.appendChild(reset);
+    }
+    if (!rule.locked) {
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'reset-link';
+      del.textContent = '×';
+      del.title = rule.seeded
+        ? 'Delete this seeded rule (you can re-seed by clicking ↻ Re-seed below)'
+        : 'Delete this rule';
+      del.addEventListener('click', () => {
+        rules.splice(idx, 1);
+        commitFull();
+      });
+      head.appendChild(del);
+    }
+
+    row.appendChild(head);
+    row.appendChild(_renderBody(rule, idx, row));
+    return row;
+  }
+
+  function paintAll() {
+    list.innerHTML = '';
+    rules.forEach((r, i) => list.appendChild(_renderRow(r, i)));
+    if (footer) footer.textContent = _footerText();
+  }
+
+  // Footer (full mode only): + add rule, re-seed missing.
+  let footer = null;
+  if (!isChecklist) {
+    const controls = document.createElement('div');
+    controls.className = 'pipeline-controls';
+
+    const addBtn = document.createElement('button');
+    addBtn.type = 'button';
+    addBtn.className = 'add-rule-btn';
+    addBtn.textContent = '+ add rule';
+    addBtn.addEventListener('click', () => {
+      const slug = _ensureUniqueSlug('new-token-rule', _slugSet());
+      rules.push({
+        name: slug,
+        label: 'New token rule',
+        type: 'suppress-chars',
+        pattern: '',
+        enabled: false,
+        locked: false,
+        seeded: false,
+      });
+      commitFull();
+    });
+    controls.appendChild(addBtn);
+
+    // Re-seed: re-add any seeded rule that's been deleted.
+    const reseedBtn = document.createElement('button');
+    reseedBtn.type = 'button';
+    reseedBtn.className = 'reset-link';
+    reseedBtn.textContent = '↻ re-seed missing';
+    reseedBtn.title = 'Re-add any seeded rule that was deleted';
+    reseedBtn.addEventListener('click', () => {
+      const have = _slugSet();
+      let added = 0;
+      for (const b of _baselineList()) {
+        if (!have.has(b.name)) {
+          rules.push(JSON.parse(JSON.stringify(b)));
+          added++;
+        }
+      }
+      if (added > 0) commitFull();
+      else toast('no missing seeded rules', false);
+    });
+    controls.appendChild(reseedBtn);
+
+    footer = document.createElement('div');
+    footer.className = 'pipeline-footer';
+    controls.appendChild(footer);
+
+    wrap.appendChild(controls);
+  }
+  function _footerText() {
+    if (isChecklist) return '';
+    const total = rules.length;
+    const on = rules.filter(r => r.enabled).length;
+    return `${on}/${total} enabled`;
   }
 
   paintAll();

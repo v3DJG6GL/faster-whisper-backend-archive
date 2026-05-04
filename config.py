@@ -362,6 +362,49 @@ PIPELINE_RULES: list[dict] = [
 
 
 # =============================================================================
+# Token rules (in-decoding controls; parallel to PIPELINE_RULES)
+# =============================================================================
+# Rule types and their effect at the decoder layer:
+#   • suppress-chars     — hard logit mask of single-char tokens (.,?!:;).
+#                          Use to stop auto-inserted punctuation.
+#   • suppress-tokens-raw — raw vocab IDs to mask. Power-user; tokenizer-
+#                          version dependent.
+#   • bias-prompt        — appended to DEFAULT_PROMPT; soft style steering
+#                          that fades past the first decode window.
+#   • bias-hotwords      — appended to DEFAULT_HOTWORDS; soft boost via the
+#                          <|startofprev|> block. NO-OP if force-prefix is set.
+#   • force-prefix       — hard prefix injection at every window. DISABLES
+#                          hotwords (faster-whisper transcribe.py:1542).
+#                          At most one enabled force-prefix rule allowed.
+#
+# All seeded rules below are DISABLED by default — they change decoding
+# behaviour and shouldn't take effect without an admin flipping the switch.
+TOKEN_RULES: list[dict] = [
+    {
+        "name": "suppress-punctuation",
+        "label": "Suppress auto-punctuation (.,?!:;)",
+        "type": "suppress-chars",
+        "pattern": ".,?!:;",
+        "enabled": False, "locked": False, "seeded": True,
+    },
+    {
+        "name": "arabic-numerals-prompt",
+        "label": "Bias toward Arabic numerals (prompt)",
+        "type": "bias-prompt",
+        "pattern": "Verwende arabische Ziffern: 1, 2, 3, 95, 100, 1000.",
+        "enabled": False, "locked": False, "seeded": True,
+    },
+    {
+        "name": "arabic-numerals-hotwords",
+        "label": "Bias toward Arabic numerals (hotwords)",
+        "type": "bias-hotwords",
+        "pattern": "1 2 3 4 5 6 7 8 9 10 20 30 40 50 60 70 80 90 100 1000",
+        "enabled": False, "locked": False, "seeded": True,
+    },
+]
+
+
+# =============================================================================
 # Logging
 # =============================================================================
 
