@@ -136,11 +136,11 @@ _STATS_VIEWER_HTML = r"""<!doctype html>
     flex-shrink: 0; }
   header button:hover { background: #30363d; }
   {{NAV_CSS}}
-  .grid { padding: 0.875rem; max-width: 1100px; margin: 0 auto;
+  .grid { padding: 0.875rem; width: 100%;
     box-sizing: border-box; min-height: 60vh; }
   .card { background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
     padding: 0.625rem 0.75rem; min-width: 0; height: 100%; box-sizing: border-box;
-    overflow: auto; }
+    overflow: auto; display: flex; flex-direction: column; min-height: 0; }
   .card h3 { font-size: var(--fs-xs); color: var(--dim); margin: 0 0 0.375rem;
     text-transform: uppercase; letter-spacing: .05em; font-weight: 500; }
   .card .val { color: var(--bold); font-size: var(--fs-xxl); font-weight: 600; line-height: 1.1; }
@@ -152,14 +152,16 @@ _STATS_VIEWER_HTML = r"""<!doctype html>
     transition: width .3s ease; }
   .bar.warn > i { background: var(--yellow); }
   .bar.crit > i { background: var(--red); }
-  .spark-wrap  { margin-top: 0.625rem; min-width: 0; }
+  .spark-wrap  { margin-top: 0.625rem; min-width: 0;
+                 flex: 1 1 0; min-height: 0;
+                 display: flex; flex-direction: column; }
   .spark-head  { display: flex; justify-content: space-between; align-items: baseline;
                  font: var(--fs-xs) var(--font-mono);
-                 color: var(--dim); margin-bottom: 2px; }
+                 color: var(--dim); margin-bottom: 2px; flex: 0 0 auto; }
   .spark-label { letter-spacing: .03em; text-transform: uppercase; }
   .spark-now   { color: var(--bold); font-weight: 600;
                  font-variant-numeric: tabular-nums; }
-  .spark       { height: 72px; }
+  .spark       { flex: 1 1 0; min-height: 4rem; width: 100%; }
   .uplot, .u-wrap { background: transparent !important; }
   .u-legend { display: none; }
   .u-axis { color: var(--dim); }
@@ -379,7 +381,10 @@ _STATS_VIEWER_HTML = r"""<!doctype html>
 const GS_LAYOUT_KEY = 'whisper-stats-layout';
 const grid = GridStack.init({
   column: 12,
-  cellHeight: 60,
+  // String form so cells track --fs-base (the scale picker). At 100% scale,
+  // 4rem = 60px (matches the previous fixed value); at 130% it's ~78px.
+  // Saved layouts (column units) preserve unchanged across scale changes.
+  cellHeight: '4rem',
   margin: 6,
   float: false,
   resizable: { handles: 'se,s,e' },
@@ -401,18 +406,10 @@ function _saveLayout() {
   }, 200);
 }
 grid.on('change added removed', _saveLayout);
-// Resize-stop: re-fit any uPlot inside the resized item so sparklines fill.
-// `sparks` is declared later in the IIFE; at event-time the closure has it.
-grid.on('resizestop', (event, el) => {
-  el.querySelectorAll('.spark').forEach(spark => {
-    for (const k in sparks) {
-      const inst = sparks[k];
-      if (inst && inst.root && el.contains(inst.root)) {
-        inst.setSize({ width: spark.clientWidth || 240, height: spark.clientHeight || 72 });
-      }
-    }
-  });
-});
+// Resize is handled by per-spark ResizeObserver inside makeSpark() — fires on
+// GridStack drag-resize, window resize, scale-picker rem changes, and any
+// other reflow uniformly. Listening on `resizestop` here would only catch
+// GridStack-initiated resizes and would miss the rest.
 // Header reset-layout button.
 const resetLayoutBtn = document.getElementById('reset-layout-btn');
 if (resetLayoutBtn) {
@@ -474,21 +471,24 @@ function makeSpark(elId, color, opts={}) {
   const el = document.getElementById(elId);
   if (!el) return null;
   const w = el.clientWidth || 240;
+  const h = el.clientHeight || 72;
   const yScale = opts.range
     ? { range: opts.range }
     : { range: { min: { pad: 0.1, mode: 1 }, max: { pad: 0.1, mode: 1 } } };
   // uPlot's canvas API needs px values, not rem. Read them from --fs-base
   // so axis labels track the scale picker — see _axisFontPx below.
   const axisFontPx = _axisFontPx();
-  return new uPlot({
-    width: w, height: 72,
-    // [top, right, bottom, left] in px. Bottom > 0 gives the lowest y-axis
-    // tick label ("0%" / "30°") room for its descender / lower half — was 0,
-    // so the label was clipped by the canvas's bottom edge. Left padding
-    // (was 0) plus axis size (was 28, now ~3rem) gives uPlot room to draw
-    // "100%" without GridStack's overflow-x:hidden clipping the leading "1"
-    // against the tile edge.
-    padding: [_remPx(0.25), 6, _remPx(0.4), _remPx(0.25)],
+  const inst = new uPlot({
+    width: w, height: h,
+    // [top, right, bottom, left] in px. Top AND bottom both ≥ ½ axis-font
+    // height + a small breathing margin so the highest split label
+    // ("100%" / "60°") and the lowest ("0%" / "30°") render their full
+    // glyph height inside the canvas instead of being clipped by the
+    // canvas edges (uPlot draws tick labels centered on the data-area
+    // edge — half the glyph extends past the edge, so padding must
+    // exceed font-size/2). Left padding plus axis size gives uPlot room
+    // to draw "100%" without GridStack's overflow-x clipping the "1".
+    padding: [_remPx(0.55), 6, _remPx(0.4), _remPx(0.25)],
     cursor: { show: false },
     legend: { show: false },
     select: { show: false },
@@ -510,6 +510,22 @@ function makeSpark(elId, color, opts={}) {
         points: { show: false } },
     ],
   }, [[], []], el);
+  // Responsive sizing. ResizeObserver on the spark element fires for any
+  // size source — GridStack drag-resize, window resize, scale-picker rem
+  // changes, .hidden toggle reflow. rAF coalescing avoids thrashing
+  // setSize() during a drag (it's a relatively expensive canvas rebuild).
+  let raf = 0;
+  const ro = new ResizeObserver(() => {
+    if (raf) return;
+    raf = requestAnimationFrame(() => {
+      raf = 0;
+      const cw = el.clientWidth, ch = el.clientHeight;
+      if (cw < 1 || ch < 1) return;
+      inst.setSize({ width: cw, height: ch });
+    });
+  });
+  ro.observe(el);
+  return inst;
 }
 
 function ensureSparks() {
