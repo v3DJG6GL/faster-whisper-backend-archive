@@ -1061,9 +1061,14 @@ _LOG_VIEWER_HTML = """<!doctype html>
     --border: #30363d;
   }
   /* Font tokens, --font-sans, --font-mono and html font-size live in
-     {{NAV_CSS}}. Header chrome (title, pills, buttons) gets --font-sans
-     by default; the log lines themselves opt into --font-mono via .line
-     so timestamps and tabular fields stay aligned. */
+     NAV_CSS (injected further down). Important: never embed the NAV_CSS
+     template placeholder inside another comment block — render_page() does
+     a naive string replace and would inject NAV_CSS into this comment,
+     prematurely closing it (NAV_CSS contains its own internal comments)
+     and silently dropping every CSS rule that follows. Header chrome
+     (title, pills, buttons) gets --font-sans by default; the log lines
+     themselves opt into --font-mono via .line so timestamps and tabular
+     fields stay aligned. */
   html { height: 100%; }
   body { background: var(--bg); color: var(--fg);
     font: 1rem/1.5 var(--font-sans);
@@ -1088,14 +1093,17 @@ _LOG_VIEWER_HTML = """<!doctype html>
   header button:hover { background: #30363d; }
   /* width:100% + box-sizing:border-box are the fix for the "tiny centered
      column with text clipped at the start" rendering — without them the
-     1100px max-width sits on a content-sized box that overflows the
-     viewport. pre-wrap (was: pre) wraps long lines inside the visible
-     column instead of forcing a horizontal scrollbar that hides the start
-     of every line. font-size = global rem * --log-zoom is the multiplicative
-     log-only zoom; bumping the global picker grows logs and chrome together,
-     and the [-]/[+] buttons in the header then scale logs only on top. */
+     container sits on a content-sized box that overflows the viewport.
+     No max-width: log content uses the full viewport so long lines (HF
+     URLs, model paths) sit on a single line on wide monitors instead of
+     wrapping into the empty side-bands. The header bar stays centered at
+     1100px (its own .header-inner cap) so controls remain in a predictable
+     spot. pre-wrap still wraps lines that genuinely exceed the viewport.
+     font-size = global rem * --log-zoom is the multiplicative log-only
+     zoom; bumping the global picker grows logs and chrome together, and
+     the [-]/[+] buttons in the header then scale logs only on top. */
   #log { padding: 0.5rem 0.875rem;
-    width: 100%; max-width: 1100px; margin: 0 auto;
+    width: 100%;
     box-sizing: border-box;
     font-family: var(--font-mono);
     font-size: calc(1rem * var(--log-zoom, 1));

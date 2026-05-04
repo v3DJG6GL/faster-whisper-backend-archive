@@ -107,10 +107,15 @@ _STATS_VIEWER_HTML = r"""<!doctype html>
     --border: #30363d;
   }
   /* Font tokens, --font-sans, --font-mono and html font-size live in
-     {{NAV_CSS}}. Chrome (titles, buttons, badges, card headers) uses
-     --font-sans; uPlot's axis labels and the spark-head numeric readouts
-     stay in --font-mono so digits align (font-variant-numeric: tabular-nums
-     hint relies on the mono stack for crisp tabular alignment). */
+     NAV_CSS (injected further down). Important: never embed the NAV_CSS
+     template placeholder inside another comment block — render_page() does
+     a naive string replace and would inject NAV_CSS into this comment,
+     prematurely closing it (NAV_CSS contains its own internal comments)
+     and silently dropping every CSS rule that follows. Chrome (titles,
+     buttons, badges, card headers) uses --font-sans; uPlot's axis labels
+     and the spark-head numeric readouts stay in --font-mono so digits
+     align (font-variant-numeric: tabular-nums hint relies on the mono
+     stack for crisp tabular alignment). */
   html, body { background: var(--bg); color: var(--fg);
     font: 1rem/1.5 var(--font-sans);
     margin: 0; padding: 0; min-height: 100%; }

@@ -533,7 +533,12 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
     --border: #30363d; --input-bg: #0d1117;
   }
   /* Font-size tokens, --font-sans, --font-mono and html { font-size: var(--fs-base) }
-     live in {{NAV_CSS}} so all pages share one scaling knob.
+     live in NAV_CSS (injected further down, just before the body markup)
+     so all pages share one scaling knob. Important: never embed the NAV_CSS
+     template placeholder inside another comment block — render_page() does
+     a naive string replace and would inject NAV_CSS into this comment,
+     prematurely closing it (NAV_CSS contains its own internal comments)
+     and silently dropping every CSS rule that follows.
      Chrome (titles, labels, descriptions, buttons, badges) uses --font-sans;
      code-y contexts (input/textarea values, log lines, regex panels, the
      dictation-map key/value cells) opt into --font-mono via the rules below. */
