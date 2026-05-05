@@ -191,9 +191,16 @@ FIELD_DESCRIPTIONS: dict[str, str] = {
         "to getting stuck in failure loops (repetition; timestamps "
         "drifting out of sync). Default true.",
     "WORD_TIMESTAMPS_ENABLED":
-        "Extract word-level timestamps using the cross-attention pattern "
-        "and dynamic time warping, and include the timestamps for each "
-        "word in each segment. Slower.",
+        "ALLOW word-level timestamps when the request asks for them — this "
+        "is a gate, not an unconditional toggle. The decoder runs DTW "
+        "alignment only when (this flag is true) AND (the request opts in "
+        "via `timestamp_granularities[]=word` or `response_format="
+        "verbose_json`). With response_format=json and no granularities "
+        "asked, word timestamps stay off even when this is enabled — "
+        "matching the OpenAI API contract and avoiding wasted DTW work. "
+        "Set to false to FORCE-DISABLE word timestamps even when the "
+        "client asks (kill-switch for finetunes that crash on DTW "
+        "alignment, see faster-whisper#1212).",
     "NO_SPEECH_THRESHOLD":
         "If the no_speech probability is higher than this value AND the "
         "average log-probability over sampled tokens is below "
