@@ -377,18 +377,42 @@ _SEG_ROWS_MAX = 30    # truncate the segment table itself
 
 # Maps decode-kwarg name → cfg-default key in cfg._BASELINE. Used by the
 # `*` non-default marker. Only scalar fields are listed; lists/dicts skipped.
+# `temperature` and `suppress_tokens` are intentionally absent — their cfg
+# baselines are strings ("0.0,0.2,…", "-1") while the kwargs are tuples/lists,
+# so equality comparison is meaningless without parsing both sides.
 _KWARG_TO_CFG = {
+    # Search / sampling
     "beam_size": "BEAM_SIZE",
     "best_of": "BEST_OF",
+    "patience": "PATIENCE",
+    "length_penalty": "LENGTH_PENALTY",
+    "repetition_penalty": "REPETITION_PENALTY",
+    "no_repeat_ngram_size": "NO_REPEAT_NGRAM_SIZE",
+    "prompt_reset_on_temperature": "PROMPT_RESET_ON_TEMPERATURE",
+    # VAD
     "vad_filter": "VAD_FILTER",
-    "word_timestamps": "WORD_TIMESTAMPS_ENABLED",
-    "condition_on_previous_text": "CONDITION_ON_PREVIOUS_TEXT",
-    "no_speech_threshold": "NO_SPEECH_THRESHOLD",
-    "log_prob_threshold": "LOG_PROB_THRESHOLD",
-    "compression_ratio_threshold": "COMPRESSION_RATIO_THRESHOLD",
     "min_silence_duration_ms": "VAD_MIN_SILENCE_MS",
     "speech_pad_ms": "VAD_SPEECH_PAD_MS",
     "threshold": "VAD_THRESHOLD",
+    # Output shape
+    "word_timestamps": "WORD_TIMESTAMPS_ENABLED",
+    # Prompt context
+    "condition_on_previous_text": "CONDITION_ON_PREVIOUS_TEXT",
+    "initial_prompt": "DEFAULT_PROMPT",
+    "hotwords": "DEFAULT_HOTWORDS",
+    # Safety / thresholds
+    "no_speech_threshold": "NO_SPEECH_THRESHOLD",
+    "log_prob_threshold": "LOG_PROB_THRESHOLD",
+    "compression_ratio_threshold": "COMPRESSION_RATIO_THRESHOLD",
+    "hallucination_silence_threshold": "HALLUCINATION_SILENCE_THRESHOLD",
+    # Language detection
+    "multilingual": "MULTILINGUAL",
+    "language_detection_threshold": "LANGUAGE_DETECTION_THRESHOLD",
+    "language_detection_segments": "LANGUAGE_DETECTION_SEGMENTS",
+    # Token suppression / punctuation
+    "suppress_blank": "SUPPRESS_BLANK",
+    "prepend_punctuations": "PREPEND_PUNCTUATIONS",
+    "append_punctuations": "APPEND_PUNCTUATIONS",
 }
 
 
@@ -455,13 +479,33 @@ def _section_rule(label: str) -> str:
 
 def _format_decode_params(kwargs: dict) -> list[str]:
     """Render decode params as aligned rows, with VAD parameters indented
-    under vad_filter to show the relationship visually."""
+    under vad_filter to show the relationship visually. Fields are only
+    printed when present in `kwargs` — most non-default knobs (patience,
+    repetition_penalty, etc.) are conditionally added at request build
+    time, so absence here means "at faster-whisper / config default".
+    Order is grouped by intent (search → sampling → VAD → output → context
+    → thresholds → language detection → suppression)."""
     out: list[str] = []
     order = (
-        "beam_size", "best_of", "temperature",
+        # Search / sampling
+        "beam_size", "best_of", "patience", "length_penalty",
+        "repetition_penalty", "no_repeat_ngram_size",
+        "temperature", "prompt_reset_on_temperature",
+        # VAD
         "vad_filter",
-        "word_timestamps", "condition_on_previous_text", "initial_prompt",
-        "no_speech_threshold", "log_prob_threshold", "compression_ratio_threshold",
+        # Output shape
+        "word_timestamps",
+        # Prompt context
+        "condition_on_previous_text", "initial_prompt", "hotwords",
+        # Safety / thresholds
+        "no_speech_threshold", "log_prob_threshold",
+        "compression_ratio_threshold", "hallucination_silence_threshold",
+        # Language detection
+        "multilingual", "language_detection_threshold",
+        "language_detection_segments",
+        # Token suppression / punctuation
+        "suppress_blank", "suppress_tokens",
+        "prepend_punctuations", "append_punctuations",
     )
     for k in order:
         if k not in kwargs:
