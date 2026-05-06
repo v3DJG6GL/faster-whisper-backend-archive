@@ -8,13 +8,11 @@
 # WinSW.exe is auto-downloaded into this folder if missing. No package
 # manager (choco/scoop/winget) required.
 #
-# -WithConvert: installs requirements-convert.txt (transformers + torch +
-# accelerate, ~2 GB) on top of the base requirements. Required when
-# AUTO_CONVERT_HF_MODELS=true in /config so the backend can convert
-# HF-format Whisper checkpoints to CTranslate2 on first load. Skip
-# this flag if you only ever load already-CT2 model repos.
-# Idempotent: safe to re-run with the flag to add the extras to an
-# existing install without re-installing the base requirements.
+# Conversion extras (HF→CT2 auto-conversion): the script asks at install
+# time whether to install them when they're missing — install them later
+# from /config's AUTO_CONVERT_HF_MODELS toggle requirement. Already-
+# installed extras are detected and the prompt is skipped silently.
+# -WithConvert forces install without prompting (CI / scripted use).
 #
 # Pre-flight migration: if a service named "WhisperAPI" already exists
 # (e.g. installed via the previous NSSM-based script), it is stopped and
@@ -112,19 +110,49 @@ if (-not (Test-Path $Python)) {
 }
 
 # --- optional: install HF→CT2 conversion extras ----------------------------
-# Only when -WithConvert is passed. Adds ~2 GB (transformers + torch +
-# accelerate). Idempotent: pip skips already-satisfied deps, so re-running
-# with the flag against an existing install adds the extras in seconds if
-# they're already there. Required by AUTO_CONVERT_HF_MODELS=true in /config.
-if ($WithConvert) {
+# Required only when AUTO_CONVERT_HF_MODELS=true in /config. Adds ~2 GB
+# (transformers + torch + accelerate).
+#
+# Decision tree:
+#   -WithConvert flag → install without prompting (CI / scripted use).
+#   Already installed → silent skip (idempotent re-run).
+#   Otherwise        → interactive y/N prompt.
+
+function Test-ConvertDepsInstalled {
+    # Probe by trying to import all three deps in the venv. Exit code 0 = all
+    # present. Stdout/stderr suppressed; we only care about the boolean.
+    & $Python -c "import torch, transformers, accelerate" 2>$null | Out-Null
+    return ($LASTEXITCODE -eq 0)
+}
+
+function Install-ConvertDeps {
     $convertReq = Join-Path $RepoDir "requirements-convert.txt"
-    if (Test-Path $convertReq) {
-        Write-Host "Installing conversion extras (transformers + torch + accelerate, ~2 GB)..." -ForegroundColor Cyan
-        & $Python -m pip install -r $convertReq
-        if ($LASTEXITCODE -ne 0) { throw "pip install -r requirements-convert.txt failed (exit $LASTEXITCODE)" }
-        Write-Host "Conversion extras installed. AUTO_CONVERT_HF_MODELS=true will now work." -ForegroundColor Green
-    } else {
+    if (-not (Test-Path $convertReq)) {
         Write-Host "WARNING: requirements-convert.txt not found at $convertReq" -ForegroundColor Yellow
+        return
+    }
+    Write-Host "Installing conversion extras (transformers + torch + accelerate, ~2 GB)..." -ForegroundColor Cyan
+    & $Python -m pip install -r $convertReq
+    if ($LASTEXITCODE -ne 0) { throw "pip install -r requirements-convert.txt failed (exit $LASTEXITCODE)" }
+    Write-Host "Conversion extras installed. AUTO_CONVERT_HF_MODELS=true will now work." -ForegroundColor Green
+}
+
+if ($WithConvert) {
+    Install-ConvertDeps
+} elseif (Test-ConvertDepsInstalled) {
+    Write-Host "Conversion extras already installed (transformers + torch + accelerate)." -ForegroundColor DarkGray
+} else {
+    Write-Host ""
+    Write-Host "Optional: HF→CT2 conversion extras are NOT installed." -ForegroundColor Yellow
+    Write-Host "  These let the backend auto-convert HuggingFace transformers"
+    Write-Host "  Whisper checkpoints (e.g. Flurin17/whisper-large-v3-turbo-swiss-german)"
+    Write-Host "  to CTranslate2 format on first load. Footprint: ~2 GB (torch + transformers"
+    Write-Host "  + accelerate). Required only when AUTO_CONVERT_HF_MODELS=true in /config."
+    $reply = Read-Host "Install conversion extras now? [y/N]"
+    if ($reply -match '^(y|yes)$') {
+        Install-ConvertDeps
+    } else {
+        Write-Host "Skipped. Re-run with -WithConvert later if you change your mind." -ForegroundColor DarkGray
     }
 }
 
