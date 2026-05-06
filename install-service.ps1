@@ -2,10 +2,19 @@
 # via WinSW (https://github.com/winsw/winsw, v2.12.0). Run from any
 # PowerShell prompt:
 #   .\install-service.ps1
+#   .\install-service.ps1 -WithConvert     # also install ~2 GB of HF→CT2 deps
 # (Self-elevates to admin via UAC if not already running elevated.)
 #
 # WinSW.exe is auto-downloaded into this folder if missing. No package
 # manager (choco/scoop/winget) required.
+#
+# -WithConvert: installs requirements-convert.txt (transformers + torch +
+# accelerate, ~2 GB) on top of the base requirements. Required when
+# AUTO_CONVERT_HF_MODELS=true in /config so the backend can convert
+# HF-format Whisper checkpoints to CTranslate2 on first load. Skip
+# this flag if you only ever load already-CT2 model repos.
+# Idempotent: safe to re-run with the flag to add the extras to an
+# existing install without re-installing the base requirements.
 #
 # Pre-flight migration: if a service named "WhisperAPI" already exists
 # (e.g. installed via the previous NSSM-based script), it is stopped and
@@ -17,6 +26,11 @@
 # non-admin account; LocalSystem dodges it. Don't change this without
 # reading the issue.
 
+[CmdletBinding()]
+param(
+    [switch]$WithConvert
+)
+
 $ErrorActionPreference = "Stop"
 
 # --- elevate to admin if needed ---------------------------------------------
@@ -27,12 +41,16 @@ $identity  = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($identity)
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Host "This script needs admin rights. Triggering UAC..." -ForegroundColor Yellow
-    Start-Process powershell -Verb RunAs -ArgumentList @(
+    $relaunchArgs = @(
         "-NoExit",
         "-NoProfile",
         "-ExecutionPolicy", "Bypass",
         "-File", "`"$PSCommandPath`""
     )
+    # Forward switches across the UAC re-launch so $WithConvert isn't lost
+    # when the script restarts under elevation.
+    if ($WithConvert) { $relaunchArgs += "-WithConvert" }
+    Start-Process powershell -Verb RunAs -ArgumentList $relaunchArgs
     exit
 }
 
@@ -91,6 +109,23 @@ if (-not (Test-Path $Python)) {
         Write-Host "WARNING: requirements.txt not found at $reqFile" -ForegroundColor Yellow
     }
     Write-Host "venv ready." -ForegroundColor Green
+}
+
+# --- optional: install HF→CT2 conversion extras ----------------------------
+# Only when -WithConvert is passed. Adds ~2 GB (transformers + torch +
+# accelerate). Idempotent: pip skips already-satisfied deps, so re-running
+# with the flag against an existing install adds the extras in seconds if
+# they're already there. Required by AUTO_CONVERT_HF_MODELS=true in /config.
+if ($WithConvert) {
+    $convertReq = Join-Path $RepoDir "requirements-convert.txt"
+    if (Test-Path $convertReq) {
+        Write-Host "Installing conversion extras (transformers + torch + accelerate, ~2 GB)..." -ForegroundColor Cyan
+        & $Python -m pip install -r $convertReq
+        if ($LASTEXITCODE -ne 0) { throw "pip install -r requirements-convert.txt failed (exit $LASTEXITCODE)" }
+        Write-Host "Conversion extras installed. AUTO_CONVERT_HF_MODELS=true will now work." -ForegroundColor Green
+    } else {
+        Write-Host "WARNING: requirements-convert.txt not found at $convertReq" -ForegroundColor Yellow
+    }
 }
 
 # --- pre-flight: stop + remove any existing WhisperAPI service -------------
