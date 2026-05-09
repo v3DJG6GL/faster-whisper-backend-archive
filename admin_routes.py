@@ -2947,6 +2947,49 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
     // Body (collapsed by default).
     const body = document.createElement('div');
     body.className = 'row-body';
+
+    // Label editor — skipped for terminal (hardcoded label). For seeded
+    // rules the slug stays fixed (it's the contract with the in-repo
+    // baseline). For custom rules the slug regenerates from the label so
+    // the kebab-case slug stays in sync without a separate field. Live
+    // updates the header lbl/slug spans without a full repaint to
+    // preserve focus/caret position during typing.
+    if (rule.type !== 'terminal') {
+      const labelWrap = document.createElement('div');
+      labelWrap.className = 'rule-label-edit';
+      const labelLbl = document.createElement('div');
+      labelLbl.className = 'help';
+      labelLbl.textContent = rule.seeded
+        ? 'label: (slug stays fixed for seeded rules)'
+        : 'label: (slug regenerates from label)';
+      labelWrap.appendChild(labelLbl);
+      const labelInp = document.createElement('input');
+      labelInp.type = 'text';
+      labelInp.value = rule.label || '';
+      labelInp.spellcheck = false;
+      labelInp.style.width = '100%';
+      labelInp.addEventListener('input', () => {
+        rule.label = labelInp.value;
+        lbl.textContent = labelInp.value || rule.name;
+        if (!rule.seeded) {
+          const others = new Set(rules.filter(r => r !== rule).map(r => r.name));
+          const newSlug = _ensureUniqueSlug(_slugify(labelInp.value), others);
+          if (newSlug !== rule.name) {
+            if (expandedNames.has(rule.name)) {
+              expandedNames.delete(rule.name);
+              expandedNames.add(newSlug);
+            }
+            rule.name = newSlug;
+            slug.textContent = '(' + newSlug + ')';
+            row.dataset.slug = newSlug;
+          }
+        }
+        commitData();
+      });
+      labelWrap.appendChild(labelInp);
+      body.appendChild(labelWrap);
+    }
+
     body.appendChild(renderTypeEditor(rule, idx));
 
     if (rule.type !== 'terminal') {
