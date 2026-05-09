@@ -961,48 +961,22 @@ async function doSave() {
   const saved = result.saved || [];
   if (conflicts.length) {
     // Another writer changed one or more rules between our load and save.
-    // The server applied the non-conflicting patches; the conflicted ones
-    // are still dirty in our local state. Refetch to get the new baseline,
-    // but PRESERVE the conflicted edits so the user can decide whether to
-    // re-apply them on top of the new state.
+    // The server applied the non-conflicting patches and rejected the
+    // conflicted ones. We DON'T auto-replay the conflicted edits onto the
+    // fresh state because dict/list fields (cb:map's map, wordlists)
+    // would overwrite the other user's entries again — that's the
+    // lost-update bug we're trying to prevent. Instead: discard the
+    // conflicted edits, refetch, and ask the user to re-do them on top
+    // of the new state so they consciously merge with what's there.
     const conflictSlugs = conflicts.map(c => c.slug);
-    const conflictedEdits = new Map();
-    for (const slug of conflictSlugs) {
-      const live = liveRules.find(r => r.name === slug);
-      if (live) conflictedEdits.set(slug, JSON.parse(JSON.stringify(live)));
-    }
-    if (saved.length) {
-      showToast('Saved ' + saved.length + '. Conflict on: '
-                + conflictSlugs.join(', ') + ' — reloading.', 'err');
-    } else {
-      showToast('Conflict on: ' + conflictSlugs.join(', ')
-                + ' — someone else just changed this. Reloading.', 'err');
-    }
+    const msg = (saved.length
+        ? 'Saved ' + saved.length + '. '
+        : '')
+      + 'Someone else just changed: ' + conflictSlugs.join(', ')
+      + '. Your edit was discarded; the page now shows their version — '
+      + 'please review and re-apply if still needed.';
+    showToast(msg, 'err');
     await load();
-    // Re-apply the user's conflicted edits onto the freshly loaded state
-    // so their work isn't lost — they can review and re-save.
-    let stillDirty = 0;
-    for (const [slug, edit] of conflictedEdits) {
-      const idx = liveRules.findIndex(r => r.name === slug);
-      if (idx < 0) continue;  // rule was deleted server-side; abandon edit
-      // Overlay the user's edit onto the new server state. Allowed-fields
-      // only — leaves admin-only fields (label, locked, exposed, _fp) at
-      // their fresh server values.
-      const allowed = _ALLOWED_BY_TYPE[liveRules[idx].type] || new Set(['enabled']);
-      for (const k of allowed) {
-        if (k in edit) liveRules[idx][k] = edit[k];
-      }
-      dirty.add(slug);
-      stillDirty++;
-    }
-    if (stillDirty) {
-      renderCards();
-      updateButtons();
-      const suffix = saved.length ? ' (others saved)' : '';
-      setStatus(stillDirty + ' edit'
-                + (stillDirty === 1 ? '' : 's')
-                + ' to re-review' + suffix);
-    }
     return;
   }
   showToast(saved.length
