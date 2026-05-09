@@ -879,6 +879,84 @@ async function doClearRecent() {
   }
 }
 
+// --- Field-level diff helpers (used for both build-patch and conflict re-merge) ---
+//
+// For each editable field we represent the user's change as a typed diff
+// vs. their original baseline (initialRules at load time):
+//   dict   (cb:map.map)                    → {kind:'dict', added, changed, removed[]}
+//   list   (cb:lowercase-wordlist.wordlist)→ {kind:'list', added[], removed[]}
+//   scalar (everything else)               → {kind:'scalar', value}
+// On a conflict we re-apply the diff to the FRESH server state, so the
+// other user's entries survive — only the cells the user actually
+// touched get overlaid.
+const _DICT_FIELDS = new Set(['map']);
+const _LIST_FIELDS = new Set(['wordlist']);
+
+function _stringify(x) {
+  // Stable order for objects so two equal-content objects compare equal.
+  if (x !== null && typeof x === 'object' && !Array.isArray(x)) {
+    const out = {};
+    for (const k of Object.keys(x).sort()) out[k] = x[k];
+    return JSON.stringify(out);
+  }
+  return JSON.stringify(x);
+}
+
+function _fieldDiff(baseline, edited, kind) {
+  if (kind === 'dict') {
+    const base = baseline || {};
+    const cur = edited || {};
+    const added = {};
+    const changed = {};
+    const removed = [];
+    for (const k of Object.keys(cur)) {
+      if (!(k in base)) added[k] = cur[k];
+      else if (_stringify(base[k]) !== _stringify(cur[k])) changed[k] = cur[k];
+    }
+    for (const k of Object.keys(base)) if (!(k in cur)) removed.push(k);
+    if (!Object.keys(added).length && !Object.keys(changed).length && !removed.length) {
+      return null;
+    }
+    return { kind: 'dict', added, changed, removed };
+  }
+  if (kind === 'list') {
+    const base = (baseline || []).map(_stringify);
+    const baseSet = new Set(base);
+    const cur = (edited || []).map(_stringify);
+    const curSet = new Set(cur);
+    const added = (edited || []).filter(x => !baseSet.has(_stringify(x)));
+    const removed = (baseline || []).filter(x => !curSet.has(_stringify(x)));
+    if (!added.length && !removed.length) return null;
+    return { kind: 'list', added, removed };
+  }
+  // scalar
+  if (_stringify(baseline) === _stringify(edited)) return null;
+  return { kind: 'scalar', value: edited };
+}
+
+function _applyFieldDiff(serverValue, diff) {
+  if (!diff) return serverValue;
+  if (diff.kind === 'dict') {
+    const out = { ...(serverValue || {}) };
+    for (const k of diff.removed) delete out[k];
+    Object.assign(out, diff.added, diff.changed);
+    return out;
+  }
+  if (diff.kind === 'list') {
+    const removedKeys = new Set(diff.removed.map(_stringify));
+    const out = (serverValue || []).filter(x => !removedKeys.has(_stringify(x)));
+    for (const item of diff.added) out.push(item);
+    return out;
+  }
+  return diff.value;
+}
+
+function _diffKindFor(ruleType, field) {
+  if (_DICT_FIELDS.has(field)) return 'dict';
+  if (_LIST_FIELDS.has(field)) return 'list';
+  return 'scalar';
+}
+
 // Build the rules_patch dict + per-rule fingerprints by diffing live vs initial.
 // The fingerprint is the `_fp` field the server stamped on each rule at /state
 // load — sending it back lets the server detect that another writer changed
@@ -961,22 +1039,62 @@ async function doSave() {
   const saved = result.saved || [];
   if (conflicts.length) {
     // Another writer changed one or more rules between our load and save.
-    // The server applied the non-conflicting patches and rejected the
-    // conflicted ones. We DON'T auto-replay the conflicted edits onto the
-    // fresh state because dict/list fields (cb:map's map, wordlists)
-    // would overwrite the other user's entries again — that's the
-    // lost-update bug we're trying to prevent. Instead: discard the
-    // conflicted edits, refetch, and ask the user to re-do them on top
-    // of the new state so they consciously merge with what's there.
+    // We preserve the user's intent by computing their per-field DIFF
+    // against the baseline they saw at load time, refetching the fresh
+    // server state, and re-applying that diff on top. For cb:map this
+    // means only the keys the user added/changed/removed get overlaid —
+    // the other user's keys survive. For scalars (regex pattern,
+    // replacement, enabled) the user's new value still wins (no way to
+    // merge two scalar edits), but the user reviews before re-saving.
     const conflictSlugs = conflicts.map(c => c.slug);
-    const msg = (saved.length
-        ? 'Saved ' + saved.length + '. '
-        : '')
-      + 'Someone else just changed: ' + conflictSlugs.join(', ')
-      + '. Your edit was discarded; the page now shows their version — '
-      + 'please review and re-apply if still needed.';
-    showToast(msg, 'err');
-    await load();
+
+    // Snapshot diffs BEFORE await load() — load() resets initialRules.
+    const diffsBySlug = new Map();
+    for (const slug of conflictSlugs) {
+      const live = liveRules.find(r => r.name === slug);
+      const orig = initialRules.find(r => r.name === slug);
+      if (!live || !orig) continue;
+      const allowed = _ALLOWED_BY_TYPE[live.type] || new Set(['enabled']);
+      const fieldDiffs = {};
+      for (const k of allowed) {
+        const d = _fieldDiff(orig[k], live[k], _diffKindFor(live.type, k));
+        if (d) fieldDiffs[k] = d;
+      }
+      if (Object.keys(fieldDiffs).length) diffsBySlug.set(slug, fieldDiffs);
+    }
+
+    await load();   // refetches; clears dirty; renders fresh server state
+
+    // Re-apply each user diff onto the fresh server state. dirty gets
+    // re-populated so the next Save sends an updated patch with the
+    // FRESH fingerprint (which now matches the server) plus the
+    // user's intent overlaid.
+    let merged = 0;
+    for (const [slug, fieldDiffs] of diffsBySlug) {
+      const idx = liveRules.findIndex(r => r.name === slug);
+      if (idx < 0) continue;  // rule was deleted / un-exposed server-side
+      for (const [field, diff] of Object.entries(fieldDiffs)) {
+        liveRules[idx][field] = _applyFieldDiff(liveRules[idx][field], diff);
+      }
+      dirty.add(slug);
+      merged++;
+    }
+
+    if (merged) {
+      renderCards();
+      updateButtons();
+      const prefix = saved.length ? 'Saved ' + saved.length + '. ' : '';
+      showToast(prefix + 'Auto-merged your changes for '
+                + conflictSlugs.join(', ')
+                + ' on top of the latest version — review and Save again.',
+                'err');
+    } else {
+      // The conflicted rule was deleted server-side or no diff survived.
+      const prefix = saved.length ? 'Saved ' + saved.length + '. ' : '';
+      showToast(prefix + 'Conflict on ' + conflictSlugs.join(', ')
+                + ' could not be auto-merged (rule changed or removed).',
+                'err');
+    }
     return;
   }
   showToast(saved.length
