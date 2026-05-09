@@ -295,6 +295,17 @@ header .wrap-anchor { flex-basis: 0; height: 0; display: none; }
   header #logout-btn { display: none; }
   header .wrap-anchor { display: block; flex-basis: 100%; }
 }
+
+/* ---- Admin-only nav elements ----
+   logs/stats/config nav links + sev pills are marked .admin-only at
+   render time. Hidden by default; revealed when the page's JS adds
+   `body.role-admin` after a successful auth-required state fetch.
+   /config, /logs, /stats add the class unconditionally (their state
+   endpoints already require admin token). /quick-config adds it only
+   when /quick-config/state returns role=admin — USER_TOKEN sessions
+   never see admin-only chrome. */
+header .admin-only { display: none; }
+body.role-admin header .admin-only { display: inline-flex; }
 """
 
 
@@ -449,7 +460,7 @@ function _makeMonoLabeledInput(label, val, onInput, kind) {
   return wrap;
 }
 
-function _makeMapRow(rule, key, val, commitData) {
+function _makeMapRow(rule, key, val, commitData, datalistId) {
   const tr = document.createElement('tr');
   const td1 = document.createElement('td');
   const td2 = document.createElement('td');
@@ -457,6 +468,11 @@ function _makeMapRow(rule, key, val, commitData) {
   td3.style.width = '2.5rem';
   const ki = document.createElement('input');
   ki.type = 'text'; ki.value = _esc(key);
+  // Spoken-word cell opts into a datalist on /quick-config so end-users
+  // get autocomplete from recent transcription FINALs. Admin /config
+  // doesn't pass datalistId — no autocomplete on the admin page (it
+  // would clutter long maps).
+  if (datalistId) ki.setAttribute('list', datalistId);
   const vi = document.createElement('input');
   vi.type = 'text'; vi.value = _esc(val);
   // Map keys/values may contain \n etc.; <input> strips real newlines,
@@ -493,7 +509,10 @@ function _makeMapRow(rule, key, val, commitData) {
   return tr;
 }
 
-function renderTypeEditor(rule, commitData) {
+function renderTypeEditor(rule, commitData, opts) {
+  // opts (optional): { datalistId } — passed through to _makeMapRow for
+  // cb:map autocomplete on /quick-config. Other rule types ignore opts.
+  opts = opts || {};
   const box = document.createElement('div');
   box.className = 'rule-editor';
 
@@ -546,7 +565,7 @@ function renderTypeEditor(rule, commitData) {
     tbl.className = 'map-table';
     tbl.style.width = '100%';
     const rows = Object.entries(rule.map || {});
-    rows.forEach(([k, v]) => tbl.appendChild(_makeMapRow(rule, k, v, commitData)));
+    rows.forEach(([k, v]) => tbl.appendChild(_makeMapRow(rule, k, v, commitData, opts.datalistId)));
     box.appendChild(tbl);
     const addBtn = document.createElement('button');
     addBtn.type = 'button';
@@ -558,7 +577,7 @@ function renderTypeEditor(rule, commitData) {
       if (!rule.map) rule.map = {};
       const k = '_new_' + Object.keys(rule.map).length;
       rule.map[k] = '';
-      const newTr = _makeMapRow(rule, k, '', commitData);
+      const newTr = _makeMapRow(rule, k, '', commitData, opts.datalistId);
       tbl.appendChild(newTr);
       commitData();
       // Focus the new key cell so the user can start typing immediately.
@@ -606,10 +625,22 @@ def nav_html(current: str) -> str:
     Pills link to /logs?filter=<level> so a click jumps to the relevant log
     rows. Counts of zero render dimmed; non-zero render colored ("hot")."""
     counts = severity_counts()
+    # logs/stats/config + sev pills are admin-only — every page renders
+    # them with class "admin-only" which CSS hides by default. The page's
+    # JS adds `body.role-admin` after a successful state-load, revealing
+    # them. /quick-config in a USER_TOKEN session never gets that class
+    # so the admin links stay hidden. The "quick" link is for everyone.
+    admin_only_labels = {"logs", "stats", "config"}
     parts: list[str] = ['<span class="navrow">']
     for label, href, active in _nav_items(current):
-        cls = "navlink active" if active else "navlink"
-        parts.append(f'<a class="{cls}" href="{href}">{label}</a>')
+        classes = ["navlink"]
+        if active:
+            classes.append("active")
+        if label in admin_only_labels:
+            classes.append("admin-only")
+        parts.append(
+            f'<a class="{" ".join(classes)}" href="{href}">{label}</a>'
+        )
     parts.append("</span>")
 
     # Stable IDs let JS update just the .n inner span on each SSE tick without
@@ -618,7 +649,7 @@ def nav_html(current: str) -> str:
     # immediately, so they're correct for the first render and live thereafter.
     for level, key in (("warn", "WARNING"), ("err", "ERROR"), ("crit", "CRITICAL")):
         n = counts[level]
-        cls = f"sevpill {level} {'hot' if n else 'zero'}"
+        cls = f"sevpill admin-only {level} {'hot' if n else 'zero'}"
         title = f"{key}+ since process start — click to filter logs"
         parts.append(
             f'<a id="sev-{level}" class="{cls}" '

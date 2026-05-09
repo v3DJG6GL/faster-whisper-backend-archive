@@ -1491,6 +1491,21 @@ async def transcribe(
                 steps=trace if trace is not None else None,
             ))
 
+            # Mirror the same trace into the /quick-config recent-buffer so
+            # the trace panel + cb:map autocomplete have data. RAM-only,
+            # capped at 20, lost on restart. Lazy import keeps main.py
+            # decoupled at module-load time.
+            try:
+                import quick_config_state
+                quick_config_state.record_trace(
+                    model=resolved_model,
+                    raw=raw_full_text,
+                    steps=trace if trace is not None else [],
+                    final=full_text_str,
+                )
+            except Exception as _qc_err:
+                logger.error("[quick-config] record_trace failed: %s", _qc_err)
+
             _audio_dur = float(info.duration)
             # Word count from the final post-processed text — matches what the
             # client actually receives. Counting len(all_words) instead would
@@ -1814,6 +1829,9 @@ _LOG_VIEWER_HTML = """<!doctype html>
     statusEl.className = 'pill paused';
   };
   es.onopen = () => {
+    // /logs is IP-gated (no token); reaching it means LAN access. Treat
+    // as admin so the .admin-only nav links + sev pills render.
+    document.body.classList.add('role-admin');
     if (!paused) {
       statusEl.textContent = 'live';
       statusEl.className = 'pill live';

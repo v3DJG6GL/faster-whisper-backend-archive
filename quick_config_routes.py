@@ -3,35 +3,44 @@ End-user simple-config WebUI for faster-whisper-backend.
 
 Mounted at /quick-config. Endpoints:
 
-  GET  /quick-config            HTML page (loopback / ADMIN_ALLOWED_HOSTS only)
-  GET  /quick-config/state      Returns ONLY the rules an admin marked exposed
-  POST /quick-config/state      Patch enabled / body fields on exposed rules
+  GET  /quick-config              HTML page (loopback / ADMIN_ALLOWED_HOSTS)
+  GET  /quick-config/state        Returns ONLY the rules an admin marked exposed
+  POST /quick-config/state        Patch enabled / body fields on exposed rules
+  GET  /quick-config/recent       Snapshot of the recent-traces ring buffer
+  GET  /quick-config/stream       SSE stream of recent traces (live updates)
+  POST /quick-config/recent/clear Wipe the recent-traces buffer
 
 Security model:
   1. IP gate:           require_admin_host (loopback always permitted)
-  2. Bearer token:      USER_TOKEN OR ADMIN_TOKEN accepted (TokenWithGrace)
+  2. Bearer token:      USER_TOKEN OR ADMIN_TOKEN accepted (TokenWithGrace).
+                        Header preferred; ?token=<...> query string also
+                        accepted because EventSource has no Authorization
+                        header support.
   3. Rule allow-list:   POST enforces `exposed == True` AND a per-type
                         field allow-list, regardless of caller role. Defends
                         against `{"locked": false}`-style bypass attempts —
                         the filter runs BEFORE the merge into PIPELINE_RULES.
 
-The page is deliberately disjoint from /config: no nav links to admin
-pages, no severity pills, no logout — end-users only see the cards for
-rules the admin has flagged.
+The recent-traces ring buffer holds literal patient dictation snippets on
+a medical deployment. RAM-only, capped, lost on restart. Don't log
+buffer contents and don't persist them.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ValidationError
 
 import config as cfg
 import config_store
+import quick_config_state
 import web_common
 from admin_routes import (
     ADMIN_TOKEN_GUARD,
@@ -65,11 +74,17 @@ _PATCH_ALLOWED_FIELDS: dict[str, frozenset[str]] = {
 
 
 def require_user_or_admin_token(
+    request: Request,
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ) -> Literal["admin", "user"]:
     """Bearer-gate the /quick-config endpoints. Accepts either USER_TOKEN
     or ADMIN_TOKEN. If both tokens are unset, the loopback check alone is
     the gate (returns "admin" for telemetry purposes).
+
+    Header `Authorization: Bearer <token>` is preferred. Query parameter
+    `?token=<token>` is also accepted because the browser's EventSource
+    API has no way to attach custom headers — the SSE stream endpoint
+    needs a query-string fallback.
 
     Returns the matched role for logging — NOT for authorization. The patch
     endpoint enforces `exposed == True` uniformly regardless of role."""
@@ -79,9 +94,13 @@ def require_user_or_admin_token(
         # No token configured anywhere → loopback-only access. Treat as admin
         # for the role label since loopback callers are trusted.
         return "admin"
-    if creds is None or creds.scheme.lower() != "bearer":
+    presented: "str | None" = None
+    if creds is not None and creds.scheme.lower() == "bearer":
+        presented = creds.credentials
+    elif "token" in request.query_params:
+        presented = request.query_params.get("token")
+    if not presented:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "bearer token required")
-    presented = creds.credentials
     if admin_set and ADMIN_TOKEN_GUARD.matches(presented):
         return "admin"
     if user_set and USER_TOKEN_GUARD.matches(presented):
@@ -250,6 +269,70 @@ async def post_state(
     })
 
 
+# --- Recent transcription traces (panel + autocomplete source) -------------
+#
+# The ring buffer lives in quick_config_state. main.py's transcribe handler
+# appends an entry per completed transcription. Both endpoints below are
+# token-gated so end-users without a valid token can't enumerate recent
+# patient dictation snippets.
+
+@router.get(
+    "/recent",
+    dependencies=[Depends(require_admin_host), Depends(require_user_or_admin_token)],
+)
+async def get_recent() -> dict[str, Any]:
+    """Snapshot of the recent-traces buffer. The /stream endpoint replays
+    the snapshot on connect, so most clients won't need /recent — it
+    exists as a cheap polling fallback for environments without
+    EventSource."""
+    return {"recent": list(quick_config_state.recent_traces)}
+
+
+@router.get(
+    "/stream",
+    dependencies=[Depends(require_admin_host), Depends(require_user_or_admin_token)],
+)
+async def stream_recent(request: Request) -> StreamingResponse:
+    """Server-sent events stream of recent transcriptions.
+
+    On connect, replays the current buffer (`event: trace` for each entry,
+    oldest first). After the replay, pushes any new transcription as
+    another `event: trace`. Sends an empty `event: clear` when the admin
+    wipes the buffer. Sends a `: keepalive` SSE comment line every 15 s
+    so reverse proxies don't kill an idle connection."""
+    async def gen():
+        q = quick_config_state.subscribe()
+        try:
+            for entry in list(quick_config_state.recent_traces):
+                yield f"event: trace\ndata: {json.dumps(entry)}\n\n"
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    item = await asyncio.wait_for(q.get(), timeout=15.0)
+                    ev = item.get("event", "trace")
+                    payload = item.get("data") or {}
+                    yield f"event: {ev}\ndata: {json.dumps(payload)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+        finally:
+            quick_config_state.unsubscribe(q)
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@router.post(
+    "/recent/clear",
+    dependencies=[Depends(require_admin_host), Depends(require_user_or_admin_token)],
+)
+async def clear_recent(role: str = Depends(require_user_or_admin_token)) -> JSONResponse:
+    """Manual kill-switch for the recent-traces buffer. Broadcasts a
+    `clear` event so all open /quick-config tabs flush their UI."""
+    quick_config_state.clear()
+    logger.info("[quick-config] recent-traces buffer cleared by role=%s", role)
+    return JSONResponse({"ok": True})
+
+
 _QUICK_CONFIG_HTML = r"""<!doctype html>
 <html lang="en">
 <head>
@@ -330,6 +413,46 @@ _QUICK_CONFIG_HTML = r"""<!doctype html>
     font: inherit; }
   #token-modal .actions { display: flex; gap: 0.5rem; margin-top: 0.75rem;
     justify-content: flex-end; }
+
+  /* Recent transcriptions panel */
+  #recent-panel { margin-top: 1.5rem; border-top: 1px solid var(--border);
+    padding-top: 1rem; }
+  .recent-header { display: flex; align-items: center; gap: 0.5rem;
+    margin-bottom: 0.5rem; flex-wrap: wrap; }
+  .recent-header h2 { font-size: var(--fs-lg); margin: 0; color: var(--bold); }
+  .recent-header .recent-label { font-size: var(--fs-xs); color: var(--dim);
+    font-style: italic; }
+  .recent-header .spacer { flex: 1; }
+  .empty-recent { color: var(--dim); font-style: italic; padding: 1rem 0;
+    font-size: var(--fs-sm); }
+  .trace-item { background: var(--panel); border: 1px solid var(--border);
+    border-radius: 4px; padding: 0.5rem 0.75rem; margin-bottom: 0.5rem; }
+  .trace-meta { display: flex; gap: 0.5rem; color: var(--dim);
+    font-size: var(--fs-xs); margin-bottom: 0.375rem; }
+  .trace-text { font-family: var(--font-mono); font-size: var(--fs-sm);
+    word-wrap: break-word; }
+  .trace-raw { color: var(--dim); margin-bottom: 0.25rem; }
+  .trace-tag { display: inline-block; min-width: 3rem; color: var(--dim);
+    font-family: var(--font-sans); font-size: var(--fs-xs);
+    margin-right: 0.5rem; text-transform: uppercase; letter-spacing: 0.05em; }
+  .trace-final { color: var(--bold); }
+  .trace-final .trace-tag { color: var(--green); }
+  details.trace-steps { margin-top: 0.375rem; }
+  details.trace-steps > summary { cursor: pointer; font-size: var(--fs-xs);
+    color: var(--cyan); list-style: revert; user-select: none; }
+  .trace-step { padding: 0.25rem 0 0.25rem 0.75rem; font-size: var(--fs-xs);
+    border-left: 2px solid var(--border); margin-top: 0.25rem; }
+  .trace-step.skipped { opacity: 0.55; }
+  .trace-step .step-label { color: var(--dim); display: block;
+    font-family: var(--font-sans); margin-bottom: 0.125rem; }
+  .trace-step .step-label .skipped-tag { color: var(--yellow);
+    margin-left: 0.25rem; }
+  .trace-step .step-before, .trace-step .step-after {
+    font-family: var(--font-mono); display: block; word-wrap: break-word; }
+  .trace-step .step-before { color: var(--dim); }
+  .trace-step .step-after { color: var(--fg); }
+  .trace-step .step-arrow { color: var(--green); margin-right: 0.25rem; }
+
   {{NAV_CSS}}
 </style>
 </head>
@@ -338,6 +461,7 @@ _QUICK_CONFIG_HTML = r"""<!doctype html>
 <header>
   <div class="header-inner">
     <span class="title">Quick config</span>
+    {{NAV}}
     <span class="spacer"></span>
     {{SCALE_PICKER}}
     <button id="discard-btn" disabled>discard</button>
@@ -346,8 +470,21 @@ _QUICK_CONFIG_HTML = r"""<!doctype html>
   </div>
 </header>
 
+<datalist id="recent-words"></datalist>
+
 <main>
   <section id="cards"></section>
+  <section id="recent-panel">
+    <div class="recent-header">
+      <h2>Recent transcriptions</h2>
+      <span class="recent-label">in-memory only, cleared on page reload</span>
+      <span class="spacer"></span>
+      <button id="clear-recent">clear recent</button>
+    </div>
+    <div id="recent-list">
+      <div class="empty-recent">No transcriptions yet — they'll appear here as you dictate.</div>
+    </div>
+  </section>
 </main>
 
 <div id="toast"></div>
@@ -492,10 +629,189 @@ function renderCards() {
     enRow.appendChild(document.createTextNode(' enabled'));
     card.appendChild(enRow);
 
-    const editor = renderTypeEditor(rule, () => commitData(rule.name));
+    const editor = renderTypeEditor(rule, () => commitData(rule.name),
+                                    { datalistId: 'recent-words' });
     card.appendChild(editor);
 
     root.appendChild(card);
+  }
+}
+
+// ---------- Recent transcriptions panel + autocomplete -------------------
+//
+// SSE-driven. /quick-config/stream replays the buffer on connect (oldest
+// first) then pushes new traces as `event: trace`. A `clear` event wipes
+// the panel + datalist. EventSource auto-reconnects with a 3 s backoff
+// per the WHATWG spec — no custom retry logic needed.
+const _BUFFER_MAX = 20;
+const _MAX_DATALIST = 200;
+let _es = null;
+
+function escapeHtml(s) {
+  const div = document.createElement('div');
+  div.textContent = s == null ? '' : String(s);
+  return div.innerHTML;
+}
+function relTime(ts) {
+  const sec = Math.max(0, (Date.now() / 1000) - ts);
+  if (sec < 5) return 'just now';
+  if (sec < 60) return Math.floor(sec) + 's ago';
+  if (sec < 3600) return Math.floor(sec / 60) + ' min ago';
+  return Math.floor(sec / 3600) + ' h ago';
+}
+
+function renderTrace(entry) {
+  const item = document.createElement('div');
+  item.className = 'trace-item';
+  // Stash the entry so rebuildDatalist() can read tokens/bigrams without
+  // a separate cache. JSON encoding is fine — tokens/bigrams are small.
+  try { item.dataset.entry = JSON.stringify(entry); } catch (_) {}
+
+  const meta = document.createElement('div');
+  meta.className = 'trace-meta';
+  const ts = document.createElement('span');
+  ts.className = 'trace-ts';
+  ts.textContent = relTime(entry.ts || 0);
+  meta.appendChild(ts);
+  if (entry.model) {
+    const mdl = document.createElement('span');
+    mdl.textContent = entry.model;
+    meta.appendChild(mdl);
+  }
+  item.appendChild(meta);
+
+  const raw = document.createElement('div');
+  raw.className = 'trace-text trace-raw';
+  raw.innerHTML = '<span class="trace-tag">raw</span>'
+    + escapeHtml(entry.raw || '');
+  item.appendChild(raw);
+
+  const steps = entry.steps || [];
+  const changed = steps.filter(s =>
+    Array.isArray(s) && s.length >= 3 && s[1] !== s[2]);
+  if (steps.length) {
+    const det = document.createElement('details');
+    det.className = 'trace-steps';
+    if (changed.length) det.open = true;  // open by default if anything changed
+    const sum = document.createElement('summary');
+    sum.textContent = 'Pipeline steps (' + changed.length + ' changed text'
+      + (steps.length > changed.length
+          ? ', ' + (steps.length - changed.length) + ' unchanged'
+          : '')
+      + ')';
+    det.appendChild(sum);
+    for (const s of steps) {
+      if (!Array.isArray(s) || s.length < 3) continue;
+      const [label, before, after] = s;
+      const stepEl = document.createElement('div');
+      stepEl.className = 'trace-step' + (before === after ? ' skipped' : '');
+      const lblHtml = escapeHtml(label || '?');
+      const skippedTag = before === after
+        ? ' <span class="skipped-tag">[unchanged]</span>'
+        : '';
+      stepEl.innerHTML =
+        '<span class="step-label">▸ ' + lblHtml + skippedTag + '</span>'
+        + '<span class="step-before">' + escapeHtml(before || '') + '</span>'
+        + '<span class="step-after"><span class="step-arrow">→</span>'
+        + escapeHtml(after || '') + '</span>';
+      det.appendChild(stepEl);
+    }
+    item.appendChild(det);
+  }
+
+  const final = document.createElement('div');
+  final.className = 'trace-text trace-final';
+  final.innerHTML = '<span class="trace-tag">final</span>'
+    + escapeHtml(entry.final || '');
+  item.appendChild(final);
+
+  return item;
+}
+
+function pushTrace(entry) {
+  const list = document.getElementById('recent-list');
+  if (!list) return;
+  const empty = list.querySelector('.empty-recent');
+  if (empty) empty.remove();
+  list.insertBefore(renderTrace(entry), list.firstChild);
+  while (list.children.length > _BUFFER_MAX) {
+    list.removeChild(list.lastChild);
+  }
+  rebuildDatalist();
+}
+
+function showEmptyRecent() {
+  const list = document.getElementById('recent-list');
+  if (!list) return;
+  list.innerHTML = '<div class="empty-recent">No transcriptions yet '
+    + "&mdash; they'll appear here as you dictate.</div>";
+}
+
+function clearTraces() {
+  showEmptyRecent();
+  rebuildDatalist();
+}
+
+function rebuildDatalist() {
+  const dl = document.getElementById('recent-words');
+  if (!dl) return;
+  // Iterate trace items newest → oldest. First-seen wins (= newest casing).
+  const seen = new Map();
+  document.querySelectorAll('.trace-item').forEach(item => {
+    let data;
+    try { data = JSON.parse(item.dataset.entry || '{}'); }
+    catch (_) { return; }
+    for (const t of data.tokens || []) {
+      const k = String(t).toLowerCase();
+      if (!seen.has(k)) seen.set(k, t);
+    }
+    for (const b of data.bigrams || []) {
+      const k = String(b).toLowerCase();
+      if (!seen.has(k)) seen.set(k, b);
+    }
+  });
+  dl.innerHTML = '';
+  let n = 0;
+  for (const v of seen.values()) {
+    const opt = document.createElement('option');
+    opt.value = v;
+    dl.appendChild(opt);
+    if (++n >= _MAX_DATALIST) break;
+  }
+}
+
+function startStream() {
+  if (_es) { try { _es.close(); } catch (_) {} _es = null; }
+  // EventSource has no Authorization-header support; the server's auth
+  // dep accepts ?token=<...> as a fallback specifically for SSE.
+  const tok = getToken();
+  const url = '/quick-config/stream'
+    + (tok ? '?token=' + encodeURIComponent(tok) : '');
+  _es = new EventSource(url);
+  _es.addEventListener('trace', (e) => {
+    try { pushTrace(JSON.parse(e.data)); } catch (_) {}
+  });
+  _es.addEventListener('clear', () => clearTraces());
+  _es.onerror = () => {
+    // EventSource auto-reconnects; nothing to do here. If the token is
+    // truly bad the server will keep returning 401 and EventSource will
+    // give up after a few retries — at which point the page is stale
+    // until the user reloads. Acceptable.
+  };
+}
+
+async function doClearRecent() {
+  if (!confirm('Clear all recent transcriptions from memory?')) return;
+  try {
+    const r = await api('POST', '/quick-config/recent/clear', {});
+    if (!r.ok) {
+      showToast('clear failed (' + r.status + ')', 'err');
+      return;
+    }
+    // Server broadcasts a 'clear' SSE event; our own listener flushes
+    // the panel. Don't double-clear locally — that'd race the broadcast.
+  } catch (e) {
+    showToast('clear failed: ' + e, 'err');
   }
 }
 
@@ -540,6 +856,10 @@ async function load() {
   initialRules = j.rules || [];
   liveRules = JSON.parse(JSON.stringify(initialRules));
   dirty = new Set();
+  // role: "admin" reveals .admin-only nav links + sev pills. USER_TOKEN
+  // sessions never get the class so admin chrome stays hidden.
+  if (j.role === 'admin') document.body.classList.add('role-admin');
+  else document.body.classList.remove('role-admin');
   renderCards();
   updateButtons();
 }
@@ -577,12 +897,18 @@ function doDiscard() {
 
 document.getElementById('save-btn').addEventListener('click', doSave);
 document.getElementById('discard-btn').addEventListener('click', doDiscard);
+document.getElementById('clear-recent').addEventListener('click', doClearRecent);
 
-load();
+load().then(() => {
+  // Only open the SSE stream after the rules state has loaded — avoids
+  // racing the token prompt with the EventSource connection.
+  startStream();
+});
 })();
 </script>
 
 {{SCALE_PICKER_JS}}
+{{SEV_POLLER_JS}}
 
 </body>
 </html>

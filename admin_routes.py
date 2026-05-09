@@ -1287,6 +1287,9 @@ async function loadState() {
     return;
   }
   state = await r.json();
+  // /config/state requires admin token, so reaching this point means
+  // the caller is admin → reveal admin-only nav elements.
+  document.body.classList.add('role-admin');
   dirty = {};
   $('save-btn').disabled = true;
   $('discard-btn').disabled = true;

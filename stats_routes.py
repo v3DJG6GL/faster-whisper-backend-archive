@@ -810,7 +810,12 @@ document.addEventListener('visibilitychange', () => {
 // Initial fetch so the page renders before the first SSE tick arrives.
 fetch('/stats/snapshot', { cache: 'no-store' })
   .then(r => r.json())
-  .then(snap => { pushHistory(snap); render(snap); })
+  .then(snap => {
+    // /stats is IP-gated (no token); reaching it means LAN access. Treat
+    // as admin so the .admin-only nav links + sev pills render.
+    document.body.classList.add('role-admin');
+    pushHistory(snap); render(snap);
+  })
   .catch(err => console.warn('[stats] initial fetch failed', err))
   .finally(openStream);
 
