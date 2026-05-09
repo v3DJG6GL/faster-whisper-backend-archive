@@ -3308,14 +3308,6 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
     labelInp.type = 'text';
     labelInp.placeholder = 'Friendly label (e.g. "Expand Uhr to :00")';
     labelInp.style.width = '100%'; labelInp.style.marginTop = '4px';
-    const patInp = document.createElement('input');
-    patInp.type = 'text'; patInp.placeholder = 'pattern';
-    patInp.style.width = '100%'; patInp.style.marginTop = '4px';
-    patInp.style.fontFamily = 'ui-monospace, monospace';
-    const replInp = document.createElement('input');
-    replInp.type = 'text'; replInp.placeholder = 'replacement (regex only)';
-    replInp.style.width = '100%'; replInp.style.marginTop = '4px';
-    replInp.style.fontFamily = 'ui-monospace, monospace';
 
     const ok = document.createElement('button');
     ok.type = 'button'; ok.textContent = 'Add'; ok.style.marginTop = '6px';
@@ -3324,8 +3316,12 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
 
     body.appendChild(_labeledRow('Type', typeSel));
     body.appendChild(_labeledRow('Label', labelInp));
-    body.appendChild(_labeledRow('Pattern', patInp));
-    body.appendChild(_labeledRow('Replacement', replInp));
+    const hint = document.createElement('div');
+    hint.className = 'help';
+    hint.style.marginTop = '6px';
+    hint.textContent = 'Type-specific fields (pattern, replacement, wordlist, map) '
+      + 'open in the rule body after Add.';
+    body.appendChild(hint);
     body.appendChild(ok);
     body.appendChild(cancel);
     form.appendChild(body);
@@ -3341,14 +3337,19 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
         name: slug, label: lbl, type: t,
         enabled: true, locked: false, seeded: false,
       };
+      // Seed empty type-specific fields; the user fills them in via the
+      // expanded body editor (auto-opened below). Empty patterns are
+      // skipped at runtime so the new rule is harmless until edited.
       if (t === 'regex') {
-        newRule.pattern = patInp.value;
-        newRule.replacement = replInp.value;
+        newRule.pattern = '';
+        newRule.replacement = '';
       } else if (t === 'callback:map') {
         newRule.map = {};
+      } else if (t === 'callback:lowercase-wordlist') {
+        newRule.pattern = '';
+        newRule.wordlist = [];
       } else {
-        newRule.pattern = patInp.value;
-        if (t === 'callback:lowercase-wordlist') newRule.wordlist = [];
+        newRule.pattern = '';
       }
       // Insert just before the terminal row, or at the end if no terminal.
       const tIdx = rules.findIndex(r => r.type === 'terminal');
