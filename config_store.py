@@ -537,7 +537,7 @@ class ModelOverride(BaseModel):
     DEVICE_INDEX: Annotated[int, Field(ge=0, le=15)] | None = None
 
     # --- Decode params (call-time) ---
-    DEFAULT_LANGUAGE: Annotated[str, Field(pattern=r"^[a-z]{2}$")] | None = None
+    DEFAULT_LANGUAGE: Annotated[str, Field(pattern=r"^([a-z]{2})?$")] | None = None
     DEFAULT_PROMPT: Annotated[str, Field(max_length=2048)] | None = None
     DEFAULT_HOTWORDS: Annotated[str, Field(max_length=2048)] | None = None
     BEAM_SIZE: Annotated[int, Field(ge=1, le=20)] | None = None
@@ -633,7 +633,7 @@ class AdminConfig(BaseModel):
     MODEL_COMPUTE_TYPE_FALLBACK: ComputeLit | None = _F("MODEL_COMPUTE_TYPE_FALLBACK")
 
     # --- Decode params (transcribe-time) ---
-    DEFAULT_LANGUAGE: Annotated[str, Field(pattern=r"^[a-z]{2}$")] | None = _F("DEFAULT_LANGUAGE")
+    DEFAULT_LANGUAGE: Annotated[str, Field(pattern=r"^([a-z]{2})?$")] | None = _F("DEFAULT_LANGUAGE")
     DEFAULT_PROMPT: Annotated[str, Field(max_length=2048)] | None = _F("DEFAULT_PROMPT")
     BEAM_SIZE: Annotated[int, Field(ge=1, le=20)] | None = _F("BEAM_SIZE")
     BEST_OF: Annotated[int, Field(ge=1, le=20)] | None = _F("BEST_OF")
