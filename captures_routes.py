@@ -1162,7 +1162,7 @@ _CAPTURES_HTML = r"""<!doctype html>
     body.appendChild(gtSec);
     state.gtArea = gtArea;
 
-    corrSec.querySelector('.apply-corr').addEventListener('click', function(e) {
+    gtSec.querySelector('.apply-corr').addEventListener('click', function(e) {
       e.preventDefault();
       applyCorrectionsToGround(state);
     });
