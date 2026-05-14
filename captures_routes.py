@@ -1435,7 +1435,11 @@ _CAPTURES_HTML = r"""<!doctype html>
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     if (resp.status === 401) {
-      showTokenModal(function() {});
+      // After the user pastes a key, re-run load() so the page actually
+      // populates (and body.role-admin gets added). Without this the
+      // modal save closed the dialog but left the page stuck on the
+      // static toolbar with admin nav hidden.
+      showTokenModal(function() { load(); });
       throw new Error('unauthorized');
     }
     if (resp.status === 403) {

@@ -661,7 +661,12 @@ _REPORTS_HTML = """<!doctype html>
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     if (resp.status === 401) {
-      showTokenModal(function() { /* user re-runs the action */ });
+      // After the user pastes a key, re-run load() so the page actually
+      // populates and body.role-admin gets added. The original "user
+      // re-runs the action" comment meant they had to click Refresh
+      // manually — but most users don't realise that, so the page stayed
+      // stuck on toolbar-only + admin nav hidden.
+      showTokenModal(function() { load(); });
       throw new Error('unauthorized');
     }
     if (resp.status === 403) {
