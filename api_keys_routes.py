@@ -412,9 +412,47 @@ _API_KEYS_HTML = r"""<!doctype html>
     var m = document.getElementById('key-modal');
     m.classList.add('show');
     document.getElementById('key-modal-copy').onclick = function() {
-      navigator.clipboard.writeText(rawKey)
-        .then(function() { showToast('Copied to clipboard', 'ok'); })
-        .catch(function() { showToast('Copy failed', 'err'); });
+      // navigator.clipboard requires a secure context (https / localhost).
+      // Over LAN HTTP it's undefined, so fall back to a hidden textarea +
+      // document.execCommand('copy'). If both fail, select the visible
+      // .raw-key span so the user can ctrl-c manually.
+      function copyFallback(text) {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        // Hide off-screen but keep selectable.
+        ta.style.position = 'fixed';
+        ta.style.top = '-1000px';
+        ta.setAttribute('readonly', '');
+        document.body.appendChild(ta);
+        ta.select();
+        ta.setSelectionRange(0, ta.value.length);
+        var ok = false;
+        try { ok = document.execCommand('copy'); } catch(_) {}
+        document.body.removeChild(ta);
+        return ok;
+      }
+      function selectRawSpan() {
+        var span = document.getElementById('key-modal-raw');
+        var sel = window.getSelection();
+        var range = document.createRange();
+        range.selectNodeContents(span);
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }
+      function onSuccess() { showToast('Copied to clipboard', 'ok'); }
+      function onFailure() {
+        selectRawSpan();
+        showToast('Auto-copy blocked — press Ctrl+C', 'err');
+      }
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(rawKey).then(onSuccess, function() {
+          if (!copyFallback(rawKey)) onFailure();
+          else onSuccess();
+        });
+      } else {
+        if (copyFallback(rawKey)) onSuccess();
+        else onFailure();
+      }
     };
     document.getElementById('key-modal-done').onclick = function() {
       m.classList.remove('show');
