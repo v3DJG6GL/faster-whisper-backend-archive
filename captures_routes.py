@@ -461,6 +461,7 @@ _CAPTURES_HTML = r"""<!doctype html>
     --active-word-color: #f0f6fc;
     --selected-word-bg: rgba(255, 123, 114, 0.22);
   }
+  *, *::before, *::after { box-sizing: border-box; }
   html, body { background: var(--bg); color: var(--fg);
     font-family: var(--font-sans); font-size: var(--fs-lg);
     margin: 0; padding: 0; }
@@ -554,9 +555,13 @@ _CAPTURES_HTML = r"""<!doctype html>
     background: var(--input-bg); border: 1px solid var(--border);
     border-radius: 4px; line-height: 2;
     font-family: var(--font-mono); font-size: var(--fs-md);
-    max-height: 16rem; overflow-y: auto; word-break: break-word;
+    max-height: 20rem; overflow-y: auto;
   }
+  /* inline-block lets each word wrap to a new line when the row fills,
+     while `white-space: pre` keeps the leading space of words like
+     " Vena" intact (so the active-word highlight covers it).  */
   .word-strip .word {
+    display: inline-block;
     padding: 0.1rem 0.15rem; border-radius: 3px;
     cursor: pointer; transition: background 0.08s;
     white-space: pre;
