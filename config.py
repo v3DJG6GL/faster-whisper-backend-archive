@@ -584,30 +584,15 @@ MODEL_OVERRIDES: "dict[str, dict[str, object]]" = {}
 # =============================================================================
 # Admin WebUI (optional /config browser editor)
 # =============================================================================
-# Both off by default. The /config endpoints are only registered when
-# ADMIN_UI_ENABLED is True. If ADMIN_TOKEN is None, the loopback-only check
-# is the sole gate — fine on a single-user machine, but set a token if you
-# want a second factor against other local users / processes.
-#
-# Generate a strong token with PowerShell:
-#   [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
-#
-# These are intentionally NOT editable from the admin WebUI itself (avoids
-# foot-gun where you lock yourself out by toggling them in the browser).
+# Off → /config endpoints aren't registered at all. Auth on the endpoints
+# themselves is per-user API key (see API_KEYS_DB below). With no admin key
+# configured the server runs in OPEN mode and warns prominently in the UI
+# and logs.
 ADMIN_UI_ENABLED = True
-ADMIN_TOKEN: "str | None" = None
-# Bearer token for end-user access to /quick-config (the simplified page
-# exposing only rules the admin has flagged with `exposed: true`). Distinct
-# from ADMIN_TOKEN; ADMIN_TOKEN also satisfies /quick-config auth.
-USER_TOKEN: "str | None" = None
 
-# Allowlist of IPs / CIDRs allowed to reach the /config admin endpoints.
-# Loopback (127.0.0.1, ::1) is ALWAYS implicitly allowed — even if you put
-# a typo here you can still reach the page from the box itself.
-# Examples:
-#   ["127.0.0.1", "::1"]                       # default — loopback only
-#   ["127.0.0.1", "::1", "192.168.1.0/24"]     # also a LAN subnet
-#   ["0.0.0.0/0"]                              # anywhere (NOT recommended)
+# Allowlist of IPs / CIDRs allowed to reach admin endpoints — kept as a
+# defense-in-depth layer alongside the API key. Loopback (127.0.0.1, ::1)
+# is ALWAYS implicitly allowed.
 ADMIN_ALLOWED_HOSTS: "list[str]" = ["127.0.0.1", "::1"]
 
 # Same for /stats. Default loopback-only.
@@ -637,10 +622,37 @@ REPORTS_MAX = 1000
 # hourly thereafter. Set to 0 to disable (admin must clear manually).
 REPORTS_RETENTION_DAYS = 90
 
-# Master switch for end-user (USER_TOKEN role) report submission. Set to
-# False to make /quick-config/reports/api/submit return 403 for everyone
-# except admins. The button stays visible but submission is rejected.
+# Master switch for end-user report submission. Set to False to make
+# /quick-config/reports/api/submit return 403 for everyone except admins.
+# The button stays visible but submission is rejected.
 REPORTS_ALLOW_USER_SUBMIT = True
+
+
+# =============================================================================
+# API key auth (multi-user identity)
+# =============================================================================
+# Per-user API keys gate /v1/audio/transcriptions and every WebUI endpoint.
+# Storage: SQLite at API_KEYS_DB; hashed with SHA-256. See api_keys_store.py.
+#
+# Bootstrap: if no active admin key exists in the DB, the server starts in
+# OPEN mode — every request is accepted as a synthetic admin — and emits a
+# WARNING every 60 s plus a red banner on every WebUI page. The operator
+# creates the first admin user/key in /config/api-keys.
+#
+# Optional shortcut: setting WHISPER_BOOTSTRAP_ADMIN_KEY at startup creates
+# (if needed) a `bootstrap-admin` user holding that exact key, so the
+# operator can paste it into Vowen / curl immediately. The variable is read
+# once and never persisted in plaintext; only the SHA-256 hash hits disk.
+
+API_KEYS_DB = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "api_keys.local.sqlite3"
+)
+
+# If set, on startup we insert (or no-op) a user named `bootstrap-admin`
+# with this exact raw key. NEVER stored in config.local.json. Operator
+# typically sets it once, copies the value into their client, then unsets
+# the env var (the key is independently stored in the DB).
+BOOTSTRAP_ADMIN_KEY: "str | None" = None
 
 
 # =============================================================================
@@ -752,15 +764,14 @@ LOG_FILE = os.environ.get("WHISPER_LOG_FILE", LOG_FILE)
 # WHISPER_ADMIN_UI: "1" to enable, anything else (or unset) to disable.
 ADMIN_UI_ENABLED = os.environ.get("WHISPER_ADMIN_UI", "1" if ADMIN_UI_ENABLED else "0") == "1"
 
-# WHISPER_ADMIN_TOKEN: empty string is treated the same as "no token".
-_env_admin_token = os.environ.get("WHISPER_ADMIN_TOKEN")
-if _env_admin_token is not None:
-    ADMIN_TOKEN = _env_admin_token or None
+# --- API key auth -----------------------------------------------------------
+_env_api_keys_db = os.environ.get("WHISPER_API_KEYS_DB")
+if _env_api_keys_db is not None and _env_api_keys_db.strip():
+    API_KEYS_DB = _env_api_keys_db.strip()
 
-# WHISPER_USER_TOKEN: empty string is treated the same as "no token".
-_env_user_token = os.environ.get("WHISPER_USER_TOKEN")
-if _env_user_token is not None:
-    USER_TOKEN = _env_user_token or None
+_env_bootstrap = os.environ.get("WHISPER_BOOTSTRAP_ADMIN_KEY")
+if _env_bootstrap is not None and _env_bootstrap.strip():
+    BOOTSTRAP_ADMIN_KEY = _env_bootstrap.strip()
 
 # Comma-separated CIDR/IP allowlists for /config and /stats. Empty string is
 # treated as "no override" (use the in-file / local.json value).

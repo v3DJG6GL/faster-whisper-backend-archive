@@ -5,73 +5,18 @@ Shared helpers used by the /logs, /config, /stats, and /quick-config pages.
     not in the allowlist. Allowlist accepts bare IPs or CIDRs.
   - nav_html(current, request)      — server-rendered nav row HTML.
   - severity_counts()               — log-level counters (last 60 s).
-  - TokenWithGrace                  — bearer token with 60 s rotation grace.
 """
 
 from __future__ import annotations
 
 import ipaddress
 import logging
-import secrets
-import time
 from collections import deque
 from typing import Callable
 
 from fastapi import HTTPException, Request, status
 
 import config as cfg
-
-
-class TokenWithGrace:
-    """Bearer token whose previous value is honored for 60 s after rotation,
-    so an editing session can refresh its stored token mid-flight without
-    locking itself out.
-
-    `current_ref` is a zero-arg callable returning the current token (or
-    None / empty for "no token set"). The indirection lets the WebUI edit
-    the value on cfg at runtime and the next match() call picks up the new
-    one. Loopback bypass is handled by the IP-gate dependency, not here.
-    """
-    GRACE_S = 60.0
-
-    def __init__(self, current_ref: Callable[[], "str | None"]) -> None:
-        self._current_ref = current_ref
-        self._previous: "str | None" = None
-        self._previous_expires_at: float = 0.0
-
-    def record_rotation(self, old: "str | None") -> None:
-        """Stash the pre-rotate token + expiry. Empty old token recorded as
-        None (== bypass). Call from the admin save handler when the value
-        changes."""
-        self._previous = old or None
-        self._previous_expires_at = time.monotonic() + self.GRACE_S
-
-    def _previous_valid(self) -> "str | None":
-        if not self._previous:
-            return None
-        if time.monotonic() > self._previous_expires_at:
-            self._previous = None
-            self._previous_expires_at = 0.0
-            return None
-        return self._previous
-
-    def is_set(self) -> bool:
-        """Return True if the current value is set (not None / not empty)."""
-        return bool(self._current_ref())
-
-    def matches(self, presented: str) -> bool:
-        """Constant-time match against the current value, with 60 s grace
-        for the previous value. If the current value is unset, returns
-        False (caller should treat this as "auth disabled" via is_set())."""
-        expected = self._current_ref()
-        if not expected:
-            return False
-        if secrets.compare_digest(presented, expected):
-            return True
-        grace = self._previous_valid()
-        if grace and secrets.compare_digest(presented, grace):
-            return True
-        return False
 
 
 # IPv4-mapped-in-IPv6 prefix surfaces on Windows dual-stack `::` binds when a
@@ -315,7 +260,7 @@ header .wrap-anchor { flex-basis: 0; height: 0; display: none; }
    `body.role-admin` after a successful auth-required state fetch.
    /config, /logs, /stats add the class unconditionally (their state
    endpoints already require admin token). /quick-config adds it only
-   when /quick-config/state returns role=admin — USER_TOKEN sessions
+   when /quick-config/state returns role=admin — non-admin user keys
    never see admin-only chrome. */
 header .admin-only { display: none; }
 body.role-admin header .admin-only { display: inline-flex; }
@@ -638,6 +583,7 @@ def _nav_items(current: str) -> list[tuple[str, str, bool]]:
     ]
     if getattr(cfg, "ADMIN_UI_ENABLED", False):
         items.append(("config", "/config", current == "config"))
+        items.append(("keys", "/config/api-keys", current == "api-keys"))
         items.append(("quick", "/quick-config", current == "quick-config"))
         items.append(("reports", "/reports", current == "reports"))
         items.append(("captures", "/captures", current == "captures"))
@@ -653,9 +599,9 @@ def nav_html(current: str) -> str:
     # logs/stats/config + sev pills are admin-only — every page renders
     # them with class "admin-only" which CSS hides by default. The page's
     # JS adds `body.role-admin` after a successful state-load, revealing
-    # them. /quick-config in a USER_TOKEN session never gets that class
+    # them. /quick-config in a non-admin user session never gets that class
     # so the admin links stay hidden. The "quick" link is for everyone.
-    admin_only_labels = {"logs", "stats", "config", "reports", "captures"}
+    admin_only_labels = {"logs", "stats", "config", "keys", "reports", "captures"}
     parts: list[str] = ['<span class="navrow">']
     for label, href, active in _nav_items(current):
         classes = ["navlink"]

@@ -36,42 +36,18 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import (
     FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse,
 )
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
 import captures_store
 import config as cfg
 import text_corrections
 import web_common
-from admin_routes import ADMIN_TOKEN_GUARD, require_admin_host
+from admin_routes import require_admin_host
+from auth import get_current_user, require_admin
 
 logger = logging.getLogger("whisper-api")
 
 router = APIRouter()
-_bearer = HTTPBearer(auto_error=False)
-
-
-# ---------------------------------------------------------------------
-# Header-only admin token guard (same as reports_routes)
-# ---------------------------------------------------------------------
-
-def require_admin_token_header_only(
-    creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
-) -> None:
-    """Admin token in `Authorization: Bearer …` only. No query-string
-    fallback — recordings are PHI and we keep tokens out of access logs /
-    referers / browser history."""
-    if not ADMIN_TOKEN_GUARD.is_set():
-        return
-    if creds is None or creds.scheme.lower() != "bearer":
-        raise HTTPException(
-            status.HTTP_401_UNAUTHORIZED,
-            "bearer token required (header only on /captures/api)",
-        )
-    if ADMIN_TOKEN_GUARD.matches(creds.credentials):
-        return
-    logger.warning("[captures] rejected bad bearer token")
-    raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid token")
 
 
 # ---------------------------------------------------------------------
@@ -154,7 +130,7 @@ async def captures_page() -> HTMLResponse:
     "/captures/api/list",
     dependencies=[
         Depends(require_admin_host),
-        Depends(require_admin_token_header_only),
+        Depends(require_admin),
     ],
 )
 async def list_captures_api(
@@ -178,7 +154,7 @@ async def list_captures_api(
     "/captures/api/by-request/{request_id}",
     dependencies=[
         Depends(require_admin_host),
-        Depends(require_admin_token_header_only),
+        Depends(require_admin),
     ],
 )
 async def by_request_id_api(request_id: str) -> JSONResponse:
@@ -193,7 +169,7 @@ async def by_request_id_api(request_id: str) -> JSONResponse:
     "/captures/api/export",
     dependencies=[
         Depends(require_admin_host),
-        Depends(require_admin_token_header_only),
+        Depends(require_admin),
     ],
 )
 async def export_captures_api(
@@ -217,7 +193,7 @@ async def export_captures_api(
     "/captures/api/{cid}",
     dependencies=[
         Depends(require_admin_host),
-        Depends(require_admin_token_header_only),
+        Depends(require_admin),
     ],
 )
 async def get_capture_api(cid: str) -> JSONResponse:
@@ -269,7 +245,7 @@ def _sniff_audio_mime(abs_path: str, fallback_ext: str) -> str:
     "/captures/api/{cid}/audio",
     dependencies=[
         Depends(require_admin_host),
-        Depends(require_admin_token_header_only),
+        Depends(require_admin),
     ],
 )
 async def get_audio_api(cid: str, request: Request) -> FileResponse:
@@ -297,7 +273,7 @@ async def get_audio_api(cid: str, request: Request) -> FileResponse:
     "/captures/api/{cid}",
     dependencies=[
         Depends(require_admin_host),
-        Depends(require_admin_token_header_only),
+        Depends(require_admin),
     ],
 )
 async def patch_capture_api(cid: str, payload: PatchCaptureIn) -> JSONResponse:
@@ -323,7 +299,7 @@ async def patch_capture_api(cid: str, payload: PatchCaptureIn) -> JSONResponse:
     "/captures/api/{cid}",
     dependencies=[
         Depends(require_admin_host),
-        Depends(require_admin_token_header_only),
+        Depends(require_admin),
     ],
 )
 async def delete_capture_api(cid: str) -> JSONResponse:
@@ -336,7 +312,7 @@ async def delete_capture_api(cid: str) -> JSONResponse:
     "/captures/api/clear",
     dependencies=[
         Depends(require_admin_host),
-        Depends(require_admin_token_header_only),
+        Depends(require_admin),
     ],
 )
 async def clear_captures_api(payload: ClearIn, request: Request) -> JSONResponse:
@@ -792,7 +768,7 @@ _CAPTURES_HTML = r"""<!doctype html>
   // -------------------------------------------------------------------
   // Token storage (mirrors /reports)
   // -------------------------------------------------------------------
-  var TOKEN_KEY = 'whisper_admin_token';
+  var TOKEN_KEY = 'whisper_api_key';
   function getToken() {
     try { return sessionStorage.getItem(TOKEN_KEY) || ''; } catch(_) { return ''; }
   }

@@ -74,8 +74,6 @@ ENV_VAR_MAPPING: dict[str, str] = {
     "LOG_FILE": "WHISPER_LOG_FILE",
     "ADMIN_ALLOWED_HOSTS": "WHISPER_ADMIN_ALLOWED_HOSTS",
     "STATS_ALLOWED_HOSTS": "WHISPER_STATS_ALLOWED_HOSTS",
-    "ADMIN_TOKEN": "WHISPER_ADMIN_TOKEN",
-    "USER_TOKEN": "WHISPER_USER_TOKEN",
     # Per-model overrides use a different convention; see config.py override
     # block. They are not flagged in the admin UI as "env-pinned" since the
     # mapping is dynamic; the dynamic mapping is exposed separately.
@@ -389,17 +387,6 @@ FIELD_DESCRIPTIONS: dict[str, str] = {
     "STATS_ALLOWED_HOSTS":
         "IP/CIDR allowlist for /stats endpoints. Loopback always allowed; "
         "default is loopback only.",
-    "ADMIN_TOKEN":
-        "Bearer token required on every /config request from non-loopback "
-        "clients. Loopback always bypasses. After rotate, the previous "
-        "token stays valid for 60 s as a grace window so the editing admin "
-        "isn't immediately locked out. Empty / unset = loopback-only access.",
-    "USER_TOKEN":
-        "Bearer token for end-user access to /quick-config (the simplified "
-        "page exposing only rules the admin has flagged). Distinct from "
-        "ADMIN_TOKEN; ADMIN_TOKEN also works on /quick-config. Same 60 s "
-        "grace window after rotate. Empty / unset = loopback-only access.",
-
     # --- Reports store ---
     "REPORTS_DB":
         "Path to the SQLite file holding transcription error reports. "
@@ -413,7 +400,7 @@ FIELD_DESCRIPTIONS: dict[str, str] = {
         "startup and hourly thereafter. 0 = retention sweep disabled "
         "(admin must clear manually).",
     "REPORTS_ALLOW_USER_SUBMIT":
-        "Master switch for end-user (USER_TOKEN role) report submission. "
+        "Master switch for end-user (non-admin API-key) report submission. "
         "Off = only admins can submit; the button stays visible but the "
         "endpoint returns 403 for non-admin callers.",
 
@@ -510,7 +497,7 @@ class _RuleBase(BaseModel):
     enabled: bool = True
     locked: bool = False
     seeded: bool = False
-    # When True, the rule is shown on /quick-config so end-users (USER_TOKEN
+    # When True, the rule is shown on /quick-config so end-users (non-admin
     # session) can edit its body fields. Toggle is admin-only — see the
     # per-type allow-list enforcement in quick_config_routes.py.
     exposed: bool = False
@@ -776,12 +763,6 @@ class AdminConfig(BaseModel):
         list[Annotated[str, Field(min_length=1, max_length=64)]],
         Field(max_length=64),
     ] | None = _F("STATS_ALLOWED_HOSTS")
-    # ADMIN_TOKEN is editable from the UI behind a rotate-with-grace flow
-    # (see admin_routes.py post_state). Loopback bypass + 60 s dual-token
-    # window prevent lockout. Empty string = clear (disable token auth).
-    ADMIN_TOKEN: Annotated[str, Field(max_length=256)] | None = _F("ADMIN_TOKEN")
-    USER_TOKEN: Annotated[str, Field(max_length=256)] | None = _F("USER_TOKEN")
-
     # --- Reports store ---
     REPORTS_DB: Annotated[str, Field(min_length=1, max_length=512)] | None = _F("REPORTS_DB")
     REPORTS_MAX: Annotated[int, Field(ge=10, le=100_000)] | None = _F("REPORTS_MAX")

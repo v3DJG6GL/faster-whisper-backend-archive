@@ -79,12 +79,27 @@ CREATE TABLE IF NOT EXISTS captures (
   corrections_json TEXT NOT NULL DEFAULT '[]',
   admin_notes     TEXT NOT NULL DEFAULT '',
   status          TEXT NOT NULL DEFAULT 'new',
-  reviewed_ts     REAL
+  reviewed_ts     REAL,
+  user_id         TEXT,
+  group_id        TEXT,
+  group_order     INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_captures_created    ON captures(created_ts DESC);
 CREATE INDEX IF NOT EXISTS idx_captures_status     ON captures(status);
 CREATE INDEX IF NOT EXISTS idx_captures_request_id ON captures(request_id);
+CREATE INDEX IF NOT EXISTS idx_captures_user       ON captures(user_id, created_ts DESC);
+CREATE INDEX IF NOT EXISTS idx_captures_group      ON captures(group_id, group_order);
 """
+
+# Migrations for installs that predate the user_id / group_id columns.
+# SQLite ALTER ADD COLUMN is cheap and idempotent (we catch OperationalError
+# to skip the no-op repeat call). Run after _SCHEMA so the indexes are also
+# present even if the table existed before.
+_MIGRATIONS = (
+    "ALTER TABLE captures ADD COLUMN user_id TEXT",
+    "ALTER TABLE captures ADD COLUMN group_id TEXT",
+    "ALTER TABLE captures ADD COLUMN group_order INTEGER",
+)
 
 
 # ---------------------------------------------------------------------
@@ -105,6 +120,12 @@ def init(db_path: str, audio_dir: str) -> None:
     _conn.execute("PRAGMA journal_mode=WAL;")
     _conn.execute("PRAGMA synchronous=NORMAL;")
     _conn.executescript(_SCHEMA)
+    for stmt in _MIGRATIONS:
+        try:
+            _conn.execute(stmt)
+        except sqlite3.OperationalError:
+            # Column already present — idempotent.
+            pass
 
 
 def _require_conn() -> sqlite3.Connection:
@@ -222,6 +243,7 @@ def create_capture(
     final: str,
     words: list[dict[str, Any]],
     segments: list[dict[str, Any]],
+    user_id: str | None = None,
 ) -> str:
     """Transcode source audio into a 16 kHz mono WAV at the row's
     audio_relpath, then insert the SQLite row. On row-insert failure
@@ -286,14 +308,15 @@ def create_capture(
                 " duration_seconds, audio_relpath, audio_format,"
                 " raw, final, words_json, segments_json,"
                 " corrected_text, corrections_json, admin_notes,"
-                " status, reviewed_ts"
-                ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " status, reviewed_ts, user_id, group_id, group_order"
+                ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     cid, now, request_id, model or "", language or "",
                     float(duration_seconds or 0.0), relpath, "wav",
                     raw_t, final_t, words_t, segments_t,
                     "", "[]", "",
                     "new", None,
+                    user_id, None, None,
                 ),
             )
             _evict_to_cap(conn)
@@ -459,10 +482,19 @@ def _drop_oldest_by_bytes(
 # ---------------------------------------------------------------------
 
 def list_captures(
-    *, status: str | None = None, limit: int = 200, before_ts: float | None = None,
+    *,
+    status: str | None = None,
+    limit: int = 200,
+    before_ts: float | None = None,
+    user_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Newest-first listing, optionally filtered by status. Heavy fields
-    (words / segments) are dropped to keep the wire payload light.
+    """Newest-first listing, optionally filtered by status and user_id.
+    Heavy fields (words / segments) are dropped to keep the wire payload
+    light.
+
+    `user_id=None` means "do not filter" — callers in admin contexts pass
+    None; per-user contexts pass the caller's id so the user can only see
+    their own captures.
 
     Use `before_ts` for cursor pagination — repeat the call passing the
     oldest created_ts from the previous page."""
@@ -475,13 +507,16 @@ def list_captures(
     if before_ts is not None:
         clauses.append("created_ts < ?")
         params.append(float(before_ts))
+    if user_id is not None:
+        clauses.append("user_id = ?")
+        params.append(user_id)
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     params.append(int(limit))
     cur = conn.execute(
         f"SELECT id, created_ts, request_id, model, language,"
         f" duration_seconds, audio_relpath, audio_format,"
         f" raw, final, corrected_text, corrections_json, admin_notes,"
-        f" status, reviewed_ts"
+        f" status, reviewed_ts, user_id, group_id, group_order"
         f" FROM captures{where}"
         f" ORDER BY created_ts DESC LIMIT ?",
         params,

@@ -3,9 +3,8 @@
 Two surfaces:
 
   /quick-config/reports/api/submit  — end-user POST. Gated by
-    require_admin_host + require_user_or_admin_token (same auth as
-    the rest of /quick-config). The form lives inline on each
-    .trace-item in /quick-config; this is the receiver.
+    require_admin_host + get_current_user. The form lives inline on
+    each .trace-item in /quick-config; this is the receiver.
 
   /reports                          — admin page + APIs:
     GET   /reports                  HTML triage page
@@ -14,13 +13,10 @@ Two surfaces:
     DELETE /reports/api/{rid}       single delete
     POST  /reports/api/clear        wipe all (confirm dialog)
     GET   /reports/api/export       full JSON dump (envelope-wrapped)
-  Mutating routes use a HEADER-ONLY admin-token guard — no
-  query-string token fallback (that fallback is /quick-config's
-  EventSource quirk and not appropriate for PHI mutation routes).
+  Mutating routes use Depends(require_admin) — admin-only API keys.
 
-Per-host rate limit on submission: in-memory sliding window. Keyed on
-request.client.host because USER_TOKEN is a deployment-shared secret,
-not a per-user identity.
+Per-user rate limit on submission: in-memory sliding window keyed on
+the resolved user_id from the API key.
 """
 from __future__ import annotations
 
@@ -32,47 +28,17 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse, Response
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
 import config as cfg
 import reports_store
 import web_common
-from admin_routes import ADMIN_TOKEN_GUARD, require_admin_host
-from quick_config_routes import require_user_or_admin_token
+from admin_routes import require_admin_host
+from auth import get_current_user, require_admin
 
 logger = logging.getLogger("whisper-api")
 
 router = APIRouter()
-_bearer = HTTPBearer(auto_error=False)
-
-
-# ---------------------------------------------------------------------
-# Header-only admin token guard
-# ---------------------------------------------------------------------
-# The /quick-config require_user_or_admin_token accepts a ?token=<...>
-# query parameter as an EventSource workaround. /reports has no SSE
-# endpoint and its mutating routes carry PHI; we explicitly forbid the
-# query-string fallback to keep tokens out of access logs / referers /
-# browser history.
-
-def require_admin_token_header_only(
-    creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
-) -> None:
-    """Admin token in `Authorization: Bearer …` only. No query-string
-    fallback. Matches require_admin_token (60s rotate-grace) for the
-    actual check, but skips the SSE-style query-string lookup."""
-    if not ADMIN_TOKEN_GUARD.is_set():
-        return
-    if creds is None or creds.scheme.lower() != "bearer":
-        raise HTTPException(
-            status.HTTP_401_UNAUTHORIZED,
-            "bearer token required (header only on /reports/api)",
-        )
-    if ADMIN_TOKEN_GUARD.matches(creds.credentials):
-        return
-    logger.warning("[reports] rejected bad bearer token")
-    raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid token")
 
 
 # ---------------------------------------------------------------------
@@ -116,8 +82,8 @@ _RATE_MAX = 20
 _rate: dict[str, tuple[int, float]] = {}
 
 
-def _check_rate_limit(host: str) -> None:
-    key = host or "<unknown>"
+def _check_rate_limit(key: str) -> None:
+    key = key or "<unknown>"
     now = time.time()
     n, start = _rate.get(key, (0, now))
     if now - start > _RATE_WINDOW_S:
@@ -127,7 +93,7 @@ def _check_rate_limit(host: str) -> None:
     if n > _RATE_MAX:
         raise HTTPException(
             status.HTTP_429_TOO_MANY_REQUESTS,
-            "Too many reports from this host. Try again in a few minutes.",
+            "Too many reports. Try again in a few minutes.",
         )
 
 
@@ -142,16 +108,19 @@ def _check_rate_limit(host: str) -> None:
 async def submit_report(
     payload: ReportSubmitIn,
     request: Request,
-    role: Literal["admin", "user"] = Depends(require_user_or_admin_token),
+    user: dict[str, Any] = Depends(get_current_user),
 ) -> JSONResponse:
-    if not getattr(cfg, "REPORTS_ALLOW_USER_SUBMIT", True) and role != "admin":
+    is_admin = bool(user.get("is_admin"))
+    if not getattr(cfg, "REPORTS_ALLOW_USER_SUBMIT", True) and not is_admin:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
             "Report submission is disabled by the admin.",
         )
 
-    host = request.client.host if request.client else ""
-    _check_rate_limit(host)
+    rate_key = user.get("user_id") or (
+        request.client.host if request.client else ""
+    )
+    _check_rate_limit(rate_key)
 
     intended = (payload.intended_text or "").strip()
     comment = (payload.user_comment or "").strip()
@@ -165,6 +134,7 @@ async def submit_report(
             "Mark a wrong word, write what you meant to say, or leave a comment.",
         )
 
+    host = request.client.host if request.client else ""
     rid = reports_store.create_report(
         request_id=payload.request_id,
         trace_ts=float(payload.trace_ts or 0.0),
@@ -175,7 +145,7 @@ async def submit_report(
         corrections=corrections,
         intended_text=intended,
         user_comment=comment,
-        reporter_role=role,
+        reporter_role="admin" if is_admin else "user",
         reporter_host=host,
     )
     return JSONResponse({"ok": True, "id": rid})
@@ -209,7 +179,7 @@ class PatchReportIn(BaseModel):
     "/reports/api/list",
     dependencies=[
         Depends(require_admin_host),
-        Depends(require_admin_token_header_only),
+        Depends(require_admin),
     ],
 )
 async def list_reports_api() -> JSONResponse:
@@ -224,7 +194,7 @@ async def list_reports_api() -> JSONResponse:
     "/reports/api/{rid}",
     dependencies=[
         Depends(require_admin_host),
-        Depends(require_admin_token_header_only),
+        Depends(require_admin),
     ],
 )
 async def patch_report_api(rid: str, payload: PatchReportIn) -> JSONResponse:
@@ -246,7 +216,7 @@ async def patch_report_api(rid: str, payload: PatchReportIn) -> JSONResponse:
     "/reports/api/{rid}",
     dependencies=[
         Depends(require_admin_host),
-        Depends(require_admin_token_header_only),
+        Depends(require_admin),
     ],
 )
 async def delete_report_api(rid: str) -> JSONResponse:
@@ -259,7 +229,7 @@ async def delete_report_api(rid: str) -> JSONResponse:
     "/reports/api/clear",
     dependencies=[
         Depends(require_admin_host),
-        Depends(require_admin_token_header_only),
+        Depends(require_admin),
     ],
 )
 async def clear_reports_api(request: Request) -> JSONResponse:
@@ -272,7 +242,7 @@ async def clear_reports_api(request: Request) -> JSONResponse:
     "/reports/api/export",
     dependencies=[
         Depends(require_admin_host),
-        Depends(require_admin_token_header_only),
+        Depends(require_admin),
     ],
 )
 async def export_reports_api() -> Response:
@@ -586,9 +556,9 @@ _REPORTS_HTML = """<!doctype html>
 
 <div id="token-modal">
   <div class="box">
-    <h3>Admin token</h3>
-    <p>Bearer token for /reports/api endpoints. Stored in sessionStorage until tab close.</p>
-    <input id="token-input" type="password" autocomplete="off" placeholder="paste token">
+    <h3>API key</h3>
+    <p>Paste your <code>wk_…</code> admin API key. Stored in sessionStorage until tab close.</p>
+    <input id="token-input" type="password" autocomplete="off" placeholder="wk_…">
     <div class="actions">
       <button id="token-cancel">Cancel</button>
       <button id="token-save" class="primary">Save</button>
@@ -607,7 +577,7 @@ _REPORTS_HTML = """<!doctype html>
   // -------------------------------------------------------------------
   // Token (sessionStorage; matches the /quick-config rhythm)
   // -------------------------------------------------------------------
-  var TOKEN_KEY = 'whisper_admin_token';
+  var TOKEN_KEY = 'whisper_api_key';
   function getToken() {
     try { return sessionStorage.getItem(TOKEN_KEY) || ''; } catch(_) { return ''; }
   }

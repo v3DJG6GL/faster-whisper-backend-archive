@@ -3,7 +3,7 @@ Admin WebUI for faster-whisper-backend.
 
 Mounted at /config when WHISPER_ADMIN_UI=1. Endpoints:
 
-  GET  /config            HTML page (loopback only)
+  GET  /config            HTML page (loopback / ADMIN_ALLOWED_HOSTS)
   GET  /config/state      Resolved config + provenance + warm/cold tags
   POST /config/state      Save overrides (validation errors -> 422)
   POST /config/restart    Detach a self-restart helper (Windows only)
@@ -11,8 +11,10 @@ Mounted at /config when WHISPER_ADMIN_UI=1. Endpoints:
 Security model (layered):
   1. Allowlist gate:   require_admin_host rejects callers not in
                        cfg.ADMIN_ALLOWED_HOSTS (loopback always permitted)
-  2. Bearer token:     if WHISPER_ADMIN_TOKEN is set, mutating endpoints
-                       require Authorization: Bearer <token>
+  2. API key:          Depends(require_admin) — bearer must resolve to a
+                       user with is_admin=True. In OPEN mode (no admin
+                       key exists yet) the dep yields a synthetic admin
+                       so the operator can bootstrap.
   3. Pydantic schema:  AdminConfig validates body shape, types, bounds
 """
 
@@ -25,13 +27,12 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import ValidationError
 
 import config as cfg
 import config_store
 import web_common
-from web_common import TokenWithGrace
+from auth import require_admin
 
 logger = logging.getLogger("whisper-api")
 
@@ -91,8 +92,8 @@ _FIELD_GROUPS: list[tuple[str, list[tuple[str | None, list[str]]]]] = [
     ("Server (uvicorn)", [(None, [
         "SERVER_HOST", "SERVER_PORT", "SERVER_WORKERS", "SERVER_LOG_LEVEL",
     ])]),
-    ("Access (allowlists + token)", [(None, [
-        "ADMIN_ALLOWED_HOSTS", "STATS_ALLOWED_HOSTS", "ADMIN_TOKEN", "USER_TOKEN",
+    ("Access (allowlists)", [(None, [
+        "ADMIN_ALLOWED_HOSTS", "STATS_ALLOWED_HOSTS",
     ])]),
     ("Reports", [(None, [
         "REPORTS_DB", "REPORTS_MAX", "REPORTS_RETENTION_DAYS",
@@ -129,46 +130,11 @@ def _all_fields() -> list[str]:
 
 # --- auth deps ---------------------------------------------------------------
 #
-# /config is gated by an IP/CIDR allowlist (cfg.ADMIN_ALLOWED_HOSTS). Loopback
-# is always implicitly permitted — even a misconfigured allowlist can never
-# lock the local operator out, since they can still curl from the box itself.
+# /config is gated by an IP/CIDR allowlist (cfg.ADMIN_ALLOWED_HOSTS, loopback
+# always implicit) AND by `Depends(require_admin)` — an API key resolving to
+# is_admin=True. In open mode (no admin key configured yet) require_admin
+# yields the synthetic admin so the operator can bootstrap.
 require_admin_host = web_common.require_allowed_host(lambda: cfg.ADMIN_ALLOWED_HOSTS)
-
-
-_bearer = HTTPBearer(auto_error=False)
-
-# --- Token rotation with 60 s grace window ----------------------------------
-#
-# When an admin rotates ADMIN_TOKEN (or clears it), the previous value stays
-# valid for 60 s so the editing session can update its stored token without
-# getting locked out mid-flight. After the grace window expires, only the
-# current cfg.ADMIN_TOKEN is accepted. Loopback bypass is unaffected — the
-# loopback caller can always edit/clear the token without auth.
-#
-# USER_TOKEN guard lives here too even though only /quick-config consults it,
-# because admin_routes.post_state is the single place tokens get rotated and
-# both guards need their pre-save snapshots installed from the same handler.
-ADMIN_TOKEN_GUARD = TokenWithGrace(lambda: cfg.ADMIN_TOKEN)
-USER_TOKEN_GUARD = TokenWithGrace(lambda: getattr(cfg, "USER_TOKEN", None))
-
-
-def require_admin_token(
-    creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
-) -> None:
-    """If cfg.ADMIN_TOKEN is set, require a matching bearer token. If unset,
-    this is a no-op — the loopback check alone is the gate.
-
-    During a 60 s grace window after rotate, the pre-rotate token is also
-    accepted so the editing session can update its stored token without
-    disruption."""
-    if not ADMIN_TOKEN_GUARD.is_set():
-        return
-    if creds is None or creds.scheme.lower() != "bearer":
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "bearer token required")
-    if ADMIN_TOKEN_GUARD.matches(creds.credentials):
-        return
-    logger.warning("[config] rejected bad bearer token")
-    raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid token")
 
 
 # --- router ------------------------------------------------------------------
@@ -177,15 +143,7 @@ router = APIRouter(prefix="/config")
 
 
 def _resolved_value(field: str) -> Any:
-    """Read the current effective value of a config field by attribute name.
-    For ADMIN_TOKEN, return only a presence sentinel (the UI never needs the
-    raw value, only whether one is set). Unset returns None to match the
-    in-repo baseline so the WebUI's reset-to-default button correctly hides
-    when there's nothing to reset."""
-    if field == "ADMIN_TOKEN":
-        return "***" if getattr(cfg, "ADMIN_TOKEN", None) else None
-    if field == "USER_TOKEN":
-        return "***" if getattr(cfg, "USER_TOKEN", None) else None
+    """Read the current effective value of a config field by attribute name."""
     val = getattr(cfg, field, None)
     # Convert un-JSON-able types so the WebUI gets clean data.
     if isinstance(val, (set, frozenset)):
@@ -261,7 +219,7 @@ async def config_page() -> HTMLResponse:
     )
 
 
-@router.get("/state", dependencies=[Depends(require_admin_host), Depends(require_admin_token)])
+@router.get("/state", dependencies=[Depends(require_admin_host), Depends(require_admin)])
 async def get_state() -> dict[str, Any]:
     """Return the resolved config (current effective values) plus provenance
     flags so the WebUI can render badges. Does NOT include the saved-only
@@ -327,12 +285,11 @@ async def get_state() -> dict[str, Any]:
     return {
         "fields": fields,
         "groups": groups_payload,
-        "token_required": bool(cfg.ADMIN_TOKEN),
         "service_name": "WhisperAPI",
     }
 
 
-@router.post("/state", dependencies=[Depends(require_admin_host), Depends(require_admin_token)])
+@router.post("/state", dependencies=[Depends(require_admin_host), Depends(require_admin)])
 async def post_state(payload: dict[str, Any], request: Request) -> JSONResponse:
     """Validate and persist overrides. Returns the diff (which fields were
     saved) plus a `requires_restart` flag for the WebUI to act on. Hot fields
@@ -351,17 +308,7 @@ async def post_state(payload: dict[str, Any], request: Request) -> JSONResponse:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR,
                             f"could not write config.local.json: {e}")
 
-    # Capture pre-save token values so we can install the 60 s grace window
-    # if either is about to change. Loopback callers don't need this, but
-    # token-gated remote sessions would lock themselves out otherwise.
-    prev_admin_token = getattr(cfg, "ADMIN_TOKEN", None)
-    prev_user_token = getattr(cfg, "USER_TOKEN", None)
-
-    applied = await _apply_hot_changes(
-        written,
-        prev_admin_token=prev_admin_token,
-        prev_user_token=prev_user_token,
-    )
+    applied = await _apply_hot_changes(written)
 
     client_host = request.client.host if request.client else "?"
     logger.info(
@@ -377,14 +324,9 @@ async def post_state(payload: dict[str, Any], request: Request) -> JSONResponse:
     })
 
 
-async def _apply_hot_changes(
-    written: dict[str, Any],
-    *,
-    prev_admin_token: "str | None",
-    prev_user_token: "str | None",
-) -> dict[str, Any]:
-    """Apply hot edits from a config save to the running cfg module, install
-    token grace windows, rebuild caches, and evict load-time-affected models.
+async def _apply_hot_changes(written: dict[str, Any]) -> dict[str, Any]:
+    """Apply hot edits from a config save to the running cfg module, rebuild
+    caches, and evict load-time-affected models.
 
     Shared by /config/state (admin) and /quick-config/state (end-user). For
     /quick-config only PIPELINE_RULES can change, so most branches here
@@ -417,21 +359,6 @@ async def _apply_hot_changes(
             cold_changed.append(name)
         else:
             hot_changed.append(name)
-
-    # Token rotate: install grace windows when ADMIN_TOKEN or USER_TOKEN
-    # actually changed. Empty / unset old token → no grace needed (no one
-    # was authenticating with that token anyway). Loopback bypass means
-    # the local admin always has access regardless.
-    if "ADMIN_TOKEN" in written and prev_admin_token \
-            and getattr(cfg, "ADMIN_TOKEN", None) != prev_admin_token:
-        ADMIN_TOKEN_GUARD.record_rotation(prev_admin_token)
-        logger.info("[config] ADMIN_TOKEN rotated — previous token valid for "
-                    "%d s grace window", int(TokenWithGrace.GRACE_S))
-    if "USER_TOKEN" in written and prev_user_token \
-            and getattr(cfg, "USER_TOKEN", None) != prev_user_token:
-        USER_TOKEN_GUARD.record_rotation(prev_user_token)
-        logger.info("[config] USER_TOKEN rotated — previous token valid for "
-                    "%d s grace window", int(TokenWithGrace.GRACE_S))
 
     if needs_cache_rebuild:
         try:
@@ -495,7 +422,7 @@ async def _apply_hot_changes(
 
 
 @router.post("/test-pipeline",
-             dependencies=[Depends(require_admin_host), Depends(require_admin_token)])
+             dependencies=[Depends(require_admin_host), Depends(require_admin)])
 async def test_pipeline(payload: dict[str, Any]) -> JSONResponse:
     """Dry-run the full pipeline-rules list against a sample. Used by the
     WebUI's per-row live-validation badge AND the inline test panel.
@@ -634,7 +561,7 @@ async def test_pipeline(payload: dict[str, Any]) -> JSONResponse:
     return JSONResponse({"steps": steps, "final": text})
 
 
-@router.post("/restart", dependencies=[Depends(require_admin_host), Depends(require_admin_token)])
+@router.post("/restart", dependencies=[Depends(require_admin_host), Depends(require_admin)])
 async def post_restart(request: Request) -> JSONResponse:
     """Trigger a self-restart of the WhisperAPI Windows Service.
 
@@ -1213,9 +1140,10 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
 
 <div id="login-wrap" class="login" style="display:none">
   <h1>faster-whisper-backend · admin</h1>
-  <p>Enter the value of <code>WHISPER_ADMIN_TOKEN</code> to continue. The token
-  stays in your browser's <code>sessionStorage</code> until you close the tab.</p>
-  <input id="login-token" type="password" autocomplete="off" placeholder="bearer token">
+  <p>Paste your <strong>API key</strong> to continue. Keys are issued in
+  <code>/config/api-keys</code> by an admin. The key stays in your browser's
+  <code>sessionStorage</code> until you close the tab.</p>
+  <input id="login-token" type="password" autocomplete="off" placeholder="wk_…">
   <button id="login-btn">Unlock</button>
   <p id="login-err" class="err"></p>
 </div>
@@ -1265,7 +1193,7 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
 (() => {
 'use strict';
 
-const TOKEN_KEY = 'whisper_admin_token';
+const TOKEN_KEY = 'whisper_api_key';
 let state = null;          // last server state
 let dirty = {};            // field -> new value (only changed)
 
@@ -1495,10 +1423,6 @@ function makeEditor(name) {
   // on every input. Save sends the parsed object; pydantic validates server-
   // side. Future polish: master-detail UI per the original design.
   if (name === 'MODEL_OVERRIDES') return modelOverridesEditor(name, v || {});
-  // ADMIN_TOKEN: never render the raw value; show "Set ✓ / Not set" with
-  // explicit Rotate / Clear actions. Confirm dialogs remind the admin
-  // about the 60 s grace window after rotate.
-  if (name === 'ADMIN_TOKEN') return adminTokenEditor(name, v);
   // Type dispatch — keep this strict. Order matters: check shape (object vs.
   // array vs. boolean vs. number) BEFORE name-based heuristics, otherwise
   // misses like MAX_LOADED_MODELS routing to a list editor sneak in.
@@ -1529,93 +1453,6 @@ function makeEditor(name) {
     return nullableNumberEditor(name, v);
   }
   return stringEditor(name, v == null ? '' : v);
-}
-
-function adminTokenEditor(name, v) {
-  // ADMIN_TOKEN is sensitive — never render the raw value.
-  // Status pill + [Rotate] [Clear] buttons. Rotate opens a modal-style inline
-  // form for the new token (typed twice to catch typos). Clear sets to empty.
-  // After save, the previous token has 60 s grace at the server side.
-  const wrap = document.createElement('div');
-
-  function statusPill(set) {
-    const span = document.createElement('span');
-    span.className = 'badge ' + (set ? 'live' : '');
-    span.textContent = set ? 'Set ✓' : 'Not set (loopback-only)';
-    return span;
-  }
-
-  function render() {
-    wrap.innerHTML = '';
-    const cur = currentValue(name);
-    const isSet = !!cur;
-
-    const top = document.createElement('div');
-    top.style.display = 'flex';
-    top.style.gap = '0.5rem';
-    top.style.alignItems = 'center';
-    top.style.flexWrap = 'wrap';
-    top.appendChild(statusPill(isSet));
-
-    const rotateBtn = document.createElement('button');
-    rotateBtn.type = 'button';
-    rotateBtn.textContent = isSet ? '↻ Rotate' : '+ Set token';
-    rotateBtn.addEventListener('click', () => {
-      const t1 = prompt('Enter the new ADMIN_TOKEN (32+ chars recommended):');
-      if (t1 === null) return;
-      const t1s = t1.trim();
-      if (!t1s) {
-        alert('Empty token — use Clear to disable token auth.');
-        return;
-      }
-      const t2 = prompt('Re-enter the new ADMIN_TOKEN to confirm:');
-      if (t2 === null) return;
-      if (t1s !== t2.trim()) {
-        alert('Tokens do not match. No change made.');
-        return;
-      }
-      const grace = isSet
-        ? '\n\nAfter save, the previous token stays valid for 60 s as a grace '
-          + 'window so this session can update its stored token.'
-        : '';
-      if (!confirm('Set ADMIN_TOKEN to the new value?' + grace)) return;
-      setDirty(name, t1s);
-      render();
-    });
-    top.appendChild(rotateBtn);
-
-    if (isSet) {
-      const clearBtn = document.createElement('button');
-      clearBtn.type = 'button';
-      clearBtn.textContent = '⌫ Clear';
-      clearBtn.title = 'Disable token auth (loopback bypass remains)';
-      clearBtn.addEventListener('click', () => {
-        if (!confirm('Disable ADMIN_TOKEN auth?\n\n'
-            + 'Loopback (127.0.0.1, ::1) remains the only gate.\n'
-            + 'After save, the previous token stays valid for 60 s.')) return;
-        setDirty(name, '');
-        render();
-      });
-      top.appendChild(clearBtn);
-    }
-
-    // If the user has typed a new token but not saved yet, show a tiny hint.
-    if (Object.prototype.hasOwnProperty.call(dirty, name)) {
-      const pending = document.createElement('span');
-      pending.className = 'badge';
-      pending.style.color = 'var(--yellow, #f2cc60)';
-      pending.textContent = 'pending — click Save to apply';
-      top.appendChild(pending);
-    }
-
-    wrap.appendChild(top);
-  }
-
-  render();
-  document.addEventListener('admin:dirty', (e) => {
-    if (!e.detail || e.detail.name === name) render();
-  });
-  return wrap;
 }
 
 // =============================================================================

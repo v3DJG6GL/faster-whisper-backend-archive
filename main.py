@@ -129,7 +129,12 @@ if sys.platform == "win32":
     _preload_windows_cuda_dlls()
 
 
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request, Depends
+
+# Auth dep used by /v1/audio/transcriptions and /auth/whoami. In open mode
+# (no admin key in DB) it returns the synthetic admin so the operator can
+# bootstrap; in locked-down mode it 401s on missing/invalid bearer.
+from auth import get_current_user as _get_current_user_dep
 from faster_whisper import WhisperModel
 
 
@@ -1204,6 +1209,57 @@ async def _captures_retention_loop() -> None:
             logger.error("[captures] retention loop error: %s", _ce)
 
 
+def _bootstrap_admin_from_env(raw_key: str) -> None:
+    """If WHISPER_BOOTSTRAP_ADMIN_KEY is set, ensure a `bootstrap-admin`
+    user holds that exact key. Idempotent — if the key hash is already in
+    the DB we no-op. The raw key never gets persisted in plaintext;
+    only the SHA-256 hash hits disk."""
+    import api_keys_store
+    h = api_keys_store.hash_key(raw_key)
+    # If this hash already maps to an active key, nothing to do.
+    if api_keys_store._KEY_INDEX.get(h) is not None:
+        return
+    # Reuse or create the bootstrap-admin user.
+    existing = [
+        u for u in api_keys_store.list_users()
+        if u["username"] == "bootstrap-admin"
+    ]
+    if existing:
+        uid = existing[0]["id"]
+        if not existing[0]["is_admin"]:
+            logger.warning(
+                "[auth] bootstrap-admin user exists but is_admin=False; "
+                "leaving as-is. Recreate manually to escalate."
+            )
+            return
+    else:
+        uid = api_keys_store.create_user("bootstrap-admin", is_admin=True)
+    # Insert the raw key (bypass generate path so we honour the env value).
+    import sqlite3 as _sql
+    import time as _time
+    import uuid as _uuid
+    kp, k4 = api_keys_store._split_display_parts(raw_key)
+    try:
+        with api_keys_store._lock:
+            api_keys_store._require_conn().execute(
+                "INSERT INTO api_keys"
+                " (id, user_id, key_hash, key_prefix, key_last4, label,"
+                "  created_ts, revoked_ts, last_used_ts)"
+                " VALUES (?,?,?,?,?,?,?,NULL,NULL)",
+                (
+                    _uuid.uuid4().hex, uid, h, kp, k4,
+                    "bootstrap (env)", _time.time(),
+                ),
+            )
+            api_keys_store._rebuild_index_locked()
+        logger.info(
+            "[auth] bootstrap admin key registered (prefix=%s)", kp,
+        )
+    except _sql.IntegrityError:
+        # UNIQUE on key_hash — already present in a different user. No-op.
+        pass
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # If PRELOAD_MODELS is empty, fall back to preloading just DEFAULT_MODEL
@@ -1232,6 +1288,30 @@ async def lifespan(app: FastAPI):
             logger.error("Failed to preload model '%s': %s", name, e)
 
     evictor_task = _asyncio_for_models.create_task(_idle_evictor())
+
+    # Open the API-keys SQLite store and start the open-mode warning loop.
+    # In OPEN mode (no admin key exists yet) the loop nags every 60 s; this
+    # is the operator's prompt to bootstrap an admin via /config/api-keys.
+    # Optional WHISPER_BOOTSTRAP_ADMIN_KEY env var creates the very first
+    # admin in one shot without any UI.
+    open_mode_task = None
+    try:
+        import api_keys_store
+        import auth as _auth
+        api_keys_store.init_db(cfg.API_KEYS_DB)
+        bootstrap_key = getattr(cfg, "BOOTSTRAP_ADMIN_KEY", None)
+        if bootstrap_key:
+            # Only inserts if hash isn't already in api_keys. Idempotent.
+            _bootstrap_admin_from_env(bootstrap_key)
+        logger.info(
+            "API keys store initialized at %s (locked_down=%s)",
+            cfg.API_KEYS_DB, api_keys_store.is_locked_down(),
+        )
+        open_mode_task = _asyncio_for_models.create_task(
+            _auth.open_mode_warning_loop()
+        )
+    except Exception as _ae:
+        logger.error("Failed to initialize API keys store: %s", _ae)
 
     # Open the reports SQLite store (durable, plaintext PHI on disk) and
     # run an immediate retention sweep before serving traffic. Failure
@@ -1289,6 +1369,12 @@ async def lifespan(app: FastAPI):
             await captures_sweep_task
         except (_asyncio_for_models.CancelledError, Exception):
             pass
+    if open_mode_task is not None:
+        open_mode_task.cancel()
+        try:
+            await open_mode_task
+        except (_asyncio_for_models.CancelledError, Exception):
+            pass
 
     _loaded_models.clear()
     # Best-effort NVML shutdown so the service exit doesn't leak driver
@@ -1335,6 +1421,7 @@ async def transcribe(
     language: str = Form(None),
     temperature: float = Form(0.0),
     prompt: str = Form(""),
+    user: dict = Depends(_get_current_user_dep),
 ):
     resolved_model = _resolve_model_name(model_name)
 
@@ -1650,6 +1737,7 @@ async def transcribe(
                                 final=full_text_str,
                                 words=all_words,
                                 segments=seg_diag,
+                                user_id=user.get("user_id"),
                             )
                         else:
                             logger.warning(
@@ -2072,6 +2160,25 @@ async def logs_stream():
     return StreamingResponse(_stream_log_lines(), media_type="text/event-stream")
 
 
+@app.get("/auth/whoami")
+async def whoami(
+    user: dict = Depends(_get_current_user_dep),
+):
+    """Resolve the bearer to a user payload the WebUI uses to render the
+    login modal + user-aware chrome.
+
+    Returns `{open_mode: bool, user_id, username, is_admin}`. A 401 means
+    the bearer is missing/invalid AND the server is in locked-down mode —
+    the WebUI re-prompts."""
+    import api_keys_store as _ak
+    return {
+        "open_mode": not _ak.is_locked_down(),
+        "user_id": user.get("user_id"),
+        "username": user.get("username"),
+        "is_admin": bool(user.get("is_admin")),
+    }
+
+
 @app.get("/sev")
 async def severity_snapshot():
     """Tiny JSON endpoint polled by every page's nav-row pill poller.
@@ -2106,42 +2213,34 @@ except Exception as _e:
 # /config - admin WebUI (opt-in)
 # =============================================================================
 # Off by default: registered only when cfg.ADMIN_UI_ENABLED is True (set in
-# config.py or via WHISPER_ADMIN_UI=1). Loopback-only at the router level;
-# bearer-token check is layered on top when cfg.ADMIN_TOKEN is set. See
-# admin_routes.py for the full security model.
+# config.py or via WHISPER_ADMIN_UI=1). Auth on the endpoints themselves is
+# per-user API keys (require_admin) layered on top of cfg.ADMIN_ALLOWED_HOSTS.
+# In OPEN mode (no admin key in DB) every caller is the synthetic admin so the
+# operator can bootstrap.
 if cfg.ADMIN_UI_ENABLED:
     try:
         from admin_routes import router as _admin_router
         app.include_router(_admin_router)
-        if cfg.ADMIN_TOKEN:
-            logger.info("Admin UI enabled at /config (allowlist + bearer token)")
-        else:
-            logger.warning(
-                "Admin UI enabled at /config (allowlist=%s; ADMIN_TOKEN not "
-                "set, so any caller from the allowlist can edit config)",
-                cfg.ADMIN_ALLOWED_HOSTS,
-            )
-        # /quick-config piggybacks on the admin UI: same allowlist, separate
-        # USER_TOKEN. Exposes only PIPELINE_RULES the admin has flagged
-        # `exposed: true` so end-users can edit map entries / wordlists
-        # without seeing the rest of the admin chrome.
+        # /config/api-keys — admin UI for per-user key management. Same
+        # auth shape (admin host + admin key) as /config.
+        from api_keys_routes import router as _api_keys_router
+        app.include_router(_api_keys_router)
+        logger.info(
+            "Admin UI enabled at /config (allowlist=%s; auth=API key)",
+            cfg.ADMIN_ALLOWED_HOSTS,
+        )
+        # /quick-config piggybacks on the admin UI: same allowlist, same
+        # per-user API key auth.
         from quick_config_routes import router as _quick_router
         app.include_router(_quick_router)
-        if getattr(cfg, "USER_TOKEN", None):
-            logger.info("Quick-config UI enabled at /quick-config "
-                        "(allowlist + USER_TOKEN, ADMIN_TOKEN also accepted)")
-        else:
-            logger.info("Quick-config UI enabled at /quick-config "
-                        "(allowlist=%s; USER_TOKEN not set)",
-                        cfg.ADMIN_ALLOWED_HOSTS)
+        logger.info("Quick-config UI enabled at /quick-config")
         # /reports: admin-only triage page for user-submitted transcription
         # error reports. The submission endpoint /quick-config/reports/api/submit
-        # lives on the same router so it's gated by the same admin-host +
-        # user-or-admin-token combination.
+        # lives on the same router and accepts any active API key.
         from reports_routes import router as _reports_router
         app.include_router(_reports_router)
         logger.info(
-            "Reports UI enabled at /reports (admin token required; "
+            "Reports UI enabled at /reports (admin key required for triage; "
             "user submissions %s)",
             "enabled" if getattr(cfg, "REPORTS_ALLOW_USER_SUBMIT", True)
             else "disabled",

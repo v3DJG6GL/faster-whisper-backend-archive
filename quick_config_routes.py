@@ -12,10 +12,8 @@ Mounted at /quick-config. Endpoints:
 
 Security model:
   1. IP gate:           require_admin_host (loopback always permitted)
-  2. Bearer token:      USER_TOKEN OR ADMIN_TOKEN accepted (TokenWithGrace).
-                        Header preferred; ?token=<...> query string also
-                        accepted because EventSource has no Authorization
-                        header support.
+  2. API key:           Depends(get_current_user) — bearer must resolve to
+                        an active key. Admin = is_admin=True.
   3. Rule allow-list:   POST enforces `exposed == True` AND a per-type
                         field allow-list, regardless of caller role. Defends
                         against `{"locked": false}`-style bypass attempts —
@@ -32,11 +30,10 @@ import asyncio
 import hashlib
 import json
 import logging
-from typing import Any, Literal
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ValidationError
 
 import config as cfg
@@ -44,17 +41,15 @@ import config_store
 import quick_config_state
 import web_common
 from admin_routes import (
-    ADMIN_TOKEN_GUARD,
-    USER_TOKEN_GUARD,
     _apply_hot_changes,
     _canon_rules,
     require_admin_host,
 )
+from auth import get_current_user
 
 logger = logging.getLogger("whisper-api")
 
 router = APIRouter(prefix="/quick-config")
-_bearer = HTTPBearer(auto_error=False)
 
 
 # Per-type allow-list of fields an end-user is allowed to patch on an
@@ -74,40 +69,46 @@ _PATCH_ALLOWED_FIELDS: dict[str, frozenset[str]] = {
 }
 
 
-def require_user_or_admin_token(
+# SSE endpoint compatibility: EventSource has no way to attach an
+# Authorization header, so the /stream endpoint accepts ?key=<raw_key>
+# as a fallback. The query-string path is otherwise unused and logged
+# with a WARNING when hit (a leak vector for keys via URL access logs).
+
+def _resolve_key_from_request(
     request: Request,
-    creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
-) -> Literal["admin", "user"]:
-    """Bearer-gate the /quick-config endpoints. Accepts either USER_TOKEN
-    or ADMIN_TOKEN. If both tokens are unset, the loopback check alone is
-    the gate (returns "admin" for telemetry purposes).
+) -> dict[str, Any] | None:
+    """Try header `Authorization: Bearer <key>` first; fall back to
+    `?key=<raw_key>` for SSE. Returns user record or None."""
+    auth_header = request.headers.get("authorization") or ""
+    if auth_header.lower().startswith("bearer "):
+        raw = auth_header.split(" ", 1)[1].strip()
+        if raw:
+            import api_keys_store
+            return api_keys_store.lookup_by_raw_key(raw)
+    raw = request.query_params.get("key")
+    if raw:
+        import api_keys_store
+        logger.warning(
+            "[quick-config] API key passed via ?key= query param —"
+            " avoid this except for SSE (which has no Authorization header)."
+        )
+        return api_keys_store.lookup_by_raw_key(raw)
+    return None
 
-    Header `Authorization: Bearer <token>` is preferred. Query parameter
-    `?token=<token>` is also accepted because the browser's EventSource
-    API has no way to attach custom headers — the SSE stream endpoint
-    needs a query-string fallback.
 
-    Returns the matched role for logging — NOT for authorization. The patch
-    endpoint enforces `exposed == True` uniformly regardless of role."""
-    admin_set = ADMIN_TOKEN_GUARD.is_set()
-    user_set = USER_TOKEN_GUARD.is_set()
-    if not admin_set and not user_set:
-        # No token configured anywhere → loopback-only access. Treat as admin
-        # for the role label since loopback callers are trusted.
-        return "admin"
-    presented: "str | None" = None
-    if creds is not None and creds.scheme.lower() == "bearer":
-        presented = creds.credentials
-    elif "token" in request.query_params:
-        presented = request.query_params.get("token")
-    if not presented:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "bearer token required")
-    if admin_set and ADMIN_TOKEN_GUARD.matches(presented):
-        return "admin"
-    if user_set and USER_TOKEN_GUARD.matches(presented):
-        return "user"
-    logger.warning("[quick-config] rejected bad bearer token")
-    raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid token")
+def require_user_or_admin_sse(request: Request) -> dict[str, Any]:
+    """SSE-aware variant of get_current_user. Honors ?key= as a fallback."""
+    import api_keys_store
+    if not api_keys_store.is_locked_down():
+        return dict(api_keys_store.OPEN_MODE_USER)
+    rec = _resolve_key_from_request(request)
+    if rec is None:
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED,
+            "invalid or missing API key",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return rec
 
 
 class QuickPatchPayload(BaseModel):
@@ -148,10 +149,10 @@ async def get_quick_config_page() -> HTMLResponse:
 
 @router.get(
     "/state",
-    dependencies=[Depends(require_admin_host), Depends(require_user_or_admin_token)],
+    dependencies=[Depends(require_admin_host)],
 )
 async def get_state(
-    role: str = Depends(require_user_or_admin_token),
+    user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
     """Return ONLY the rules currently flagged exposed=True. The terminal
     rule is filtered out unconditionally (admin UI already hides its expose
@@ -189,11 +190,10 @@ async def get_state(
         reported_ids = []
     return {
         "rules": canonical,
-        "token_required": bool(
-            getattr(cfg, "USER_TOKEN", None) or getattr(cfg, "ADMIN_TOKEN", None)
-        ),
         "service_name": "WhisperAPI",
-        "role": role,
+        "role": "admin" if user.get("is_admin") else "user",
+        "user_id": user.get("user_id"),
+        "username": user.get("username"),
         "reported_request_ids": reported_ids,
         "reports_submit_enabled": bool(
             getattr(cfg, "REPORTS_ALLOW_USER_SUBMIT", True)
@@ -203,12 +203,12 @@ async def get_state(
 
 @router.post(
     "/state",
-    dependencies=[Depends(require_admin_host), Depends(require_user_or_admin_token)],
+    dependencies=[Depends(require_admin_host)],
 )
 async def post_state(
     payload: QuickPatchPayload,
     request: Request,
-    role: str = Depends(require_user_or_admin_token),
+    user: dict[str, Any] = Depends(get_current_user),
 ) -> JSONResponse:
     """Apply a per-rule patch. Rejects:
        - patches against rules that aren't currently exposed
@@ -314,8 +314,6 @@ async def post_state(
     # an error may name a rule the user didn't touch — the client surfaces
     # this gracefully ("admin's pipeline has an error").
     try:
-        prev_admin_token = getattr(cfg, "ADMIN_TOKEN", None)
-        prev_user_token = getattr(cfg, "USER_TOKEN", None)
         written = config_store.save_overrides({"PIPELINE_RULES": current_rules})
     except ValidationError as e:
         return JSONResponse(
@@ -329,16 +327,13 @@ async def post_state(
             f"could not write config.local.json: {e}",
         )
 
-    applied = await _apply_hot_changes(
-        written,
-        prev_admin_token=prev_admin_token,
-        prev_user_token=prev_user_token,
-    )
+    applied = await _apply_hot_changes(written)
 
     client_host = request.client.host if request.client else "?"
     logger.info(
-        "[quick-config] update from=%s role=%s saved=%s conflicts=%s",
-        client_host, role, saved, [c["slug"] for c in conflicts],
+        "[quick-config] update from=%s user=%s admin=%s saved=%s conflicts=%s",
+        client_host, user.get("username"), user.get("is_admin"),
+        saved, [c["slug"] for c in conflicts],
     )
 
     return JSONResponse({
@@ -358,7 +353,7 @@ async def post_state(
 
 @router.get(
     "/recent",
-    dependencies=[Depends(require_admin_host), Depends(require_user_or_admin_token)],
+    dependencies=[Depends(require_admin_host), Depends(get_current_user)],
 )
 async def get_recent() -> dict[str, Any]:
     """Snapshot of the recent-traces buffer. The /stream endpoint replays
@@ -370,7 +365,7 @@ async def get_recent() -> dict[str, Any]:
 
 @router.get(
     "/stream",
-    dependencies=[Depends(require_admin_host), Depends(require_user_or_admin_token)],
+    dependencies=[Depends(require_admin_host), Depends(require_user_or_admin_sse)],
 )
 async def stream_recent(request: Request) -> StreamingResponse:
     """Server-sent events stream of recent transcriptions.
@@ -403,13 +398,18 @@ async def stream_recent(request: Request) -> StreamingResponse:
 
 @router.post(
     "/recent/clear",
-    dependencies=[Depends(require_admin_host), Depends(require_user_or_admin_token)],
+    dependencies=[Depends(require_admin_host)],
 )
-async def clear_recent(role: str = Depends(require_user_or_admin_token)) -> JSONResponse:
+async def clear_recent(
+    user: dict[str, Any] = Depends(get_current_user),
+) -> JSONResponse:
     """Manual kill-switch for the recent-traces buffer. Broadcasts a
     `clear` event so all open /quick-config tabs flush their UI."""
     quick_config_state.clear()
-    logger.info("[quick-config] recent-traces buffer cleared by role=%s", role)
+    logger.info(
+        "[quick-config] recent-traces buffer cleared by user=%s",
+        user.get("username"),
+    )
     return JSONResponse({"ok": True})
 
 
@@ -638,11 +638,13 @@ _QUICK_CONFIG_HTML = r"""<!doctype html>
 
 <div id="token-modal">
   <div class="box">
-    <h3>Bearer token</h3>
+    <h3>API key</h3>
     <p style="color:var(--dim);font-size:var(--fs-sm);margin:0 0 0.5rem 0;">
-      Your admin gave you a USER_TOKEN to access this page.
+      Paste your <code>wk_…</code> API key. Your admin issues one per user in
+      <code>/config/api-keys</code>.
     </p>
-    <input id="token-input" type="password" autocomplete="off" spellcheck="false">
+    <input id="token-input" type="password" autocomplete="off" spellcheck="false"
+           placeholder="wk_…">
     <div class="actions">
       <button id="token-cancel">cancel</button>
       <button id="token-ok" class="primary">ok</button>
@@ -656,7 +658,7 @@ _QUICK_CONFIG_HTML = r"""<!doctype html>
 (() => {
 'use strict';
 
-const TOKEN_KEY = 'whisper_user_token';
+const TOKEN_KEY = 'whisper_api_key';
 let initialRules = [];      // last-loaded rules from server (deep-copy snapshot)
 let liveRules = [];         // editable rules — diffed against initialRules to build patch
 let dirty = new Set();      // slugs with changes
@@ -1313,10 +1315,10 @@ function rebuildDatalist() {
 function startStream() {
   if (_es) { try { _es.close(); } catch (_) {} _es = null; }
   // EventSource has no Authorization-header support; the server's auth
-  // dep accepts ?token=<...> as a fallback specifically for SSE.
+  // dep accepts ?key=<...> as a fallback specifically for SSE.
   const tok = getToken();
   const url = '/quick-config/stream'
-    + (tok ? '?token=' + encodeURIComponent(tok) : '');
+    + (tok ? '?key=' + encodeURIComponent(tok) : '');
   _es = new EventSource(url);
   _es.addEventListener('trace', (e) => {
     try { pushTrace(JSON.parse(e.data)); } catch (_) {}
@@ -1471,7 +1473,7 @@ async function load() {
   initialRules = j.rules || [];
   liveRules = JSON.parse(JSON.stringify(initialRules));
   dirty = new Set();
-  // role: "admin" reveals .admin-only nav links + sev pills. USER_TOKEN
+  // role: "admin" reveals .admin-only nav links + sev pills. Non-admin keys
   // sessions never get the class so admin chrome stays hidden.
   if (j.role === 'admin') document.body.classList.add('role-admin');
   else document.body.classList.remove('role-admin');
