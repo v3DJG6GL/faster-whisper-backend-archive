@@ -258,6 +258,13 @@ def create_capture(
     # transcription response.
     os.makedirs(os.path.dirname(abs_path), exist_ok=True)
     tmp_path = abs_path + ".tmp"
+    # Loud diagnostic: paste in the service log when a user reports
+    # captures not transcoding. Tells us whether create_capture is
+    # even running and what code path it takes.
+    logger.info(
+        "[captures] transcode start id=%s src=%s -> %s",
+        cid[:8], os.path.basename(audio_src_path), os.path.basename(abs_path),
+    )
     try:
         wav_bytes = audio_transcode.transcode_to_wav_16k_mono(
             audio_src_path, tmp_path,
