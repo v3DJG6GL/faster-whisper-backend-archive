@@ -234,7 +234,7 @@ async def get_capture_api(cid: str) -> JSONResponse:
     row = captures_store.get_capture(cid)
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "capture not found")
-    row["words"] = _per_word_postprocess(
+    row["words"] = _align_words_to_final(
         row.get("words") or [],
         row.get("final") or "",
         model_name=row.get("model"),
@@ -690,27 +690,39 @@ def _enrich_group(g: dict[str, Any]) -> dict[str, Any]:
     return g
 
 
-def _per_word_postprocess(
+def _align_key(s: str) -> str:
+    """Normalise a token for LCS comparison: strip surrounding
+    whitespace + casefold. Internal punctuation is preserved so
+    'Hello,' and 'Hello' don't cross-match — the rule rewrote the
+    word with the comma for a reason and we want it surfaced as a
+    `raw_word` diff."""
+    return (s or "").strip().casefold()
+
+
+def _align_words_to_final(
     words: list[dict[str, Any]],
     final: str,
     model_name: "str | None" = None,
 ) -> list[dict[str, Any]]:
-    """Project pipeline rules onto each word's text individually,
-    producing a "what the user actually sees in final" view aligned
-    to the raw word timestamps.
+    """Project raw STT words onto post-pipeline `final` via LCS
+    alignment. Replaces the all-or-nothing fallback that came before
+    — most rule output IS faithfully attributable per word even when
+    a cross-word rule (dedup, "Neue Zeile → \\n", etc.) also fires.
 
-    Strategy: run `_postprocess_text(w.word)` per word (cheap regex
-    subs + map lookups). If the per-word result joined back to a
-    string matches `final` after whitespace normalisation, we have a
-    faithful word-by-word post-pipeline view and return it. If it
-    diverges (cross-word rules like dedup / lowercase-wordlist /
-    regex-against-whole-string), fall back to raw — better to show
-    raw words than a misaligned view drifting from `final`.
+    Output items (one per raw word) carry:
+      - `word`: the matched final token (display text for the
+        karaoke band + the chip's `wrong` reference)
+      - `raw_word`: present when display != raw — powers the dotted
+        underline + `title="raw: …"` tooltip
+      - `removed`: True when LCS found no match for this raw token,
+        i.e. a cross-word rule deleted it from `final`. The UI fades
+        + strikes-through these slots; chip creation is suppressed.
 
-    Output items match the words_json shape with an optional
-    `raw_word` field set ONLY when the post-pipeline word differs
-    from raw — that's the trigger for the UI's tooltip + dotted
-    underline."""
+    Insertions (final tokens with no raw correspondent) are NOT
+    materialised — there's no audio timestamp to anchor them to.
+    They're still in `final` for export; the band's job is to
+    faithfully represent timestamped audio, not to invent positions.
+    """
     src = list(words or [])
     if not src:
         return []
@@ -719,29 +731,52 @@ def _per_word_postprocess(
     except Exception:
         return [_clone_word(w) for w in src]
 
-    out: list[dict[str, Any]] = []
-    any_changed = False
+    raw_keys: list[str] = []
     for w in src:
         raw_w = w.get("word") or ""
         try:
             post_w = main._postprocess_text(raw_w, model_name=model_name)
         except Exception:
             post_w = raw_w
+        raw_keys.append(_align_key(post_w) or _align_key(raw_w))
+
+    fin_tokens = (final or "").split()
+    fin_keys = [_align_key(t) for t in fin_tokens]
+
+    n, m = len(raw_keys), len(fin_keys)
+    matches: list[int] = [-1] * n
+    if n and m:
+        dp = [[0] * (m + 1) for _ in range(n + 1)]
+        for i in range(n - 1, -1, -1):
+            for j in range(m - 1, -1, -1):
+                if raw_keys[i] and raw_keys[i] == fin_keys[j]:
+                    dp[i][j] = dp[i + 1][j + 1] + 1
+                else:
+                    dp[i][j] = max(dp[i + 1][j], dp[i][j + 1])
+        i = j = 0
+        while i < n and j < m:
+            if raw_keys[i] and raw_keys[i] == fin_keys[j]:
+                matches[i] = j
+                i += 1
+                j += 1
+            elif dp[i + 1][j] >= dp[i][j + 1]:
+                i += 1
+            else:
+                j += 1
+
+    out: list[dict[str, Any]] = []
+    for i, w in enumerate(src):
         item = _clone_word(w)
-        item["word"] = post_w
-        if (post_w or "").strip() != (raw_w or "").strip():
+        raw_w = w.get("word") or ""
+        if matches[i] >= 0:
+            item["word"] = fin_tokens[matches[i]]
+            if item["word"].strip() != raw_w.strip():
+                item["raw_word"] = raw_w
+        else:
+            item["word"] = raw_w
             item["raw_word"] = raw_w
-            any_changed = True
+            item["removed"] = True
         out.append(item)
-
-    if not any_changed:
-        return [_clone_word(w) for w in src]
-
-    def _norm(s: str) -> str:
-        return " ".join((s or "").split()).strip()
-    joined = " ".join((it.get("word") or "") for it in out)
-    if _norm(joined) != _norm(final or ""):
-        return [_clone_word(w) for w in src]
     return out
 
 
@@ -780,7 +815,7 @@ def _build_merged_words(
     for i, m in enumerate(members):
         offset = cum + i * silence_s
         cap = captures_store.get_capture(m["id"]) or {}
-        ws = _per_word_postprocess(
+        ws = _align_words_to_final(
             cap.get("words") or [],
             cap.get("final") or "",
             model_name=cap.get("model"),
@@ -800,6 +835,8 @@ def _build_merged_words(
             }
             if w.get("raw_word"):
                 entry["raw_word"] = w["raw_word"]
+            if w.get("removed"):
+                entry["removed"] = True
             merged.append(entry)
         cum += float(m.get("duration_seconds") or 0.0)
     return merged
@@ -1299,6 +1336,16 @@ _CAPTURES_HTML = r"""<!doctype html>
   .word-strip .word.post-edited {
     border-bottom: 1px dotted var(--cyan);
   }
+  /* Pipeline rule deleted this raw token from `final`. Faded +
+     struck-through so the user sees what the rule cut, but the
+     span stays clickable so audio seek still works at this
+     timestamp. */
+  .word-strip .word.rule-removed {
+    color: var(--dim);
+    text-decoration: line-through;
+    opacity: 0.55;
+  }
+  .word-strip .word.rule-removed:hover { opacity: 0.85; }
   /* Inline green replacement next to a struck-through word. Same
      palette as /reports' .diff-ins so the track-changes look reads
      consistently across pages. Lives as a sibling span after the
@@ -2144,7 +2191,10 @@ _CAPTURES_HTML = r"""<!doctype html>
       sp.dataset.start = String(w.start || 0);
       sp.dataset.end = String(w.end || 0);
       sp.textContent = (w.word || '').replace(/^\s+/, ' ');
-      if (w.raw_word) {
+      if (w.removed) {
+        sp.classList.add('rule-removed');
+        sp.title = 'removed by pipeline rule';
+      } else if (w.raw_word) {
         sp.title = 'raw: ' + w.raw_word;
         sp.classList.add('post-edited');
       }
@@ -2380,6 +2430,16 @@ _CAPTURES_HTML = r"""<!doctype html>
   }
 
   function onWordClick(state, idx, shiftKey) {
+    var clicked = state.words[idx];
+    if (clicked && clicked.removed) {
+      // Rule deleted this token from `final` — a chip would have no
+      // anchor in the exported text. Click still seeks audio.
+      if (state.audio) {
+        try { state.audio.currentTime = parseFloat(clicked.start) || 0; }
+        catch (_) {}
+      }
+      return;
+    }
     var last = state.corrections[state.corrections.length - 1];
     if (shiftKey && last && typeof last.idx === 'number') {
       extendLastChip(state, idx);
@@ -3190,7 +3250,10 @@ _CAPTURES_HTML = r"""<!doctype html>
             }
             prevMember = w.member_idx;
             sp.textContent = (w.word || '').replace(/^\s+/, ' ');
-            if (w.raw_word) {
+            if (w.removed) {
+              sp.classList.add('rule-removed');
+              sp.title = 'removed by pipeline rule';
+            } else if (w.raw_word) {
               sp.title = 'raw: ' + w.raw_word;
               sp.classList.add('post-edited');
             }
