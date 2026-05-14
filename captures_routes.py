@@ -1384,6 +1384,7 @@ _CAPTURES_HTML = r"""<!doctype html>
 
 {{SCALE_PICKER_JS}}
 {{SEV_POLLER_JS}}
+{{TIME_HELPERS_JS}}
 <script>
 (function() {
   'use strict';
@@ -1598,19 +1599,7 @@ _CAPTURES_HTML = r"""<!doctype html>
     });
   }
 
-  function relTime(ts) {
-    if (!ts) return '—';
-    var sec = Math.max(0, (Date.now() / 1000) - ts);
-    if (sec < 5) return 'just now';
-    if (sec < 60) return Math.floor(sec) + 's ago';
-    if (sec < 3600) return Math.floor(sec / 60) + ' min ago';
-    if (sec < 86400) return Math.floor(sec / 3600) + ' h ago';
-    return new Date(ts * 1000).toLocaleString();
-  }
-  function fmtDate(ts) {
-    if (!ts) return '';
-    return new Date(ts * 1000).toLocaleString();
-  }
+  // absTime / relTime / fmtWhen / timeTick are injected via TIME_HELPERS_JS.
   function escapeHtml(s) {
     var d = document.createElement('div');
     d.textContent = s == null ? '' : String(s);
@@ -1688,8 +1677,9 @@ _CAPTURES_HTML = r"""<!doctype html>
     head.appendChild(cb);
     head.insertAdjacentHTML('beforeend',
       '<span class="expand-arrow">›</span>' +
-      '<span class="when" title="' + escapeHtml(fmtDate(r.created_ts)) + '">' +
-        escapeHtml(relTime(r.created_ts)) + '</span>' +
+      '<span class="when" data-ts="' + (r.created_ts || 0) + '" title="' +
+        escapeHtml(absTime(r.created_ts)) + '">' +
+        escapeHtml(fmtWhen(r.created_ts)) + '</span>' +
       '<span class="pill status-' + escapeHtml(r.status || 'new') + '">' +
         escapeHtml(r.status || 'new') + '</span>' +
       (r.model ? '<span class="pill">' + escapeHtml(r.model) + '</span>' : '') +
@@ -2462,7 +2452,9 @@ _CAPTURES_HTML = r"""<!doctype html>
     head.className = 'cc-head';
     head.innerHTML =
       '<span class="expand-arrow">›</span>' +
-      '<span class="when">' + escapeHtml(relTime(g.created_ts)) + '</span>' +
+      '<span class="when" data-ts="' + (g.created_ts || 0) + '" title="' +
+        escapeHtml(absTime(g.created_ts)) + '">' +
+        escapeHtml(fmtWhen(g.created_ts)) + '</span>' +
       '<span class="pill group-pill">group</span>' +
       '<span class="pill" title="speaker">' +
         escapeHtml((g.user_id || '?').slice(0, 6)) + '</span>' +
@@ -2670,6 +2662,7 @@ _CAPTURES_HTML = r"""<!doctype html>
   });
 
   load();
+  timeTick();
 })();
 </script>
 </body>

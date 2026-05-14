@@ -345,6 +345,64 @@ OPEN_MODE_BANNER_JS = r"""
 """
 
 
+# Shared timestamp helpers — one source of truth across every admin page.
+# Pages opt in by inserting `{{TIME_HELPERS_JS}}` at the top of their inline
+# <script> block; render_page substitutes the constant below.
+#
+# Format contract: HH:MM:SS | YYYY.MM.DD — 24-hour clock, dot-separated date,
+# space-pipe-space separator. fmtWhen appends a relative suffix (e.g.
+# " · 5m ago") while the event is within 24 h, then drops it.
+#
+# `timeTick(rootSelector, intervalMs=30000)` walks every element matching
+# rootSelector (defaults to `[data-ts]`) and re-renders its textContent from
+# fmtWhen(parseFloat(el.dataset.ts)). Cheap; pages that want their cards'
+# relative suffixes to age in place can call timeTick() once at boot.
+TIME_HELPERS_JS = r"""
+<script>
+function _pad2(n) { return (n < 10 ? '0' : '') + n; }
+
+function absTime(ts) {
+  if (!ts) return '—';
+  var d = new Date(ts * 1000);
+  return _pad2(d.getHours()) + ':' + _pad2(d.getMinutes()) + ':' + _pad2(d.getSeconds())
+    + ' | ' + d.getFullYear() + '.' + _pad2(d.getMonth() + 1) + '.' + _pad2(d.getDate());
+}
+
+function relTime(ts) {
+  if (!ts) return '';
+  var sec = Math.max(0, Date.now() / 1000 - ts);
+  if (sec < 5)     return 'just now';
+  if (sec < 60)    return Math.floor(sec) + 's ago';
+  if (sec < 3600)  return Math.floor(sec / 60) + 'm ago';
+  if (sec < 86400) return Math.floor(sec / 3600) + 'h ago';
+  return '';
+}
+
+function fmtWhen(ts) {
+  if (!ts) return '—';
+  var a = absTime(ts), r = relTime(ts);
+  return r ? (a + ' · ' + r) : a;
+}
+
+function timeTick(sel, ms) {
+  sel = sel || '[data-ts]';
+  ms = ms || 30000;
+  function paint() {
+    document.querySelectorAll(sel).forEach(function(el) {
+      var ts = parseFloat(el.dataset.ts);
+      if (!isFinite(ts) || ts <= 0) return;
+      var next = fmtWhen(ts);
+      if (el.textContent !== next) el.textContent = next;
+      if (!el.title) el.title = absTime(ts);
+    });
+  }
+  paint();
+  setInterval(paint, ms);
+}
+</script>
+"""
+
+
 SEV_POLLER_JS = """
 <script>(function(){
   if(!document.getElementById('sev-warn'))return;
@@ -671,6 +729,7 @@ def render_page(template: str, current: str) -> str:
       - {{SEV_POLLER_JS}}        → 5-s pill re-sync (end of body)
       - {{SCALE_BOOTSTRAP_HEAD}} → tiny pre-paint script (top of <head>)
       - {{RULE_EDITOR_JS}}       → shared per-rule body editors
+      - {{TIME_HELPERS_JS}}      → absTime / relTime / fmtWhen / timeTick
 
     Pages that don't include a given placeholder are returned unchanged."""
     return (
@@ -682,4 +741,5 @@ def render_page(template: str, current: str) -> str:
         .replace("{{SEV_POLLER_JS}}", SEV_POLLER_JS + OPEN_MODE_BANNER_JS)
         .replace("{{SCALE_BOOTSTRAP_HEAD}}", SCALE_BOOTSTRAP_HEAD)
         .replace("{{RULE_EDITOR_JS}}", RULE_EDITOR_JS)
+        .replace("{{TIME_HELPERS_JS}}", TIME_HELPERS_JS)
     )

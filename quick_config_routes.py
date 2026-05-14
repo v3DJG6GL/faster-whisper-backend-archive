@@ -836,13 +836,7 @@ function escapeHtml(s) {
   div.textContent = s == null ? '' : String(s);
   return div.innerHTML;
 }
-function relTime(ts) {
-  const sec = Math.max(0, (Date.now() / 1000) - ts);
-  if (sec < 5) return 'just now';
-  if (sec < 60) return Math.floor(sec) + 's ago';
-  if (sec < 3600) return Math.floor(sec / 60) + ' min ago';
-  return Math.floor(sec / 3600) + ' h ago';
-}
+// absTime / relTime / fmtWhen / timeTick are injected via TIME_HELPERS_JS.
 
 function renderTrace(entry) {
   const item = document.createElement('div');
@@ -855,7 +849,9 @@ function renderTrace(entry) {
   meta.className = 'trace-meta';
   const ts = document.createElement('span');
   ts.className = 'trace-ts';
-  ts.textContent = relTime(entry.ts || 0);
+  ts.dataset.ts = entry.ts || 0;
+  ts.textContent = absTime(entry.ts || 0);
+  ts.title = fmtWhen(entry.ts || 0);
   meta.appendChild(ts);
   if (entry.model) {
     const mdl = document.createElement('span');
@@ -1631,6 +1627,7 @@ load().then(() => {
 
 {{SCALE_PICKER_JS}}
 {{SEV_POLLER_JS}}
+{{TIME_HELPERS_JS}}
 
 </body>
 </html>

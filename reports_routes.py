@@ -599,6 +599,7 @@ _REPORTS_HTML = """<!doctype html>
 
 {{SCALE_PICKER_JS}}
 {{SEV_POLLER_JS}}
+{{TIME_HELPERS_JS}}
 <script>
 (function() {
   'use strict';
@@ -821,21 +822,7 @@ _REPORTS_HTML = """<!doctype html>
   var _allReports = [];
   var _counts = { open: 0, resolved: 0, dismissed: 0 };
 
-  function relTime(ts) {
-    if (!ts) return '—';
-    var sec = Math.max(0, (Date.now() / 1000) - ts);
-    if (sec < 5) return 'just now';
-    if (sec < 60) return Math.floor(sec) + 's ago';
-    if (sec < 3600) return Math.floor(sec / 60) + ' min ago';
-    if (sec < 86400) return Math.floor(sec / 3600) + ' h ago';
-    return new Date(ts * 1000).toLocaleString();
-  }
-
-  function fmtDate(ts) {
-    if (!ts) return '';
-    return new Date(ts * 1000).toLocaleString();
-  }
-
+  // absTime / relTime / fmtWhen / timeTick are injected via TIME_HELPERS_JS.
   function escapeHtml(s) {
     var d = document.createElement('div');
     d.textContent = s == null ? '' : String(s);
@@ -897,8 +884,9 @@ _REPORTS_HTML = """<!doctype html>
     var head = document.createElement('div');
     head.className = 'rc-head';
     head.innerHTML =
-      '<span class="when" title="' + escapeHtml(fmtDate(r.created_ts)) + '">' +
-        escapeHtml(relTime(r.created_ts)) + '</span>' +
+      '<span class="when" data-ts="' + (r.created_ts || 0) + '" title="' +
+        escapeHtml(absTime(r.created_ts)) + '">' +
+        escapeHtml(fmtWhen(r.created_ts)) + '</span>' +
       '<span class="pill role-' + escapeHtml(r.reporter_role || 'user') + '">' +
         escapeHtml(r.reporter_role || 'user') + '</span>' +
       (r.model ? '<span class="pill">' + escapeHtml(r.model) + '</span>' : '') +
@@ -1224,6 +1212,7 @@ _REPORTS_HTML = """<!doctype html>
 
   // First load. If unauthorized, prompt for the token then retry.
   load();
+  timeTick();
 })();
 </script>
 </body>

@@ -54,7 +54,7 @@ _file_handler = logging.handlers.RotatingFileHandler(
 )
 _file_handler.setFormatter(_StripAnsiFormatter(
     "%(asctime)s %(levelname)s %(name)s %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
+    datefmt="%H:%M:%S | %Y.%m.%d",
 ))
 _root.addHandler(_file_handler)
 

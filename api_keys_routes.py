@@ -364,6 +364,7 @@ _API_KEYS_HTML = r"""<!doctype html>
 
 {{SCALE_PICKER_JS}}
 {{SEV_POLLER_JS}}
+{{TIME_HELPERS_JS}}
 <script>
 (function() {
   'use strict';
@@ -454,11 +455,8 @@ _API_KEYS_HTML = r"""<!doctype html>
     setTimeout(function(){ el.style.display = 'none'; }, 3000);
   }
 
-  function fmtTs(ts) {
-    if (!ts) return '—';
-    var d = new Date(ts * 1000);
-    return d.toISOString().replace('T', ' ').slice(0, 19) + 'Z';
-  }
+  // fmtTs alias: keys table uses absTime only (narrow column, no relative).
+  function fmtTs(ts) { return absTime(ts); }
 
   function showTokenModal() {
     return new Promise(function(resolve){
