@@ -214,7 +214,6 @@ def count() -> int:
 def create_capture(
     *,
     audio_src_path: str,
-    audio_format: str,
     request_id: str | None,
     model: str,
     language: str | None,
@@ -224,54 +223,26 @@ def create_capture(
     words: list[dict[str, Any]],
     segments: list[dict[str, Any]],
 ) -> str:
-    """Two-phase write: transcode the source audio into a 16 kHz mono
-    WAV at the final relpath, then insert the SQLite row. On row-insert
-    failure we unlink the audio file (best-effort) to avoid orphaning
-    a multi-MB blob. Returns the capture id.
+    """Transcode source audio into a 16 kHz mono WAV at the row's
+    audio_relpath, then insert the SQLite row. On row-insert failure
+    we unlink the audio file so we never orphan a multi-MB blob.
 
-    Why transcode (vs. raw copy): the dictation clients upload m4a /
-    webm / whatever, and Firefox on Linux can't play AAC in MP4 without
-    a system codec (which the deployment doesn't ship). Storing every
-    file as RIFF/WAVE 16 kHz mono gives:
-      - universal browser playback (no system codec needed)
-      - Whisper's native input rate, so fine-tuning loses no quality
-      - HF datasets.Audio() auto-loads it without further resampling
-
-    The `audio_format` parameter is preserved for backwards
-    compatibility but ignored: every internal file is always `.wav`.
-
-    `audio_src_path` is typically the transcribe handler's tmp file —
-    we don't mutate or unlink the source."""
+    Every internal file is RIFF/WAVE — universal browser playback
+    (Firefox on Linux ships no AAC decoder, so we can't store .m4a)
+    and Whisper's native input rate, so fine-tuning loses no quality."""
     import audio_transcode
 
     cid = uuid.uuid4().hex
-    # Force `.wav` on disk regardless of what the caller passed. The
-    # caller may still pass `audio_format` as a hint (e.g. for logs);
-    # we keep the parameter for compat but pin the relpath here.
-    _unused_caller_format = audio_format
     relpath = _relpath_for(cid, "wav")
     abs_path = abs_audio_path(relpath)
 
-    # Phase 1: transcode source → tmp file, then atomic rename to final.
-    # On any transcode failure we leave nothing on disk and propagate
-    # so main.py can log + skip the capture without breaking the
-    # transcription response.
     os.makedirs(os.path.dirname(abs_path), exist_ok=True)
     tmp_path = abs_path + ".tmp"
-    # Loud diagnostic: paste in the service log when a user reports
-    # captures not transcoding. Tells us whether create_capture is
-    # even running and what code path it takes.
-    logger.info(
-        "[captures] transcode start id=%s src=%s -> %s",
-        cid[:8], os.path.basename(audio_src_path), os.path.basename(abs_path),
-    )
     try:
         wav_bytes = audio_transcode.transcode_to_wav_16k_mono(
             audio_src_path, tmp_path,
         )
     except Exception as e:
-        # transcode_to_wav_16k_mono already best-effort unlinks the
-        # tmp on its own failures; this is a belt-and-braces cleanup.
         try:
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
@@ -299,11 +270,10 @@ def create_capture(
         _safe_unlink(tmp_path)
         raise last_err
 
-    # Phase 2: insert row. On failure, drop the audio file.
+    # Insert row. On failure, drop the audio file so we don't orphan it.
     now = time.time()
     raw_t = (raw or "")[:_CAP_RAW]
     final_t = (final or "")[:_CAP_FINAL]
-    ext_t = "wav"  # every internal file is RIFF/WAVE after this change
     words_t = _truncate_json(words or [], _CAP_WORDS_JSON)
     segments_t = _truncate_json(segments or [], _CAP_SEGMENTS_JSON)
 
@@ -320,7 +290,7 @@ def create_capture(
                 ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     cid, now, request_id, model or "", language or "",
-                    float(duration_seconds or 0.0), relpath, ext_t,
+                    float(duration_seconds or 0.0), relpath, "wav",
                     raw_t, final_t, words_t, segments_t,
                     "", "[]", "",
                     "new", None,

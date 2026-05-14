@@ -1640,12 +1640,8 @@ async def transcribe(
                         except OSError:
                             _free = 1 << 40  # large enough to proceed
                         if _free > 1_000_000_000:
-                            # Every internal capture file is RIFF/WAVE
-                            # (16 kHz mono) after the transcode step —
-                            # the original upload's extension is irrelevant.
                             captured_id = _cap_store.create_capture(
                                 audio_src_path=tmp_path,
-                                audio_format="wav",
                                 request_id=request_id,
                                 model=resolved_model,
                                 language=info.language,

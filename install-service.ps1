@@ -217,6 +217,27 @@ if ($svc) {
     }
 }
 
+# Kill orphan python.exe processes rooted in this repo. WinSW's 30 s stop
+# timeout often elapses during the ~minute-long model preload, then
+# sc.exe delete removes the service entry without actually terminating
+# python.exe. The orphan keeps port 8000 + the log file open, so the
+# fresh install runs alongside it — old code keeps serving while the new
+# process never wins the port. Without this cleanup the deploy is
+# silently broken: code on disk says version N, behavior says N-1.
+$orphans = Get-Process -ErrorAction SilentlyContinue |
+    Where-Object {
+        try { $_.Path -and $_.Path.StartsWith($RepoDir, [StringComparison]::OrdinalIgnoreCase) }
+        catch { $false }
+    }
+if ($orphans) {
+    Write-Host "Killing $($orphans.Count) orphan python.exe process(es) from $RepoDir..." -ForegroundColor Yellow
+    $orphans | Stop-Process -Force -ErrorAction SilentlyContinue
+    # Brief settle so the OS releases the port + log-file handle before
+    # the new service starts. 2 s is overkill on a normal machine but
+    # cheap insurance against a slow handle-close.
+    Start-Sleep -Seconds 2
+}
+
 # One-time cleanup: drop the legacy NSSM binary if it's still in the repo dir.
 if (Test-Path $LegacyNssm) {
     Write-Host "Removing legacy nssm.exe (no longer used)..."

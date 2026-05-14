@@ -1043,21 +1043,9 @@ _CAPTURES_HTML = r"""<!doctype html>
     body.appendChild(audio);
     state.audio = audio;
 
-    // Surface decode errors instead of silently leaving the player on
-    // 0:00 / 0:00. Common causes: bytes on disk corrupt; format not in
-    // the browser's codec set (rare with WAV / MP3 / WebM / Opus /
-    // AAC-MP4 — all major browsers play those).
-    audio.addEventListener('error', function() {
-      var err = audio.error;
-      var codes = ['', 'ABORTED', 'NETWORK', 'DECODE', 'SRC_NOT_SUPPORTED'];
-      var code = err ? (codes[err.code] || ('code ' + err.code)) : '?';
-      toast('Audio decode error: ' + code + ' (audio bytes may be corrupt '
-            + 'or the format is not browser-playable)', true);
-    });
-
-    // Authenticated audio fetch → blob URL. The server sets Content-Type
-    // via magic-byte sniff, which `resp.blob()` propagates onto the
-    // Blob's `type` property — the browser then uses that for decoding.
+    // Authenticated audio fetch → blob URL. The server always serves
+    // RIFF/WAVE 16 kHz mono (every capture is transcoded on write), so
+    // browser decode is reliable across Linux/Windows/macOS.
     var tok = getToken();
     fetch('/captures/api/' + encodeURIComponent(r.id) + '/audio', {
       headers: tok ? { 'Authorization': 'Bearer ' + tok } : {},
@@ -1068,13 +1056,8 @@ _CAPTURES_HTML = r"""<!doctype html>
       }
       if (resp.status === 410) throw new Error('audio file is gone');
       if (!resp.ok) throw new Error('HTTP ' + resp.status);
-      state.audioMime = resp.headers.get('Content-Type') || '';
       return resp.blob();
     }).then(function(blob) {
-      if (!blob || blob.size === 0) {
-        throw new Error('audio file is empty (0 bytes on disk)');
-      }
-      state.audioBytes = blob.size;
       state.blobUrl = URL.createObjectURL(blob);
       audio.src = state.blobUrl;
     }).catch(function(e) {
