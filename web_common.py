@@ -258,6 +258,19 @@ header .scale-picker {
    before resorting to wrap. Container size queries are evaluated in
    rem against the actual rendered header width, so they respect the
    --fs-base scale token (unlike @media). */
+/* Shared header layout — every page renders the same flex row with
+   title · nav · pills · spacer · scale-picker · page-specific buttons.
+   Page-local CSS used to redeclare these; consolidated here so a single
+   change keeps every admin page consistent. */
+header { position: sticky; top: 0; background: var(--panel);
+  border-bottom: 1px solid var(--border); z-index: 10; padding: 0; }
+header > .header-inner { display: flex; gap: 0.75rem; align-items: center;
+  max-width: 1100px; margin: 0 auto; width: 100%;
+  padding: 0.5rem 0.875rem; box-sizing: border-box; }
+header .title { font-weight: 600; color: var(--bold);
+  white-space: nowrap; flex-shrink: 0; }
+header .spacer { flex: 1; }
+
 header { container-type: inline-size; container-name: hdr; }
 header > .header-inner { flex-wrap: wrap; row-gap: 0.4rem; }
 /* Spacer collapses to zero on a wrapped row; on a single row it still

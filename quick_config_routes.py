@@ -429,13 +429,7 @@ _QUICK_CONFIG_HTML = r"""<!doctype html>
   html, body { background: var(--bg); color: var(--fg);
     font-family: var(--font-sans); font-size: var(--fs-base); margin: 0; }
   a { color: var(--cyan); }
-  header { position: sticky; top: 0; background: var(--bg); z-index: 5;
-    border-bottom: 1px solid var(--border); padding: 0.5rem 1rem;
-    display: block; }
-  header > .header-inner { display: flex; align-items: center;
-    gap: 0.625rem; flex-wrap: wrap; }
-  header .title { font-size: var(--fs-lg); font-weight: 600; color: var(--bold); }
-  header .spacer { flex: 1; }
+  /* header / .header-inner / .title layout now centralized in NAV_CSS. */
   header button { background: var(--panel); border: 1px solid var(--border);
     color: var(--fg); padding: 0.25rem 0.625rem; border-radius: 4px;
     cursor: pointer; font: inherit; font-size: var(--fs-sm);

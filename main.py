@@ -1736,13 +1736,7 @@ _LOG_VIEWER_HTML = """<!doctype html>
     font: 1rem/1.5 var(--font-sans);
     margin: 0; padding: 0; min-height: 100%; }
   input, textarea, select, kbd, code, pre { font-family: var(--font-mono); }
-  header { position: sticky; top: 0; background: #161b22; border-bottom: 1px solid #30363d;
-    z-index: 10; padding: 0; }
-  header > .header-inner { display: flex; gap: 0.75rem; align-items: center;
-    max-width: 1100px; margin: 0 auto; width: 100%; padding: 0.5rem 0.875rem;
-    box-sizing: border-box; }
-  header .title { font-weight: 600; color: var(--bold);
-    white-space: nowrap; flex-shrink: 0; }
+  /* header / .header-inner / .title layout now centralized in NAV_CSS. */
   header .pill { padding: 0.125rem 0.5rem; border-radius: 4px; background: #21262d; color: var(--dim);
     font-size: var(--fs-xs); white-space: nowrap; flex-shrink: 0; }
   header .pill.live { color: var(--green); border: 1px solid #1f4d2a; }
