@@ -185,6 +185,34 @@ async def by_request_id_api(request_id: str) -> JSONResponse:
     return JSONResponse({"captures": captures_store.find_by_request_id(request_id)})
 
 
+# Literal-path routes (export, clear) MUST be declared BEFORE the
+# parameterized /captures/api/{cid} route — FastAPI/Starlette match in
+# declaration order, and the `{cid}` placeholder would otherwise swallow
+# any literal-named GET like /captures/api/export with cid="export".
+@router.get(
+    "/captures/api/export",
+    dependencies=[
+        Depends(require_admin_host),
+        Depends(require_admin_token_header_only),
+    ],
+)
+async def export_captures_api(
+    only_status: str = Query("ready"),
+    include_audio: int = Query(1, ge=0, le=1),
+) -> Response:
+    """Streaming tar.gz of (manifest.jsonl, audio/<id>.<ext>...). The
+    `only_status` filter defaults to 'ready' — admins should mark their
+    triaged training samples ready before exporting. Pass 'all' to dump
+    everything (typically only useful for one-off backup)."""
+    status_filter: str | None = None if only_status == "all" else only_status
+    fname = f"whisper-captures-{datetime.now().strftime('%Y%m%d-%H%M%S')}.tar.gz"
+    return StreamingResponse(
+        _build_export_stream(status_filter, bool(include_audio)),
+        media_type="application/gzip",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
 @router.get(
     "/captures/api/{cid}",
     dependencies=[
@@ -392,30 +420,6 @@ def _build_export_stream(only_status: str | None, include_audio: bool):
     final_chunk = buf.getvalue()
     if final_chunk:
         yield final_chunk
-
-
-@router.get(
-    "/captures/api/export",
-    dependencies=[
-        Depends(require_admin_host),
-        Depends(require_admin_token_header_only),
-    ],
-)
-async def export_captures_api(
-    only_status: str = Query("ready"),
-    include_audio: int = Query(1, ge=0, le=1),
-) -> Response:
-    """Streaming tar.gz of (manifest.jsonl, audio/<id>.<ext>...). The
-    `only_status` filter defaults to 'ready' — admins should mark their
-    triaged training samples ready before exporting. Pass 'all' to dump
-    everything (typically only useful for one-off backup)."""
-    status_filter: str | None = None if only_status == "all" else only_status
-    fname = f"whisper-captures-{datetime.now().strftime('%Y%m%d-%H%M%S')}.tar.gz"
-    return StreamingResponse(
-        _build_export_stream(status_filter, bool(include_audio)),
-        media_type="application/gzip",
-        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
-    )
 
 
 # ---------------------------------------------------------------------
@@ -1039,7 +1043,21 @@ _CAPTURES_HTML = r"""<!doctype html>
     body.appendChild(audio);
     state.audio = audio;
 
-    // Authenticated audio fetch → blob URL.
+    // Surface decode errors instead of silently leaving the player on
+    // 0:00 / 0:00. Common causes: bytes on disk corrupt; format not in
+    // the browser's codec set (rare with WAV / MP3 / WebM / Opus /
+    // AAC-MP4 — all major browsers play those).
+    audio.addEventListener('error', function() {
+      var err = audio.error;
+      var codes = ['', 'ABORTED', 'NETWORK', 'DECODE', 'SRC_NOT_SUPPORTED'];
+      var code = err ? (codes[err.code] || ('code ' + err.code)) : '?';
+      toast('Audio decode error: ' + code + ' (audio bytes may be corrupt '
+            + 'or the format is not browser-playable)', true);
+    });
+
+    // Authenticated audio fetch → blob URL. The server sets Content-Type
+    // via magic-byte sniff, which `resp.blob()` propagates onto the
+    // Blob's `type` property — the browser then uses that for decoding.
     var tok = getToken();
     fetch('/captures/api/' + encodeURIComponent(r.id) + '/audio', {
       headers: tok ? { 'Authorization': 'Bearer ' + tok } : {},
@@ -1050,8 +1068,13 @@ _CAPTURES_HTML = r"""<!doctype html>
       }
       if (resp.status === 410) throw new Error('audio file is gone');
       if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      state.audioMime = resp.headers.get('Content-Type') || '';
       return resp.blob();
     }).then(function(blob) {
+      if (!blob || blob.size === 0) {
+        throw new Error('audio file is empty (0 bytes on disk)');
+      }
+      state.audioBytes = blob.size;
       state.blobUrl = URL.createObjectURL(blob);
       audio.src = state.blobUrl;
     }).catch(function(e) {
