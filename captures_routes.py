@@ -234,6 +234,11 @@ async def get_capture_api(cid: str) -> JSONResponse:
     row = captures_store.get_capture(cid)
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "capture not found")
+    row["words"] = _per_word_postprocess(
+        row.get("words") or [],
+        row.get("final") or "",
+        model_name=row.get("model"),
+    )
     return JSONResponse({"capture": row})
 
 
@@ -685,6 +690,73 @@ def _enrich_group(g: dict[str, Any]) -> dict[str, Any]:
     return g
 
 
+def _per_word_postprocess(
+    words: list[dict[str, Any]],
+    final: str,
+    model_name: "str | None" = None,
+) -> list[dict[str, Any]]:
+    """Project pipeline rules onto each word's text individually,
+    producing a "what the user actually sees in final" view aligned
+    to the raw word timestamps.
+
+    Strategy: run `_postprocess_text(w.word)` per word (cheap regex
+    subs + map lookups). If the per-word result joined back to a
+    string matches `final` after whitespace normalisation, we have a
+    faithful word-by-word post-pipeline view and return it. If it
+    diverges (cross-word rules like dedup / lowercase-wordlist /
+    regex-against-whole-string), fall back to raw — better to show
+    raw words than a misaligned view drifting from `final`.
+
+    Output items match the words_json shape with an optional
+    `raw_word` field set ONLY when the post-pipeline word differs
+    from raw — that's the trigger for the UI's tooltip + dotted
+    underline."""
+    src = list(words or [])
+    if not src:
+        return []
+    try:
+        import main  # for _postprocess_text
+    except Exception:
+        return [_clone_word(w) for w in src]
+
+    out: list[dict[str, Any]] = []
+    any_changed = False
+    for w in src:
+        raw_w = w.get("word") or ""
+        try:
+            post_w = main._postprocess_text(raw_w, model_name=model_name)
+        except Exception:
+            post_w = raw_w
+        item = _clone_word(w)
+        item["word"] = post_w
+        if (post_w or "").strip() != (raw_w or "").strip():
+            item["raw_word"] = raw_w
+            any_changed = True
+        out.append(item)
+
+    if not any_changed:
+        return [_clone_word(w) for w in src]
+
+    def _norm(s: str) -> str:
+        return " ".join((s or "").split()).strip()
+    joined = " ".join((it.get("word") or "") for it in out)
+    if _norm(joined) != _norm(final or ""):
+        return [_clone_word(w) for w in src]
+    return out
+
+
+def _clone_word(w: dict[str, Any]) -> dict[str, Any]:
+    """Return a shallow copy of a words_json item with only the keys
+    we care about preserved (word / start / end). Other fields
+    (probability, etc.) are dropped — the UI doesn't use them and
+    they bloat the JSON payload."""
+    return {
+        "word":  w.get("word") or "",
+        "start": w.get("start"),
+        "end":   w.get("end", w.get("start")),
+    }
+
+
 def _build_merged_words(
     members: list[dict[str, Any]],
     silence_ms: int,
@@ -696,27 +768,39 @@ def _build_merged_words(
     and the single-capture karaoke band's expectation).
 
     `get_members` strips heavy fields for the list view, so we re-fetch
-    each capture to get `words`. Cost is bounded — ≤30 members, ≤a few
-    hundred words total per ≤28 s group — and only runs on expand."""
+    each capture to get `words`. Each member's words are run through
+    `_per_word_postprocess` so the displayed text matches what's in
+    `final` / what gets exported — the user clicks a word and the
+    chip's `wrong` matches the exported text instead of the raw STT
+    output. Cost is bounded — ≤30 members, ≤a few hundred words total
+    per ≤28 s group — and only runs on expand."""
     silence_s = max(0, int(silence_ms)) / 1000.0
     merged: list[dict[str, Any]] = []
     cum = 0.0
     for i, m in enumerate(members):
         offset = cum + i * silence_s
         cap = captures_store.get_capture(m["id"]) or {}
-        for w in cap.get("words") or []:
+        ws = _per_word_postprocess(
+            cap.get("words") or [],
+            cap.get("final") or "",
+            model_name=cap.get("model"),
+        )
+        for w in ws:
             start = w.get("start")
             end = w.get("end", start)
             word = w.get("word", "")
             if start is None or end is None:
                 continue
-            merged.append({
+            entry = {
                 "word":       word,
                 "start":      float(start) + offset,
                 "end":        float(end) + offset,
                 "member_idx": i,
                 "member_id":  m["id"],
-            })
+            }
+            if w.get("raw_word"):
+                entry["raw_word"] = w["raw_word"]
+            merged.append(entry)
         cum += float(m.get("duration_seconds") or 0.0)
     return merged
 
@@ -1209,6 +1293,22 @@ _CAPTURES_HTML = r"""<!doctype html>
   }
   .word-strip .word.selected.active {
     background: var(--selected-word-bg); color: var(--bold);
+  }
+  /* Pipeline rules changed this word's text — dotted cyan underline
+     signals to the user. The raw form is on the title attribute. */
+  .word-strip .word.post-edited {
+    border-bottom: 1px dotted var(--cyan);
+  }
+  /* Inline green replacement next to a struck-through word. Same
+     palette as /reports' .diff-ins so the track-changes look reads
+     consistently across pages. Lives as a sibling span after the
+     last word in the chip's idx..idx_end span. */
+  .word-strip .word-replacement {
+    color: var(--green); font-weight: 600;
+    background: rgba(126, 231, 135, 0.10);
+    padding: 0 0.25rem; margin-left: 0.25rem;
+    border-radius: 2px;
+    font-family: var(--font-mono);
   }
 
   .cc-textline {
@@ -2044,6 +2144,10 @@ _CAPTURES_HTML = r"""<!doctype html>
       sp.dataset.start = String(w.start || 0);
       sp.dataset.end = String(w.end || 0);
       sp.textContent = (w.word || '').replace(/^\s+/, ' ');
+      if (w.raw_word) {
+        sp.title = 'raw: ' + w.raw_word;
+        sp.classList.add('post-edited');
+      }
       sp.addEventListener('click', function(e) {
         onWordClick(state, i, !!e.shiftKey);
       });
@@ -2202,6 +2306,58 @@ _CAPTURES_HTML = r"""<!doctype html>
     var el = state.wordEls[idx];
     if (el) el.classList.toggle('selected', on);
   }
+
+  // Recompute a chip's denormalized `wrong` from the current display
+  // words at its idx..idx_end. Lets stored chips (whose `wrong` was
+  // the raw STT form before the karaoke band started showing
+  // post-pipeline words) self-heal — and ensures applyCorrectionsToGround
+  // can find the chip's `wrong` in finalText.
+  function recomputeWrong(state, chip) {
+    if (typeof chip.idx !== 'number') return chip.wrong || '';
+    var b = (typeof chip.idx_end === 'number') ? chip.idx_end : chip.idx;
+    var parts = [];
+    for (var i = chip.idx; i <= b; i++) {
+      var w = state.words[i];
+      if (w) parts.push((w.word || ''));
+    }
+    return parts.join('').replace(/^\s+/, '');
+  }
+
+  // Build/update/clear an inline `.word-replacement` sibling next to
+  // the last word in a chip's span. Mirrors the .diff-ins green look
+  // used by /reports' renderDiff so the user sees the correction
+  // inline in the strip, not just in the chip panel below.
+  function setReplacementInline(state, chip) {
+    if (typeof chip.idx !== 'number') return;
+    var lastIdx = (typeof chip.idx_end === 'number') ? chip.idx_end : chip.idx;
+    var anchor = state.wordEls[lastIdx];
+    if (!anchor) return;
+    var nxt = anchor.nextSibling;
+    var existing = (nxt && nxt.classList && nxt.classList.contains('word-replacement'))
+      ? nxt : null;
+    var text = (chip.correct || '').trim();
+    if (!text) {
+      if (existing) existing.parentNode.removeChild(existing);
+      return;
+    }
+    if (!existing) {
+      existing = document.createElement('span');
+      existing.className = 'word-replacement';
+      anchor.parentNode.insertBefore(existing, anchor.nextSibling);
+    }
+    existing.textContent = text;
+  }
+
+  function clearReplacementInline(state, chip) {
+    if (typeof chip.idx !== 'number') return;
+    var lastIdx = (typeof chip.idx_end === 'number') ? chip.idx_end : chip.idx;
+    var anchor = state.wordEls[lastIdx];
+    if (!anchor) return;
+    var nxt = anchor.nextSibling;
+    if (nxt && nxt.classList && nxt.classList.contains('word-replacement')) {
+      nxt.parentNode.removeChild(nxt);
+    }
+  }
   function chipCovers(c, idx) {
     if (typeof c.idx !== 'number') return false;
     var end = (typeof c.idx_end === 'number') ? c.idx_end : c.idx;
@@ -2250,6 +2406,11 @@ _CAPTURES_HTML = r"""<!doctype html>
     applyCorrectionsToGround(state);
   }
 
+  function refreshAllReplacementsInline(state) {
+    // Walk every chip; rebuild its inline sibling. Cheap (≤ chip count).
+    state.corrections.forEach(function(c) { setReplacementInline(state, c); });
+  }
+
   function extendLastChip(state, idx) {
     var lastI = state.corrections.length - 1;
     var last = state.corrections[lastI];
@@ -2282,6 +2443,7 @@ _CAPTURES_HTML = r"""<!doctype html>
     if (c && typeof c.idx === 'number') {
       var end = (typeof c.idx_end === 'number') ? c.idx_end : c.idx;
       for (var j = c.idx; j <= end; j++) selectWord(state, j, false);
+      clearReplacementInline(state, c);
     }
     state.corrections.splice(i, 1);
     renderChips(state);
@@ -2291,6 +2453,15 @@ _CAPTURES_HTML = r"""<!doctype html>
   function renderChips(state) {
     var box = state.chipBox;
     box.innerHTML = '';
+    // Self-heal: chips may have been saved with `wrong` = the raw STT
+    // form before the karaoke band started showing post-pipeline
+    // words. Recompute from the current display words so the chip,
+    // strike-through, and applyCorrectionsToGround all agree on what
+    // text the chip is replacing.
+    state.corrections.forEach(function(c) {
+      c.wrong = recomputeWrong(state, c) || c.wrong;
+    });
+    refreshAllReplacementsInline(state);
     if (state.corrections.length === 0) {
       var empty = document.createElement('span');
       empty.className = 'help';
@@ -2321,6 +2492,7 @@ _CAPTURES_HTML = r"""<!doctype html>
       inp.autocomplete = 'off';
       inp.addEventListener('input', function() {
         c.correct = inp.value;
+        setReplacementInline(state, c);
         markDirty(state);
       });
       inp.addEventListener('blur', function() {
@@ -3018,6 +3190,10 @@ _CAPTURES_HTML = r"""<!doctype html>
             }
             prevMember = w.member_idx;
             sp.textContent = (w.word || '').replace(/^\s+/, ' ');
+            if (w.raw_word) {
+              sp.title = 'raw: ' + w.raw_word;
+              sp.classList.add('post-edited');
+            }
             sp.addEventListener('click', function(e) {
               onWordClick(groupState, i, !!e.shiftKey);
             });
