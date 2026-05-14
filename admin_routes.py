@@ -94,6 +94,26 @@ _FIELD_GROUPS: list[tuple[str, list[tuple[str | None, list[str]]]]] = [
     ("Access (allowlists + token)", [(None, [
         "ADMIN_ALLOWED_HOSTS", "STATS_ALLOWED_HOSTS", "ADMIN_TOKEN", "USER_TOKEN",
     ])]),
+    ("Reports", [(None, [
+        "REPORTS_DB", "REPORTS_MAX", "REPORTS_RETENTION_DAYS",
+        "REPORTS_ALLOW_USER_SUBMIT",
+    ])]),
+    ("Capture & fine-tuning", [
+        (None, [
+            "CAPTURE_RECORDINGS_ENABLED",
+            "CAPTURE_RECORDINGS_SAMPLE_RATE",
+            "CAPTURES_RETENTION_DAYS",
+        ]),
+        ("Storage", [
+            "CAPTURES_DB", "CAPTURES_DIR",
+            "CAPTURES_MAX", "CAPTURES_MAX_MB",
+        ]),
+        ("Duration & size guards", [
+            "CAPTURE_RECORDINGS_MIN_DURATION_SEC",
+            "CAPTURE_RECORDINGS_MAX_DURATION_SEC",
+            "CAPTURE_RECORDINGS_AUDIO_BYTES_HARD_LIMIT",
+        ]),
+    ]),
 ]
 
 

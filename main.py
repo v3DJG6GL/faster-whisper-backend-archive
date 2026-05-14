@@ -1,4 +1,5 @@
 import os
+import random
 import sys
 import ctypes
 import logging
@@ -590,6 +591,7 @@ def _format_request_block(
     final: str,
     steps: "list | None" = None,
     request_id: str | None = None,
+    captured_id: str | None = None,
 ) -> str:
     """Full per-request log block. `steps` is the per-pipeline trace; passed
     in only when cfg.TRACE_ENABLED so the block stays a single message.
@@ -597,13 +599,19 @@ def _format_request_block(
     `request_id` (uuid4 hex) is the cross-reference key between this
     durable log block and a report submitted via /quick-config. When
     present, the title line carries `req=<id[:8]>` so an admin reading
-    a /reports row can grep the log for the matching block."""
+    a /reports row can grep the log for the matching block.
+
+    `captured_id` is the capture row id when the capture pipeline fired
+    for this request — admins can grep for `captured=<id[:8]>` to find
+    the audio+timestamps row on /captures."""
     title_rule = "═" * _LOG_WIDTH
     rule = "─" * _LOG_WIDTH
 
     status = "[!] empty output" if len(seg_diag) == 0 else "✓ ok"
     if request_id:
         status = f"req={request_id[:8]}  {status}"
+    if captured_id:
+        status = f"captured={captured_id[:8]}  {status}"
     title = "  /v1/audio/transcriptions"
     pad = max(1, _LOG_WIDTH - len(title) - len(status))
     title_line = f"{title}{' ' * pad}{status}"
@@ -1182,6 +1190,20 @@ async def _reports_retention_loop() -> None:
             logger.error("[reports] retention loop error: %s", _re)
 
 
+async def _captures_retention_loop() -> None:
+    """Hourly retention sweep for the captures store. Same shape as the
+    reports loop; lazy reads cfg.CAPTURES_RETENTION_DAYS each tick."""
+    import captures_store
+    while True:
+        try:
+            await _asyncio_for_models.sleep(3600)
+            captures_store.sweep_retention()
+        except _asyncio_for_models.CancelledError:
+            raise
+        except Exception as _ce:
+            logger.error("[captures] retention loop error: %s", _ce)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # If PRELOAD_MODELS is empty, fall back to preloading just DEFAULT_MODEL
@@ -1227,6 +1249,27 @@ async def lifespan(app: FastAPI):
     except Exception as _re:
         logger.error("Failed to initialize reports store: %s", _re)
 
+    # Open the captures store. Audio + word-timestamps for Whisper
+    # fine-tuning, gated by CAPTURE_RECORDINGS_ENABLED. Reconcile drift
+    # before serving (row says audio exists / disk says it doesn't, or
+    # vice versa).
+    captures_sweep_task = None
+    try:
+        import captures_store
+        captures_store.init(cfg.CAPTURES_DB, cfg.CAPTURES_DIR)
+        captures_store.reconcile_on_startup()
+        captures_store.sweep_retention()
+        logger.info(
+            "Captures store initialized at %s (audio dir: %s, enabled=%s)",
+            cfg.CAPTURES_DB, cfg.CAPTURES_DIR,
+            getattr(cfg, "CAPTURE_RECORDINGS_ENABLED", False),
+        )
+        captures_sweep_task = _asyncio_for_models.create_task(
+            _captures_retention_loop()
+        )
+    except Exception as _ce:
+        logger.error("Failed to initialize captures store: %s", _ce)
+
     yield
 
     evictor_task.cancel()
@@ -1238,6 +1281,12 @@ async def lifespan(app: FastAPI):
         reports_sweep_task.cancel()
         try:
             await reports_sweep_task
+        except (_asyncio_for_models.CancelledError, Exception):
+            pass
+    if captures_sweep_task is not None:
+        captures_sweep_task.cancel()
+        try:
+            await captures_sweep_task
         except (_asyncio_for_models.CancelledError, Exception):
             pass
 
@@ -1319,7 +1368,40 @@ async def transcribe(
             # config knob and the per-request ask. Disabled (False) bypasses
             # the DTW alignment path entirely — required for primeline-style
             # finetunes that hit faster-whisper#1212.
-            want_word_ts = cfg_for(resolved_model, "WORD_TIMESTAMPS_ENABLED") and include_words
+            gate_word_ts = cfg_for(resolved_model, "WORD_TIMESTAMPS_ENABLED")
+            want_word_ts = gate_word_ts and include_words
+
+            # Capture-for-fine-tuning decision. We gate via gate_word_ts
+            # (NOT override): per-model WORD_TIMESTAMPS_ENABLED=False is
+            # used on primeline/tnfru-family fine-tunes where DTW is
+            # broken — forcing word_timestamps=True there produces empty
+            # transcripts. Skip capture instead.
+            #
+            # Sampling roll + cap check + size guard happen at handler
+            # entry so we don't waste DTW CPU on requests that won't
+            # land. Duration filter is post-transcribe (we don't know
+            # the duration yet).
+            will_capture = False
+            captured_id: str | None = None
+            if (getattr(cfg, "CAPTURE_RECORDINGS_ENABLED", False)
+                    and gate_word_ts):
+                try:
+                    import captures_store as _cap_store
+                    cap_max = int(getattr(cfg, "CAPTURES_MAX", 5000))
+                    hard_lim = int(getattr(
+                        cfg, "CAPTURE_RECORDINGS_AUDIO_BYTES_HARD_LIMIT",
+                        100_000_000,
+                    ))
+                    sample_rate = float(getattr(
+                        cfg, "CAPTURE_RECORDINGS_SAMPLE_RATE", 1.0,
+                    ))
+                    if (_cap_store.count() < cap_max
+                            and len(audio_content) < hard_lim
+                            and random.random() < sample_rate):
+                        will_capture = True
+                        want_word_ts = True  # force DTW for capture
+                except Exception as _ce:
+                    logger.warning("[capture] eligibility check failed: %s", _ce)
 
             # Empty string is NOT equivalent to None for tnfru / primeline
             # finetunes — passing "" to model.transcribe(initial_prompt=...)
@@ -1534,6 +1616,58 @@ async def transcribe(
             # report can grep the log for the matching block.
             request_id = uuid.uuid4().hex
 
+            # Persist the capture if eligibility passed at handler entry
+            # AND duration falls in the configured window AND we have
+            # enough disk free. Done BEFORE the log block so the block
+            # can record `captured=<id_prefix>` for traceability. The
+            # tmp_path is still on disk — the finally block unlinks it
+            # AFTER this. We copy (not move) so the existing cleanup
+            # path is unchanged.
+            if will_capture:
+                try:
+                    import captures_store as _cap_store
+                    audio_dur_s = float(getattr(info, "duration", 0.0) or 0.0)
+                    min_s = float(getattr(cfg, "CAPTURE_RECORDINGS_MIN_DURATION_SEC", 0.5))
+                    max_s = float(getattr(cfg, "CAPTURE_RECORDINGS_MAX_DURATION_SEC", 600.0))
+                    if min_s <= audio_dur_s <= max_s:
+                        # Disk-free guard. Skip on <1 GB free; don't fail
+                        # the transcription. Best-effort: a failure to
+                        # query free space (e.g. inaccessible dir) is
+                        # treated as "OK to try" and the create_capture
+                        # path itself surfaces the real error.
+                        try:
+                            _free = shutil.disk_usage(cfg.CAPTURES_DIR).free
+                        except OSError:
+                            _free = 1 << 40  # large enough to proceed
+                        if _free > 1_000_000_000:
+                            _ext = os.path.splitext(file.filename or "")[1] or ".bin"
+                            captured_id = _cap_store.create_capture(
+                                audio_src_path=tmp_path,
+                                audio_format=_ext,
+                                request_id=request_id,
+                                model=resolved_model,
+                                language=info.language,
+                                duration_seconds=audio_dur_s,
+                                raw=raw_full_text,
+                                final=full_text_str,
+                                words=all_words,
+                                segments=seg_diag,
+                            )
+                        else:
+                            logger.warning(
+                                "[capture] skipped due to low disk free "
+                                "(%.1f MB free, need >1 GB)",
+                                _free / (1024 * 1024),
+                            )
+                    else:
+                        logger.info(
+                            "[capture] skipped duration filter: %.1fs "
+                            "(window %.1f-%.1f)",
+                            audio_dur_s, min_s, max_s,
+                        )
+                except Exception as _ce:
+                    logger.warning("[capture] persistence failed: %s", _ce)
+
             # Always emit the rich diagnostic block — it's how empty-output
             # failures are debugged. The per-pipeline transformation trace
             # is only included when cfg.TRACE_ENABLED is on.
@@ -1547,6 +1681,7 @@ async def transcribe(
                 final=full_text_str,
                 steps=trace if trace is not None else None,
                 request_id=request_id,
+                captured_id=captured_id,
             ))
 
             # Mirror the same trace into the /quick-config recent-buffer so
@@ -2011,6 +2146,18 @@ if cfg.ADMIN_UI_ENABLED:
             "Reports UI enabled at /reports (admin token required; "
             "user submissions %s)",
             "enabled" if getattr(cfg, "REPORTS_ALLOW_USER_SUBMIT", True)
+            else "disabled",
+        )
+        # /captures: admin-only Whisper fine-tuning data capture + review.
+        # Master switch is cfg.CAPTURE_RECORDINGS_ENABLED — the page is
+        # always registered so the admin can browse existing rows even
+        # after disabling new capture.
+        from captures_routes import router as _captures_router
+        app.include_router(_captures_router)
+        logger.info(
+            "Captures UI enabled at /captures (admin token required; "
+            "new capture %s)",
+            "enabled" if getattr(cfg, "CAPTURE_RECORDINGS_ENABLED", False)
             else "disabled",
         )
     except Exception as _e:

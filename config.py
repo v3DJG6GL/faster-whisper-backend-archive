@@ -643,6 +643,59 @@ REPORTS_RETENTION_DAYS = 90
 REPORTS_ALLOW_USER_SUBMIT = True
 
 
+# =============================================================================
+# Whisper fine-tuning capture store
+# =============================================================================
+# Optional pipeline that persists the original audio + word-level timestamps
+# next to the model's raw/final transcription so an admin can review each
+# clip karaoke-style on /captures and produce ground-truth text for Whisper
+# fine-tuning. Default OFF — audio is biometric-grade PHI; the master
+# switch demands an explicit opt-in.
+#
+# Storage layout:
+#   CAPTURES_DB  — SQLite (WAL), metadata + word timestamps + corrections
+#   CAPTURES_DIR — filesystem root for audio (4-char fanout subdirs)
+#
+# Export endpoint streams a tar.gz containing manifest.jsonl + audio/<id>.<ext>,
+# loadable via huggingface `datasets.load_dataset('json', data_files=...)`.
+
+# Master switch — when False, the transcribe handler never copies audio
+# and never inserts a capture row. Browsing /captures still works
+# (existing rows visible).
+CAPTURE_RECORDINGS_ENABLED = False
+
+CAPTURES_DB = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "captures.local.sqlite3"
+)
+CAPTURES_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "captures"
+)
+
+# Soft caps. On overflow, _evict_to_cap drops rows in priority order:
+# dismissed → audio_missing → reviewed → new → ready. Training-quality
+# ("ready") wins; unreviewed work ("new") is also protected.
+CAPTURES_MAX = 5000
+CAPTURES_MAX_MB = 5000
+
+# Auto-delete captures older than this many days. Sweep runs on startup
+# and hourly thereafter. 0 = disabled.
+CAPTURES_RETENTION_DAYS = 365
+
+# Sampling: 1.0 captures every eligible request, 0.1 captures ~10% etc.
+# Decision is made per-request before transcribe runs.
+CAPTURE_RECORDINGS_SAMPLE_RATE = 1.0
+
+# Duration filter — too-short clips are usually false starts, too-long
+# ones strain memory and need re-segmentation before fine-tuning anyway.
+CAPTURE_RECORDINGS_MIN_DURATION_SEC = 0.5
+CAPTURE_RECORDINGS_MAX_DURATION_SEC = 600.0
+
+# Pre-transcribe size guard: skip eligibility roll for uploads larger
+# than this many bytes. Keeps a misbehaving client from filling the
+# captures dir with multi-100MB blobs.
+CAPTURE_RECORDINGS_AUDIO_BYTES_HARD_LIMIT = 100_000_000
+
+
 # Snapshot the in-file defaults BEFORE config.local.json + env overrides apply.
 # Used by main.py's request log block to mark non-default scalar values with
 # `*` so the operator can see at a glance which knobs are overridden.
@@ -744,6 +797,73 @@ if _env_reports_allow_user is not None and _env_reports_allow_user.strip():
     REPORTS_ALLOW_USER_SUBMIT = _env_reports_allow_user.strip().lower() in (
         "1", "true", "yes", "on"
     )
+
+
+# --- Captures (fine-tuning data store) ------------------------------------
+
+def _truthy(s: str) -> bool:
+    return s.strip().lower() in ("1", "true", "yes", "on")
+
+_env_cap_enabled = os.environ.get("WHISPER_CAPTURE_RECORDINGS_ENABLED")
+if _env_cap_enabled is not None and _env_cap_enabled.strip():
+    CAPTURE_RECORDINGS_ENABLED = _truthy(_env_cap_enabled)
+
+_env_cap_db = os.environ.get("WHISPER_CAPTURES_DB")
+if _env_cap_db is not None and _env_cap_db.strip():
+    CAPTURES_DB = _env_cap_db.strip()
+
+_env_cap_dir = os.environ.get("WHISPER_CAPTURES_DIR")
+if _env_cap_dir is not None and _env_cap_dir.strip():
+    CAPTURES_DIR = _env_cap_dir.strip()
+
+_env_cap_max = os.environ.get("WHISPER_CAPTURES_MAX")
+if _env_cap_max is not None and _env_cap_max.strip():
+    try:
+        CAPTURES_MAX = int(_env_cap_max)
+    except ValueError:
+        pass
+
+_env_cap_max_mb = os.environ.get("WHISPER_CAPTURES_MAX_MB")
+if _env_cap_max_mb is not None and _env_cap_max_mb.strip():
+    try:
+        CAPTURES_MAX_MB = int(_env_cap_max_mb)
+    except ValueError:
+        pass
+
+_env_cap_retention = os.environ.get("WHISPER_CAPTURES_RETENTION_DAYS")
+if _env_cap_retention is not None and _env_cap_retention.strip():
+    try:
+        CAPTURES_RETENTION_DAYS = int(_env_cap_retention)
+    except ValueError:
+        pass
+
+_env_cap_sample = os.environ.get("WHISPER_CAPTURE_RECORDINGS_SAMPLE_RATE")
+if _env_cap_sample is not None and _env_cap_sample.strip():
+    try:
+        CAPTURE_RECORDINGS_SAMPLE_RATE = float(_env_cap_sample)
+    except ValueError:
+        pass
+
+_env_cap_min = os.environ.get("WHISPER_CAPTURE_RECORDINGS_MIN_DURATION_SEC")
+if _env_cap_min is not None and _env_cap_min.strip():
+    try:
+        CAPTURE_RECORDINGS_MIN_DURATION_SEC = float(_env_cap_min)
+    except ValueError:
+        pass
+
+_env_cap_maxdur = os.environ.get("WHISPER_CAPTURE_RECORDINGS_MAX_DURATION_SEC")
+if _env_cap_maxdur is not None and _env_cap_maxdur.strip():
+    try:
+        CAPTURE_RECORDINGS_MAX_DURATION_SEC = float(_env_cap_maxdur)
+    except ValueError:
+        pass
+
+_env_cap_hardlim = os.environ.get("WHISPER_CAPTURE_RECORDINGS_AUDIO_BYTES_HARD_LIMIT")
+if _env_cap_hardlim is not None and _env_cap_hardlim.strip():
+    try:
+        CAPTURE_RECORDINGS_AUDIO_BYTES_HARD_LIMIT = int(_env_cap_hardlim)
+    except ValueError:
+        pass
 
 
 # --- Advanced decode params -------------------------------------------------

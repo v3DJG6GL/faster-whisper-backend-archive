@@ -26,6 +26,8 @@ import time
 import uuid
 from typing import Any
 
+import text_corrections
+
 logger = logging.getLogger("whisper-api")
 
 _lock = threading.Lock()
@@ -41,8 +43,8 @@ _CAP_STEPS_JSON = 200_000
 _CAP_INTENDED = 2_000
 _CAP_COMMENT = 4_000
 _CAP_ADMIN_NOTES = 8_000
-_CAP_CORRECTIONS = 50
-_CAP_CORRECTION_FIELD = 200
+_CAP_CORRECTIONS = text_corrections.CAP_CORRECTIONS
+_CAP_CORRECTION_FIELD = text_corrections.CAP_CORRECTION_FIELD
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS reports (
@@ -142,35 +144,10 @@ def _truncate_steps(steps: list) -> list:
     return out
 
 
-def _clean_corrections(items: list) -> list[dict[str, Any]]:
-    """Filter to entries with a non-empty `correct` field, apply length
-    caps, and cap the list at _CAP_CORRECTIONS. Anything malformed is
-    dropped silently — this is end-user input, we tolerate it.
-
-    Optional `idx_end` lets a chip span multiple adjacent words from
-    the original final text. Stored only when it's a valid int with
-    `idx <= idx_end < 10_000`; otherwise the entry stays single-word."""
-    out: list[dict[str, Any]] = []
-    for it in items or []:
-        if not isinstance(it, dict):
-            continue
-        wrong = str(it.get("wrong", "") or "").strip()[:_CAP_CORRECTION_FIELD]
-        correct = str(it.get("correct", "") or "").strip()[:_CAP_CORRECTION_FIELD]
-        if not correct:
-            continue
-        entry: dict[str, Any] = {"wrong": wrong, "correct": correct}
-        idx = it.get("idx")
-        if isinstance(idx, int) and 0 <= idx < 10_000:
-            entry["idx"] = idx
-            idx_end = it.get("idx_end")
-            if (isinstance(idx_end, int)
-                    and idx <= idx_end < 10_000
-                    and idx_end != idx):
-                entry["idx_end"] = idx_end
-        out.append(entry)
-        if len(out) >= _CAP_CORRECTIONS:
-            break
-    return out
+# Delegates to text_corrections so /reports and /captures share one
+# definition of the chip shape. Kept here as a module-level name for the
+# external callers that already import it (reports_routes.submit_report).
+_clean_corrections = text_corrections.clean_corrections
 
 
 def create_report(

@@ -416,6 +416,52 @@ FIELD_DESCRIPTIONS: dict[str, str] = {
         "Master switch for end-user (USER_TOKEN role) report submission. "
         "Off = only admins can submit; the button stays visible but the "
         "endpoint returns 403 for non-admin callers.",
+
+    # --- Captures (fine-tuning data store) ---
+    "CAPTURE_RECORDINGS_ENABLED":
+        "Master switch for capturing audio + word-timestamps next to each "
+        "transcription, for use as Whisper fine-tuning training data. "
+        "Default OFF — recordings are biometric-grade PHI and persist on "
+        "disk in plaintext (encrypt the volume). Per-model "
+        "WORD_TIMESTAMPS_ENABLED=False overrides this for that model: "
+        "capture is skipped to avoid corrupting alignment data on models "
+        "(e.g. primeline / tnfru) where DTW is broken.",
+    "CAPTURES_DB":
+        "Path to the SQLite file holding capture metadata + word "
+        "timestamps + admin corrections. Audio files live separately "
+        "under CAPTURES_DIR; this DB references them by relative path.",
+    "CAPTURES_DIR":
+        "Filesystem root for captured audio files. Files use a 4-char "
+        "fanout (<dir>/<id[0:2]>/<id[2:4]>/<id>.<ext>) to keep directory "
+        "sizes modest. PHI on disk — encrypt the volume.",
+    "CAPTURES_MAX":
+        "Soft cap on capture row count. On overflow, oldest rows are "
+        "evicted in priority order: dismissed → audio_missing → reviewed "
+        "→ new → ready (training data is protected).",
+    "CAPTURES_MAX_MB":
+        "Soft cap on total audio bytes (sum of files under CAPTURES_DIR, "
+        "in megabytes). Eviction policy mirrors CAPTURES_MAX.",
+    "CAPTURES_RETENTION_DAYS":
+        "Auto-delete captures older than this many days. 0 = retention "
+        "disabled (admin must clear manually). Sweep runs on startup and "
+        "hourly thereafter.",
+    "CAPTURE_RECORDINGS_SAMPLE_RATE":
+        "Fraction of eligible transcription requests to capture, in "
+        "[0.0, 1.0]. 1.0 captures every eligible request; lower values "
+        "are useful when you have a lot of traffic and only need a "
+        "representative sample for fine-tuning.",
+    "CAPTURE_RECORDINGS_MIN_DURATION_SEC":
+        "Skip capture for clips shorter than this. Filters out false "
+        "starts and silence pings that VAD almost fully suppresses.",
+    "CAPTURE_RECORDINGS_MAX_DURATION_SEC":
+        "Skip capture for clips longer than this. Whisper fine-tuning "
+        "prefers ≤30s samples; long clips can still be captured for "
+        "later segmentation via the stored segments_json metadata, but "
+        "very long clips are usually not worth the disk cost.",
+    "CAPTURE_RECORDINGS_AUDIO_BYTES_HARD_LIMIT":
+        "Pre-transcribe upload-size guard. Captures eligibility roll is "
+        "skipped for uploads larger than this many bytes, even when "
+        "sampling would otherwise pass.",
 }
 
 
@@ -741,6 +787,18 @@ class AdminConfig(BaseModel):
     REPORTS_MAX: Annotated[int, Field(ge=10, le=100_000)] | None = _F("REPORTS_MAX")
     REPORTS_RETENTION_DAYS: Annotated[int, Field(ge=0, le=3650)] | None = _F("REPORTS_RETENTION_DAYS")
     REPORTS_ALLOW_USER_SUBMIT: bool | None = _F("REPORTS_ALLOW_USER_SUBMIT")
+
+    # --- Captures (fine-tuning data store) ---
+    CAPTURE_RECORDINGS_ENABLED: bool | None = _F("CAPTURE_RECORDINGS_ENABLED")
+    CAPTURES_DB: Annotated[str, Field(min_length=1, max_length=512)] | None = _F("CAPTURES_DB")
+    CAPTURES_DIR: Annotated[str, Field(min_length=1, max_length=512)] | None = _F("CAPTURES_DIR")
+    CAPTURES_MAX: Annotated[int, Field(ge=10, le=1_000_000)] | None = _F("CAPTURES_MAX")
+    CAPTURES_MAX_MB: Annotated[int, Field(ge=1, le=10_000_000)] | None = _F("CAPTURES_MAX_MB")
+    CAPTURES_RETENTION_DAYS: Annotated[int, Field(ge=0, le=3650)] | None = _F("CAPTURES_RETENTION_DAYS")
+    CAPTURE_RECORDINGS_SAMPLE_RATE: Annotated[float, Field(ge=0.0, le=1.0)] | None = _F("CAPTURE_RECORDINGS_SAMPLE_RATE")
+    CAPTURE_RECORDINGS_MIN_DURATION_SEC: Annotated[float, Field(ge=0.0, le=3600.0)] | None = _F("CAPTURE_RECORDINGS_MIN_DURATION_SEC")
+    CAPTURE_RECORDINGS_MAX_DURATION_SEC: Annotated[float, Field(ge=0.1, le=86400.0)] | None = _F("CAPTURE_RECORDINGS_MAX_DURATION_SEC")
+    CAPTURE_RECORDINGS_AUDIO_BYTES_HARD_LIMIT: Annotated[int, Field(ge=1024, le=10_000_000_000)] | None = _F("CAPTURE_RECORDINGS_AUDIO_BYTES_HARD_LIMIT")
 
     @field_validator("LOG_FILE")
     @classmethod

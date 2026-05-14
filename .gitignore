@@ -20,6 +20,12 @@ reports.local.sqlite3
 reports.local.sqlite3-shm
 reports.local.sqlite3-wal
 
+# Whisper fine-tuning capture store (SQLite + WAL/SHM) and audio files
+captures.local.sqlite3
+captures.local.sqlite3-shm
+captures.local.sqlite3-wal
+captures/
+
 # Editor / IDE
 .vscode/
 .idea/
