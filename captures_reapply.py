@@ -1,0 +1,139 @@
+"""Background job: re-run the current PIPELINE_RULES over every
+existing capture's `raw` text and update `final`.
+
+Scope:
+  - Touches `final` only. `corrected_text` (admin free-form ground
+    truth) and `corrections_json` (chip corrections, index-based and
+    rule-independent) stay untouched.
+  - For each affected member that belongs to an unlocked group,
+    rebuild the group's snapshot `transcript` from the current member
+    text via the existing _build_default_transcript helper. Locked
+    groups are skipped — they're exported training samples.
+  - No audio re-merge. Pipeline rules only affect text; merged WAV
+    bytes are unchanged.
+
+Single-worker model:
+  - At most one job runs at a time. Concurrent start() returns the
+    running job's current state.
+  - Job state lives in process memory. A service restart wipes it
+    — acceptable, since the user just clicks the button again.
+"""
+from __future__ import annotations
+
+import logging
+import threading
+import time
+from typing import Any
+
+logger = logging.getLogger("whisper-api")
+
+_state_lock = threading.Lock()
+_state: dict[str, Any] = {
+    "status":           "idle",     # idle | running | done | error
+    "started_ts":       None,
+    "finished_ts":      None,
+    "total":            0,
+    "processed":        0,
+    "captures_updated": 0,
+    "groups_updated":   0,
+    "error":            None,
+}
+_worker: "threading.Thread | None" = None
+
+
+def status() -> dict[str, Any]:
+    with _state_lock:
+        return dict(_state)
+
+
+def start() -> dict[str, Any]:
+    """Idempotent: if a job is running, return its current state
+    instead of spawning a second worker."""
+    global _worker
+    with _state_lock:
+        if _state["status"] == "running":
+            return dict(_state)
+        _state.update({
+            "status":           "running",
+            "started_ts":       time.time(),
+            "finished_ts":      None,
+            "total":            0,
+            "processed":        0,
+            "captures_updated": 0,
+            "groups_updated":   0,
+            "error":            None,
+        })
+    _worker = threading.Thread(target=_run, daemon=True, name="reapply-rules")
+    _worker.start()
+    with _state_lock:
+        return dict(_state)
+
+
+def _run() -> None:
+    try:
+        import main
+        import captures_store
+        import capture_groups_store
+
+        conn = captures_store._require_conn()
+        rows = conn.execute(
+            "SELECT id, raw, final, model, group_id"
+            " FROM captures ORDER BY created_ts DESC"
+        ).fetchall()
+        with _state_lock:
+            _state["total"] = len(rows)
+
+        affected_group_ids: set[str] = set()
+        for r in rows:
+            cid = r["id"]
+            try:
+                new_final = main._postprocess_text(
+                    r["raw"] or "", model_name=r["model"],
+                )
+            except Exception as e:
+                logger.warning(
+                    "[reapply] capture %s skipped: %s", cid[:8], e,
+                )
+                with _state_lock:
+                    _state["processed"] += 1
+                continue
+            if new_final != (r["final"] or ""):
+                captures_store.update_capture(cid, {"final": new_final})
+                with _state_lock:
+                    _state["captures_updated"] += 1
+                if r["group_id"]:
+                    affected_group_ids.add(r["group_id"])
+            with _state_lock:
+                _state["processed"] += 1
+
+        if affected_group_ids:
+            from captures_routes import _build_default_transcript
+            for gid in affected_group_ids:
+                g = capture_groups_store.get_group(gid)
+                if g is None or g.get("is_locked"):
+                    continue
+                members = capture_groups_store.get_members(gid)
+                new_t = _build_default_transcript(
+                    members, g.get("transcript_join_strategy") or "space",
+                )
+                if new_t != (g.get("transcript") or ""):
+                    capture_groups_store.update_group(
+                        gid, {"transcript": new_t},
+                    )
+                    with _state_lock:
+                        _state["groups_updated"] += 1
+
+        with _state_lock:
+            _state["status"] = "done"
+            _state["finished_ts"] = time.time()
+        logger.info(
+            "[reapply] done: %d/%d captures, %d updated, %d groups",
+            _state["processed"], _state["total"],
+            _state["captures_updated"], _state["groups_updated"],
+        )
+    except Exception as e:
+        logger.exception("[reapply] job failed")
+        with _state_lock:
+            _state["status"] = "error"
+            _state["error"] = str(e)
+            _state["finished_ts"] = time.time()

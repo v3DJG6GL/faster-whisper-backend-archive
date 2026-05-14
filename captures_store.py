@@ -584,6 +584,14 @@ def find_by_request_id(request_id: str) -> list[dict[str, Any]]:
     return [_row_to_dict(r, include_words=False) for r in cur.fetchall()]
 
 
+def total_count() -> int:
+    """Row count for the captures table — used by /quick-config to
+    decide whether to surface the reapply-rules modal."""
+    conn = _require_conn()
+    row = conn.execute("SELECT COUNT(*) AS n FROM captures").fetchone()
+    return int(row["n"]) if row else 0
+
+
 def counts_by_status() -> dict[str, int]:
     """Status breakdown for the page toolbar."""
     conn = _require_conn()
@@ -630,6 +638,9 @@ def update_capture(cid: str, patch: dict[str, Any]) -> dict[str, Any] | None:
         notes = str(patch["admin_notes"] or "")[:_CAP_ADMIN_NOTES]
         sets.append("admin_notes = ?")
         params.append(notes)
+    if "final" in patch:
+        sets.append("final = ?")
+        params.append(str(patch["final"] or ""))
     if not sets:
         return get_capture(cid)
     params.append(cid)
