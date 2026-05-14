@@ -300,6 +300,69 @@ def dissolve_group(gid: str) -> None:
     logger.info("[groups] dissolved gid=%s", gid[:8])
 
 
+def reconcile_on_startup() -> tuple[int, int]:
+    """Audit the merged-group WAV subtree (`<CAPTURES_DIR>/groups/`).
+    Mirrors `captures_store.reconcile_on_startup` but scoped to this
+    store's files.
+
+      1. For each group whose merged WAV is missing on disk, count it.
+         No column is set — the GET /audio route already returns 404
+         and the UI surfaces a Regenerate banner; tracking it twice
+         would add no signal.
+      2. For each file under `groups/` with no matching capture_groups
+         row, unlink (true orphans: dissolved groups whose unlink
+         failed, crashed regenerates leaving stale `.tmp`s, etc.).
+
+    Returns (rows_with_missing_wav, files_unlinked).
+    """
+    conn = _require_conn()
+    groups_dir = _require_audio_root()
+    rows_missing = 0
+    files_unlinked = 0
+
+    known_paths: set[str] = set()
+    with _lock:
+        rows = conn.execute(
+            "SELECT id, merged_wav_relpath FROM capture_groups",
+        ).fetchall()
+    for r in rows:
+        try:
+            abs_p = abs_path_for(r["merged_wav_relpath"])
+        except ValueError:
+            continue
+        if os.path.isfile(abs_p):
+            known_paths.add(os.path.abspath(abs_p))
+        else:
+            rows_missing += 1
+
+    if os.path.isdir(groups_dir):
+        for root, _dirs, files in os.walk(groups_dir):
+            for name in files:
+                full = os.path.join(root, name)
+                if name.endswith(".tmp"):
+                    try:
+                        os.unlink(full)
+                        files_unlinked += 1
+                    except OSError:
+                        pass
+                    continue
+                p = os.path.abspath(full)
+                if p not in known_paths:
+                    try:
+                        os.unlink(p)
+                        files_unlinked += 1
+                    except OSError:
+                        pass
+
+    if rows_missing or files_unlinked:
+        logger.warning(
+            "[groups] reconcile: %d rows with missing WAV, "
+            "%d orphan files removed",
+            rows_missing, files_unlinked,
+        )
+    return rows_missing, files_unlinked
+
+
 def find_group_for_member(capture_id: str) -> str | None:
     """Return the group_id that owns this capture, or None."""
     conn = _require_conn()

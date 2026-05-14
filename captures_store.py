@@ -740,8 +740,14 @@ def reconcile_on_startup() -> tuple[int, int]:
                     rows_marked += 1
 
     # Walk the audio directory and unlink anything not in known_paths.
+    # The `groups/` subtree is owned by capture_groups_store and has its
+    # own reconcile pass — prune it here so we never see a merged-group
+    # WAV as an orphan and delete it on every restart. Hex-fanout dirs
+    # are "00".."ff", none of which equal "groups", so this is safe.
     if os.path.isdir(audio_dir):
-        for root, _dirs, files in os.walk(audio_dir):
+        for root, dirs, files in os.walk(audio_dir):
+            if root == audio_dir and "groups" in dirs:
+                dirs.remove("groups")
             for name in files:
                 if name.endswith(".tmp"):
                     # Crash mid-write — delete the partial.

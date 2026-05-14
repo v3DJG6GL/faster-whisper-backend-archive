@@ -1348,6 +1348,7 @@ async def lifespan(app: FastAPI):
         # SQLite file holds both tables.
         import capture_groups_store
         capture_groups_store.init(captures_store._require_conn(), cfg.CAPTURES_DIR)
+        capture_groups_store.reconcile_on_startup()
         captures_sweep_task = _asyncio_for_models.create_task(
             _captures_retention_loop()
         )
