@@ -314,6 +314,37 @@ SCALE_PICKER_JS = """
 # often — the poller is a backstop that keeps every page consistent.
 #
 # Skips the work if no pills exist on the page (e.g. tests, future pages).
+# Open-mode warning banner — JS-injected at the top of <body> on every
+# WebUI page. Fetches /auth/whoami; if open_mode=true, prepends a red
+# banner reminding the operator to bootstrap an admin key. Bearer is read
+# from sessionStorage (same key all pages use).
+OPEN_MODE_BANNER_JS = r"""
+<script>(function(){
+  var TOKEN_KEY='whisper_api_key';
+  var key=null;
+  try { key=sessionStorage.getItem(TOKEN_KEY)||''; } catch(_){}
+  var h={Accept:'application/json'};
+  if(key) h['Authorization']='Bearer '+key;
+  fetch('/auth/whoami',{headers:h,cache:'no-store'})
+    .then(function(r){ return r.ok ? r.json() : null; })
+    .then(function(j){
+      if(!j || !j.open_mode) return;
+      var b=document.createElement('div');
+      b.setAttribute('role','alert');
+      b.style.cssText='background:#5a2424;color:#fff;padding:0.5rem 1rem;'
+        +'text-align:center;font-weight:600;font-size:0.95rem;'
+        +'position:sticky;top:0;z-index:20;';
+      b.innerHTML='⚠ No admin API key set — the server is in '
+        +'OPEN mode and anyone reachable can use it. '
+        +'<a href="/config/api-keys" style="color:#ffd1d1;text-decoration:underline">'
+        +'Generate the first admin key</a>.';
+      document.body.insertBefore(b, document.body.firstChild);
+    })
+    .catch(function(){});
+})();</script>
+"""
+
+
 SEV_POLLER_JS = """
 <script>(function(){
   if(!document.getElementById('sev-warn'))return;
@@ -648,7 +679,7 @@ def render_page(template: str, current: str) -> str:
         .replace("{{NAV_CSS}}", NAV_CSS)
         .replace("{{SCALE_PICKER}}", SCALE_PICKER_HTML)
         .replace("{{SCALE_PICKER_JS}}", SCALE_PICKER_JS)
-        .replace("{{SEV_POLLER_JS}}", SEV_POLLER_JS)
+        .replace("{{SEV_POLLER_JS}}", SEV_POLLER_JS + OPEN_MODE_BANNER_JS)
         .replace("{{SCALE_BOOTSTRAP_HEAD}}", SCALE_BOOTSTRAP_HEAD)
         .replace("{{RULE_EDITOR_JS}}", RULE_EDITOR_JS)
     )

@@ -128,18 +128,24 @@ async def captures_page() -> HTMLResponse:
 
 @router.get(
     "/captures/api/list",
-    dependencies=[
-        Depends(require_admin_host),
-        Depends(require_admin),
-    ],
+    dependencies=[Depends(require_admin_host)],
 )
 async def list_captures_api(
     status_filter: str = Query("all", alias="status"),
     limit: int = Query(200, ge=1, le=1000),
     before_ts: float | None = Query(None),
+    user_filter: str | None = Query(None, alias="user_id"),
+    user: dict[str, Any] = Depends(get_current_user),
 ) -> JSONResponse:
+    """Admin sees all; non-admin sees only their own captures. Admin can
+    additionally narrow by `?user_id=...` for the per-user dropdown."""
+    if not user.get("is_admin"):
+        effective_user = user.get("user_id")
+    else:
+        effective_user = user_filter  # None = show all
     rows = captures_store.list_captures(
         status=status_filter, limit=limit, before_ts=before_ts,
+        user_id=effective_user,
     )
     return JSONResponse({
         "captures": rows,
@@ -147,6 +153,8 @@ async def list_captures_api(
         "enabled": bool(getattr(cfg, "CAPTURE_RECORDINGS_ENABLED", False)),
         "retention_days": int(getattr(cfg, "CAPTURES_RETENTION_DAYS", 0)),
         "total_count": captures_store.count(),
+        "is_admin": bool(user.get("is_admin")),
+        "user_id": user.get("user_id"),
     })
 
 
@@ -327,30 +335,457 @@ async def clear_captures_api(payload: ClearIn, request: Request) -> JSONResponse
 
 
 # ---------------------------------------------------------------------
+# Capture groups (≤28 s packed training samples)
+# ---------------------------------------------------------------------
+
+class CreateGroupIn(BaseModel):
+    model_config = {"extra": "forbid"}
+    member_ids: list[str] = Field(min_length=2, max_length=30)
+    transcript: str = Field(default="", max_length=20_000)
+    join_strategy: Literal["space", "period_space", "newline"] = "space"
+    silence_ms: int = Field(default=300, ge=0, le=2000)
+
+
+class PatchGroupIn(BaseModel):
+    model_config = {"extra": "forbid"}
+    transcript: str | None = Field(default=None, max_length=20_000)
+    join_strategy: Literal["space", "period_space", "newline"] | None = None
+    silence_ms: int | None = Field(default=None, ge=0, le=2000)
+    is_locked: bool | None = None
+
+
+_JOIN_STR = {"space": " ", "period_space": ". ", "newline": "\n"}
+
+
+def _build_default_transcript(members: list[dict[str, Any]], strategy: str) -> str:
+    """Concatenate member transcripts with the chosen join string. Prefers
+    corrected_text > final > raw per-member, matching export ordering."""
+    parts: list[str] = []
+    for m in members:
+        t = (m.get("corrected_text") or m.get("final") or m.get("raw") or "").strip()
+        if t:
+            parts.append(t)
+    return _JOIN_STR.get(strategy, " ").join(parts)
+
+
+def _build_merged_wav(
+    *,
+    gid: str,
+    member_ids: list[str],
+    silence_ms: int,
+) -> tuple[int, dict[str, str]]:
+    """Resolve member audio paths, run the merge, return (duration_ms,
+    member_hash_map). Caller must have validated member_ids belong to
+    the same user and total ≤28 s."""
+    import audio_merge
+    import capture_groups_store
+
+    member_paths: list[str] = []
+    hashes: dict[str, str] = {}
+    for mid in member_ids:
+        cap = captures_store.get_capture(mid)
+        if cap is None:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, f"capture {mid} not found",
+            )
+        abs_p = captures_store.abs_audio_path(cap["audio_relpath"])
+        if not os.path.exists(abs_p):
+            raise HTTPException(
+                status.HTTP_410_GONE, f"capture {mid} audio is missing",
+            )
+        member_paths.append(abs_p)
+        hashes[mid] = audio_merge.hash_wav_pcm(abs_p)
+
+    dst_relpath = capture_groups_store._relpath_for(gid)
+    dst_abs = capture_groups_store.abs_path_for(dst_relpath)
+    try:
+        _bytes, n_samples = audio_merge.merge_wavs(
+            member_paths, dst_abs, gap_ms=silence_ms,
+        )
+    except audio_merge.WavFormatError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    duration_ms = int(round(n_samples / 16.0))  # 16 samples/ms at 16 kHz
+    return duration_ms, hashes
+
+
+@router.post(
+    "/captures/api/groups",
+    dependencies=[Depends(require_admin_host)],
+)
+async def create_group_api(
+    payload: CreateGroupIn,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> JSONResponse:
+    """Pack 2+ same-user captures into a ≤28 s training sample.
+
+    Server-enforced invariants:
+      - all members exist, are not yet in a group, are all owned by the
+        same user (and either the caller is that user OR is admin)
+      - total audio + gap silence ≤ 28 s
+      - members' audio files match (1 ch, 16 bit, 16 kHz)
+    """
+    import capture_groups_store
+    import uuid as _uuid
+
+    member_ids = payload.member_ids
+    if len(member_ids) != len(set(member_ids)):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "duplicate capture in member_ids",
+        )
+
+    captures: list[dict[str, Any]] = []
+    user_ids = set()
+    for mid in member_ids:
+        cap = captures_store.get_capture(mid)
+        if cap is None:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, f"capture {mid} not found",
+            )
+        if cap.get("group_id"):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"capture {mid} is already in a group",
+            )
+        user_ids.add(cap.get("user_id") or "")
+        captures.append(cap)
+    if len(user_ids) != 1:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "members must all belong to the same user",
+        )
+    owner_user_id = next(iter(user_ids))
+    # Authorization: admin can merge anyone's captures; non-admin can
+    # only merge their own.
+    if not user.get("is_admin") and owner_user_id != user.get("user_id"):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "non-admin users can only group their own captures",
+        )
+
+    # Build merged WAV — gid generated upfront so the build path is
+    # known before the DB insert (mirrors captures_store).
+    gid = _uuid.uuid4().hex
+    # Pre-flight duration check (server-side defense; UI also enforces).
+    total_audio_ms = sum(
+        int(round(float(c.get("duration_seconds") or 0.0) * 1000))
+        for c in captures
+    )
+    total_gap_ms = payload.silence_ms * max(0, len(member_ids) - 1)
+    if total_audio_ms + total_gap_ms > 28_000:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"merged duration would exceed 28 s "
+            f"({(total_audio_ms + total_gap_ms) / 1000:.2f}s)",
+        )
+
+    # Synthesize a transcript if the client didn't send one.
+    transcript = payload.transcript.strip() or _build_default_transcript(
+        captures, payload.join_strategy,
+    )
+    duration_ms, hashes = _build_merged_wav(
+        gid=gid,
+        member_ids=member_ids,
+        silence_ms=payload.silence_ms,
+    )
+    # Insert under the gid we already built audio for.
+    # capture_groups_store.create_group generates its OWN gid → use a
+    # local helper to honour the pre-computed gid instead.
+    _insert_group_with_gid(
+        gid=gid,
+        user_id=owner_user_id,
+        member_ids=member_ids,
+        transcript=transcript,
+        join_strategy=payload.join_strategy,
+        silence_ms=payload.silence_ms,
+        member_hash_map=hashes,
+        duration_ms=duration_ms,
+    )
+    return JSONResponse({"group_id": gid})
+
+
+def _insert_group_with_gid(
+    *,
+    gid: str,
+    user_id: str,
+    member_ids: list[str],
+    transcript: str,
+    join_strategy: str,
+    silence_ms: int,
+    member_hash_map: dict[str, str],
+    duration_ms: int,
+) -> None:
+    """Direct insert that honours a pre-allocated gid (needed because the
+    audio file is written at the gid path before this call). Mirrors the
+    transactional shape of capture_groups_store.create_group."""
+    import capture_groups_store
+    import json as _json
+    import time as _time
+
+    relpath = capture_groups_store._relpath_for(gid)
+    now = _time.time()
+    conn = capture_groups_store._require_conn()
+    with capture_groups_store._lock:
+        with conn:
+            conn.execute(
+                "INSERT INTO capture_groups"
+                " (id, user_id, created_ts, merged_wav_relpath,"
+                "  merged_duration_ms, transcript,"
+                "  transcript_join_strategy, member_hashes_json,"
+                "  inter_segment_silence_ms, is_stale, is_locked)"
+                " VALUES (?,?,?,?,?,?,?,?,?,0,0)",
+                (
+                    gid, user_id, now, relpath, int(duration_ms),
+                    transcript, join_strategy,
+                    _json.dumps(member_hash_map, sort_keys=True),
+                    int(silence_ms),
+                ),
+            )
+            for order, mid in enumerate(member_ids):
+                conn.execute(
+                    "UPDATE captures SET group_id = ?, group_order = ?"
+                    " WHERE id = ? AND group_id IS NULL",
+                    (gid, order, mid),
+                )
+    logger.info(
+        "[groups] created gid=%s user=%s n=%d dur=%.1fs",
+        gid[:8], (user_id or "?")[:8], len(member_ids), duration_ms / 1000.0,
+    )
+
+
+@router.get(
+    "/captures/api/groups",
+    dependencies=[Depends(require_admin_host)],
+)
+async def list_groups_api(
+    user_filter: str | None = Query(None, alias="user_id"),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> JSONResponse:
+    import capture_groups_store
+    if not user.get("is_admin"):
+        scope = user.get("user_id")
+    else:
+        scope = user_filter
+    return JSONResponse({"groups": capture_groups_store.list_groups(user_id=scope)})
+
+
+@router.get(
+    "/captures/api/groups/{gid}",
+    dependencies=[Depends(require_admin_host)],
+)
+async def get_group_api(
+    gid: str,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> JSONResponse:
+    import capture_groups_store
+    g = capture_groups_store.get_group(gid)
+    if g is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "group not found")
+    if not user.get("is_admin") and g["user_id"] != user.get("user_id"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "not your group")
+    g["members"] = capture_groups_store.get_members(gid)
+    return JSONResponse({"group": g})
+
+
+@router.patch(
+    "/captures/api/groups/{gid}",
+    dependencies=[Depends(require_admin_host)],
+)
+async def patch_group_api(
+    gid: str,
+    payload: PatchGroupIn,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> JSONResponse:
+    import capture_groups_store
+    g = capture_groups_store.get_group(gid)
+    if g is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "group not found")
+    if not user.get("is_admin") and g["user_id"] != user.get("user_id"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "not your group")
+    if g["is_locked"] and not user.get("is_admin"):
+        raise HTTPException(status.HTTP_409_CONFLICT, "group is locked")
+
+    patch: dict[str, Any] = {}
+    rebuild_audio = False
+    if payload.transcript is not None:
+        patch["transcript"] = payload.transcript.strip()
+    if payload.join_strategy is not None and \
+            payload.join_strategy != g["transcript_join_strategy"]:
+        patch["transcript_join_strategy"] = payload.join_strategy
+    if payload.silence_ms is not None and \
+            payload.silence_ms != g["inter_segment_silence_ms"]:
+        patch["inter_segment_silence_ms"] = payload.silence_ms
+        rebuild_audio = True
+    if payload.is_locked is not None:
+        patch["is_locked"] = 1 if payload.is_locked else 0
+
+    if rebuild_audio:
+        # Re-run the merge with the new silence. Member set is unchanged.
+        members = capture_groups_store.get_members(gid)
+        duration_ms, hashes = _build_merged_wav(
+            gid=gid,
+            member_ids=[m["id"] for m in members],
+            silence_ms=int(patch["inter_segment_silence_ms"]),
+        )
+        import json as _json
+        patch["member_hashes_json"] = _json.dumps(hashes, sort_keys=True)
+        patch["merged_duration_ms"] = duration_ms
+        patch["is_stale"] = 0
+
+    updated = capture_groups_store.update_group(gid, patch)
+    return JSONResponse({"group": updated})
+
+
+@router.post(
+    "/captures/api/groups/{gid}/regenerate",
+    dependencies=[Depends(require_admin_host)],
+)
+async def regenerate_group_api(
+    gid: str,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> JSONResponse:
+    """Rebuild the merged WAV from current member content, refresh
+    hashes, clear `is_stale`. Transcript is preserved (admin's edits stay)."""
+    import capture_groups_store
+    import json as _json
+    g = capture_groups_store.get_group(gid)
+    if g is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "group not found")
+    if not user.get("is_admin") and g["user_id"] != user.get("user_id"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "not your group")
+    members = capture_groups_store.get_members(gid)
+    duration_ms, hashes = _build_merged_wav(
+        gid=gid,
+        member_ids=[m["id"] for m in members],
+        silence_ms=g["inter_segment_silence_ms"],
+    )
+    updated = capture_groups_store.update_group(gid, {
+        "is_stale": 0,
+        "merged_duration_ms": duration_ms,
+        "member_hashes_json": _json.dumps(hashes, sort_keys=True),
+    })
+    return JSONResponse({"group": updated})
+
+
+@router.delete(
+    "/captures/api/groups/{gid}",
+    dependencies=[Depends(require_admin_host)],
+)
+async def dissolve_group_api(
+    gid: str,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> JSONResponse:
+    import capture_groups_store
+    g = capture_groups_store.get_group(gid)
+    if g is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "group not found")
+    if not user.get("is_admin") and g["user_id"] != user.get("user_id"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "not your group")
+    if g["is_locked"] and not user.get("is_admin"):
+        raise HTTPException(status.HTTP_409_CONFLICT, "group is locked")
+    capture_groups_store.dissolve_group(gid)
+    return JSONResponse({"ok": True})
+
+
+@router.get(
+    "/captures/api/groups/{gid}/audio",
+    dependencies=[Depends(require_admin_host)],
+)
+async def get_group_audio_api(
+    gid: str,
+    request: Request,
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    """Stream the merged WAV. Same Range-aware handler shape as the
+    per-capture audio endpoint."""
+    import capture_groups_store
+    g = capture_groups_store.get_group(gid)
+    if g is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "group not found")
+    if not user.get("is_admin") and g["user_id"] != user.get("user_id"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "not your group")
+    try:
+        abs_p = capture_groups_store.abs_path_for(g["merged_wav_relpath"])
+    except ValueError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "merged audio missing")
+    if not os.path.exists(abs_p):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "merged audio missing")
+    return FileResponse(
+        abs_p,
+        media_type="audio/wav",
+        headers={
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+# ---------------------------------------------------------------------
 # Export: streamed tar.gz
 # ---------------------------------------------------------------------
 
 def _build_export_stream(only_status: str | None, include_audio: bool):
     """Generator that yields tar.gz bytes containing manifest.jsonl and,
-    optionally, audio/<cid>.<ext> entries. Streams row-by-row so a
-    multi-GB export doesn't load anything but one row's audio into RAM
-    at a time."""
+    optionally, audio/<id>.wav entries. One manifest entry per training
+    unit — a "unit" is either a capture group (≤28 s packed sample) OR
+    an ungrouped singleton capture. Group members never appear as
+    singletons (no double-counting; the group transcript covers them)."""
+    import capture_groups_store
+
     buf = io.BytesIO()
     tar = tarfile.open(fileobj=buf, mode="w:gz", compresslevel=6)
-
     manifest_lines: list[bytes] = []
 
+    # 1. Capture groups (the packed-for-fine-tune training samples).
+    user_filter_scope: str | None = None  # admin-only path; no per-user scope
+    for g in capture_groups_store.list_groups(user_id=user_filter_scope):
+        text = (g.get("transcript") or "").strip()
+        if not text:
+            continue
+        gid = g["id"]
+        audio_name = f"audio/{gid}.wav"
+        manifest_lines.append(json.dumps({
+            "audio_filepath": audio_name,
+            "text": text,
+            "language": "",
+            "duration": float(g.get("merged_duration_ms") or 0) / 1000.0,
+            "source": "group",
+            "user_id": g.get("user_id") or "",
+            "is_stale": bool(g.get("is_stale")),
+            "is_locked": bool(g.get("is_locked")),
+            "member_count":
+                len(capture_groups_store.get_members(gid)),
+            "created_ts": float(g.get("created_ts") or 0.0),
+        }, ensure_ascii=False).encode("utf-8") + b"\n")
+
+        if include_audio:
+            try:
+                abs_p = capture_groups_store.abs_path_for(g["merged_wav_relpath"])
+            except ValueError:
+                continue
+            if not os.path.isfile(abs_p):
+                continue
+            info = tarfile.TarInfo(audio_name)
+            info.size = os.path.getsize(abs_p)
+            info.mtime = int(g.get("created_ts") or time.time())
+            with open(abs_p, "rb") as af:
+                tar.addfile(info, af)
+            chunk = buf.getvalue()
+            buf.seek(0); buf.truncate()
+            if chunk:
+                yield chunk
+
+    # 2. Ungrouped captures (no group_id).
     for row in captures_store.iter_captures_for_export(status=only_status):
+        if row.get("group_id"):
+            continue
         cid = row["id"]
         text = row.get("corrected_text") or row.get("final") or ""
-        # Skip rows with no usable text. Whisper fine-tuning on empty
-        # targets produces garbage; better to omit than ship trash.
         if not text.strip():
             continue
-
         ext = (row.get("audio_format") or "bin").lower().lstrip(".")
         audio_name = f"audio/{cid}.{ext}"
-
         manifest_lines.append(json.dumps({
             "audio_filepath": audio_name,
             "text": text,
@@ -360,6 +795,8 @@ def _build_export_stream(only_status: str | None, include_audio: bool):
             "corrections": row.get("corrections") or [],
             "admin_notes": row.get("admin_notes") or "",
             "status": row.get("status") or "",
+            "source": "singleton",
+            "user_id": row.get("user_id") or "",
             "created_ts": float(row.get("created_ts") or 0.0),
             "request_id": row.get("request_id") or "",
         }, ensure_ascii=False).encode("utf-8") + b"\n")
@@ -376,16 +813,12 @@ def _build_export_stream(only_status: str | None, include_audio: bool):
             info.mtime = int(row.get("created_ts") or time.time())
             with open(abs_p, "rb") as af:
                 tar.addfile(info, af)
-            # Flush so the consumer sees progress instead of buffering
-            # the whole tar in RAM. Trick: read out what's been written
-            # so far and yield it; tarfile keeps its own write head.
             chunk = buf.getvalue()
             buf.seek(0); buf.truncate()
             if chunk:
                 yield chunk
 
-    # Manifest last so we know the row count it covers (and entries are
-    # written in the same order as audio files when present).
+    # Manifest last so it's written in row order matching the audio.
     manifest_blob = b"".join(manifest_lines)
     info = tarfile.TarInfo("manifest.jsonl")
     info.size = len(manifest_blob)
@@ -686,6 +1119,99 @@ _CAPTURES_HTML = r"""<!doctype html>
     border-radius: 6px; padding: 1.25rem; min-width: 22rem; max-width: 32rem;
   }
 
+  /* ---- Capture grouping ----
+   * Selection state lives in JS and projects to per-row .selected CSS.
+   * The sticky action bar appears when ≥1 row is selected; Σ duration
+   * goes amber at 24 s and red at 28 s — visual feedback for the
+   * Whisper-encoder hard cap (≤30 s). */
+  .cc-head .sel-checkbox {
+    margin: 0 0.4rem 0 0; cursor: pointer;
+  }
+  .capture-card.selected { outline: 2px solid var(--cyan); }
+  .capture-card.is-group {
+    border-left: 4px solid var(--magenta);
+  }
+  .cc-head .group-pill {
+    color: var(--magenta); border-color: #4d2d73;
+  }
+  .cc-head .stale-pill {
+    color: var(--yellow); border-color: #4d3e1f;
+    background: #2d2a14;
+  }
+  .cc-head .lock-pill {
+    color: var(--dim);
+  }
+  .group-members {
+    margin-top: 0.6rem; padding-left: 1.25rem;
+    border-left: 2px solid #2d2a14;
+  }
+  .group-members .capture-card {
+    border-left: 3px solid var(--border);
+    background: #11151b;
+  }
+
+  #action-bar {
+    position: sticky; top: 0; z-index: 8;
+    background: #1d293d; border: 1px solid #30538a; border-radius: 6px;
+    padding: 0.5rem 0.75rem; margin-bottom: 0.75rem;
+    display: none; align-items: center; gap: 0.75rem;
+    flex-wrap: wrap;
+  }
+  #action-bar.show { display: flex; }
+  #action-bar .meter {
+    font-family: var(--font-mono); font-size: var(--fs-md);
+    color: var(--bold); padding: 0.15rem 0.5rem;
+    border: 1px solid var(--border); border-radius: 4px;
+  }
+  #action-bar .meter.amber { color: var(--yellow); border-color: #4d3e1f; }
+  #action-bar .meter.red   { color: var(--red);    border-color: #5a2424; }
+  #action-bar .summary { color: var(--help); font-size: var(--fs-sm); }
+  #action-bar .spacer { flex: 1; }
+
+  /* Merge modal */
+  #merge-modal {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+    z-index: 1000; align-items: center; justify-content: center;
+    display: none;
+  }
+  #merge-modal.show { display: flex; }
+  #merge-modal .box {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 6px; padding: 1.25rem; width: 48rem; max-width: 95vw;
+    max-height: 88vh; overflow: auto;
+  }
+  #merge-modal h3 { margin: 0 0 0.5rem 0; color: var(--bold); }
+  #merge-modal textarea {
+    width: 100%; min-height: 8rem; box-sizing: border-box;
+    background: var(--input-bg); color: var(--fg);
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 0.5rem 0.6rem; font-family: var(--font-mono);
+    font-size: var(--fs-md);
+  }
+  #merge-modal .row {
+    display: flex; gap: 0.5rem; align-items: center; margin: 0.5rem 0;
+    flex-wrap: wrap;
+  }
+  #merge-modal label { font-size: var(--fs-sm); color: var(--help); }
+  #merge-modal .actions {
+    display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 1rem;
+  }
+  #merge-modal .seam-marker {
+    display: inline-block; margin: 0 0.15rem;
+    color: var(--magenta); font-weight: 700;
+  }
+  #merge-modal .members-preview {
+    background: var(--input-bg); border: 1px solid var(--border);
+    border-radius: 4px; padding: 0.5rem 0.7rem;
+    font-size: var(--fs-sm); color: var(--dim);
+    margin-bottom: 0.5rem; max-height: 8rem; overflow: auto;
+  }
+  #merge-modal .members-preview .seg-line { padding: 0.15rem 0; }
+  #merge-modal .members-preview .seg-time {
+    color: var(--help); font-family: var(--font-mono);
+    font-size: var(--fs-xs); margin-right: 0.4rem;
+  }
+
   {{NAV_CSS}}
 </style>
 </head>
@@ -727,8 +1253,56 @@ _CAPTURES_HTML = r"""<!doctype html>
     <button id="btn-clear" class="danger" title="Permanently delete every capture">Clear all</button>
   </div>
 
+  <div id="action-bar">
+    <span class="summary"><strong id="ab-count">0</strong> selected</span>
+    <span class="meter" id="ab-meter">Σ 0.00 s / 28.00 s</span>
+    <span class="summary" id="ab-warn"></span>
+    <span class="spacer"></span>
+    <button id="ab-merge" class="primary" disabled>Merge into group</button>
+    <button id="ab-clear">Clear selection</button>
+  </div>
+
   <div id="list"></div>
 </main>
+
+<div id="merge-modal">
+  <div class="box">
+    <h3>Merge into one training sample</h3>
+    <p style="color:var(--help);font-size:var(--fs-sm);margin:0 0 0.6rem;">
+      Concatenates the selected captures (same speaker, ≤28 s total) into a
+      single ≤30 s Whisper training sample. Inter-segment silence is
+      preserved at the joins per the Low-Resource Whisper paper.
+    </p>
+    <div class="members-preview" id="merge-members"></div>
+    <div class="row">
+      <label>Join style:
+        <select id="merge-join">
+          <option value="space">space</option>
+          <option value="period_space">period + space</option>
+          <option value="newline">newline</option>
+        </select>
+      </label>
+      <label>Silence gap:
+        <select id="merge-silence">
+          <option value="200">200 ms</option>
+          <option value="300" selected>300 ms</option>
+          <option value="400">400 ms</option>
+          <option value="500">500 ms</option>
+        </select>
+      </label>
+      <span class="summary" id="merge-summary"></span>
+    </div>
+    <p style="margin: 0.5rem 0 0.25rem; color: var(--help); font-size: var(--fs-sm);">
+      Transcript (edit before commit; <span class="seam-marker">¶</span>
+      markers show segment boundaries):
+    </p>
+    <textarea id="merge-transcript" spellcheck="false"></textarea>
+    <div class="actions">
+      <button id="merge-cancel">Cancel</button>
+      <button id="merge-commit" class="primary">Commit merge</button>
+    </div>
+  </div>
+</div>
 
 <div id="confirm-modal" class="modal">
   <div class="box">
@@ -746,10 +1320,10 @@ _CAPTURES_HTML = r"""<!doctype html>
 
 <div id="token-modal">
   <div class="box">
-    <h3>Admin token</h3>
-    <p>Bearer token for /captures/api endpoints. Stored in sessionStorage
-       until tab close.</p>
-    <input id="token-input" type="password" autocomplete="off" placeholder="paste token">
+    <h3>API key</h3>
+    <p>Paste your <code>wk_…</code> API key. Stored in sessionStorage until
+    tab close.</p>
+    <input id="token-input" type="password" autocomplete="off" placeholder="wk_…">
     <div class="actions">
       <button id="token-cancel">Cancel</button>
       <button id="token-save" class="primary">Save</button>
@@ -837,8 +1411,99 @@ _CAPTURES_HTML = r"""<!doctype html>
   // State
   // -------------------------------------------------------------------
   var _allCaptures = [];
+  var _allGroups = [];
   var _counts = {};
   var _openRows = {};   // cid -> { audio, blobUrl, wordEls, words, finalText, dirty, corrections, ... }
+  var _selection = new Set();   // capture ids currently selected for merge
+  var _lastSelectId = null;     // anchor for shift-range select
+  var _isAdmin = false;
+  var _selfUserId = null;
+
+  // -------------------------------------------------------------------
+  // Selection helpers
+  // -------------------------------------------------------------------
+  function _handleSelectionClick(row, shift) {
+    var visibleIds = applyFilters(_allCaptures)
+      .filter(function(r) { return !r.group_id; })
+      .map(function(r) { return r.id; });
+    if (shift && _lastSelectId && _lastSelectId !== row.id) {
+      var i = visibleIds.indexOf(_lastSelectId);
+      var j = visibleIds.indexOf(row.id);
+      if (i >= 0 && j >= 0) {
+        var lo = Math.min(i, j), hi = Math.max(i, j);
+        for (var k = lo; k <= hi; k++) _selection.add(visibleIds[k]);
+      }
+    } else {
+      if (_selection.has(row.id)) _selection.delete(row.id);
+      else _selection.add(row.id);
+    }
+    _lastSelectId = row.id;
+    _updateActionBar();
+    // Toggle the .selected class on every visible card without a full
+    // re-render so checkbox focus stays.
+    document.querySelectorAll('.capture-card').forEach(function(card) {
+      var cid = card.dataset.id;
+      if (!cid) return;
+      var inSel = _selection.has(cid);
+      card.classList.toggle('selected', inSel);
+      var cb = card.querySelector('.sel-checkbox');
+      if (cb) cb.checked = inSel;
+    });
+  }
+
+  function _selectedRows() {
+    return Array.from(_selection)
+      .map(function(id) { return _allCaptures.find(function(r) { return r.id === id; }); })
+      .filter(Boolean);
+  }
+
+  function _updateActionBar() {
+    var bar = document.getElementById('action-bar');
+    var n = _selection.size;
+    document.getElementById('ab-count').textContent = String(n);
+    bar.classList.toggle('show', n >= 1);
+    if (n === 0) return;
+    var rows = _selectedRows();
+    var totalSec = rows.reduce(function(s, r) {
+      return s + (r.duration_seconds || 0);
+    }, 0);
+    var meter = document.getElementById('ab-meter');
+    var gap_ms = 300;
+    var totalWithGaps = totalSec + (gap_ms / 1000) * Math.max(0, n - 1);
+    meter.textContent = 'Σ ' + totalWithGaps.toFixed(2) + ' s / 28.00 s';
+    meter.classList.remove('amber', 'red');
+    if (totalWithGaps > 28) meter.classList.add('red');
+    else if (totalWithGaps > 24) meter.classList.add('amber');
+
+    // Warn on cross-speaker mixes — server enforces, UI nudges.
+    var userIds = new Set(rows.map(function(r) { return r.user_id || ''; }));
+    var warn = document.getElementById('ab-warn');
+    var mixedUsers = userIds.size > 1;
+    var hasGrouped = rows.some(function(r) { return r.group_id; });
+    if (mixedUsers) {
+      warn.textContent = '⚠ multiple speakers — merging not allowed';
+      warn.style.color = 'var(--red)';
+    } else if (hasGrouped) {
+      warn.textContent = '⚠ selection includes captures already in a group';
+      warn.style.color = 'var(--red)';
+    } else {
+      warn.textContent = '';
+    }
+
+    var canMerge = n >= 2 && !mixedUsers && !hasGrouped && totalWithGaps <= 28;
+    document.getElementById('ab-merge').disabled = !canMerge;
+  }
+
+  function _clearSelection() {
+    _selection.clear();
+    _lastSelectId = null;
+    _updateActionBar();
+    document.querySelectorAll('.capture-card.selected').forEach(function(c) {
+      c.classList.remove('selected');
+      var cb = c.querySelector('.sel-checkbox');
+      if (cb) cb.checked = false;
+    });
+  }
 
   function relTime(ts) {
     if (!ts) return '—';
@@ -912,10 +1577,23 @@ _CAPTURES_HTML = r"""<!doctype html>
     var card = document.createElement('div');
     card.className = 'capture-card';
     card.dataset.id = r.id;
+    if (_selection.has(r.id)) card.classList.add('selected');
 
     var head = document.createElement('div');
     head.className = 'cc-head';
-    head.innerHTML =
+    // Checkbox is OUTSIDE the click-to-expand zone semantically (we
+    // stopPropagation on it).
+    var cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.className = 'sel-checkbox';
+    cb.checked = _selection.has(r.id);
+    cb.title = 'Select for merge';
+    cb.addEventListener('click', function(ev) {
+      ev.stopPropagation();
+      _handleSelectionClick(r, ev.shiftKey);
+    });
+    head.appendChild(cb);
+    head.insertAdjacentHTML('beforeend',
       '<span class="expand-arrow">›</span>' +
       '<span class="when" title="' + escapeHtml(fmtDate(r.created_ts)) + '">' +
         escapeHtml(relTime(r.created_ts)) + '</span>' +
@@ -927,7 +1605,13 @@ _CAPTURES_HTML = r"""<!doctype html>
       (r.request_id
         ? '<span class="req">req ' + escapeHtml((r.request_id||'').slice(0,8)) + '</span>'
         : '') +
-      '<span class="spacer"></span>';
+      (r.user_id
+        ? '<span class="pill" title="speaker">' + escapeHtml((r.user_id||'').slice(0,6)) + '</span>'
+        : '') +
+      (r.group_id
+        ? '<span class="pill group-pill" title="member of group ' + escapeHtml(r.group_id.slice(0,8)) + '">in group</span>'
+        : '') +
+      '<span class="spacer"></span>');
     card.appendChild(head);
 
     var preview = document.createElement('div');
@@ -1571,11 +2255,19 @@ _CAPTURES_HTML = r"""<!doctype html>
       var j = await api('GET', '/captures/api/list?status=all&limit=500');
       _allCaptures = j.captures || [];
       _counts = j.counts || {};
+      _isAdmin = !!j.is_admin;
+      _selfUserId = j.user_id || null;
+      // Pull groups in parallel-shape; failure is non-fatal (admin sees no groups).
+      try {
+        var jg = await api('GET', '/captures/api/groups');
+        _allGroups = jg.groups || [];
+      } catch (_) { _allGroups = []; }
       updateCaptureBadge(!!j.enabled);
       rebuildModelFilter();
       updateCounts();
+      _clearSelection();
       render();
-      document.body.classList.add('role-admin');
+      if (_isAdmin) document.body.classList.add('role-admin');
     } catch (e) {
       if (e.message !== 'unauthorized') {
         toast('Failed to load captures: ' + e.message, true);
@@ -1593,6 +2285,276 @@ _CAPTURES_HTML = r"""<!doctype html>
   }
 
   // -------------------------------------------------------------------
+  // Merge modal
+  // -------------------------------------------------------------------
+  var JOIN_STR = { space: ' ', period_space: '. ', newline: '\n' };
+  function _seamMarker() { return '¶'; }   // ¶
+
+  function _buildDefaultTranscript(rows, strategy) {
+    var sep = JOIN_STR[strategy] || ' ';
+    return rows.map(function(r) {
+      return (r.corrected_text || r.final || r.raw || '').trim();
+    }).filter(Boolean).join(sep);
+  }
+
+  function _renderMergePreview(rows) {
+    var el = document.getElementById('merge-members');
+    el.innerHTML = '';
+    rows.forEach(function(r, i) {
+      var line = document.createElement('div');
+      line.className = 'seg-line';
+      line.innerHTML = '<span class="seg-time">[' + (i + 1) + '] '
+        + (r.duration_seconds || 0).toFixed(1) + 's</span>'
+        + escapeHtml((r.corrected_text || r.final || r.raw || '').slice(0, 200));
+      el.appendChild(line);
+    });
+  }
+
+  function _openMergeModal() {
+    var rows = _selectedRows();
+    if (rows.length < 2) return;
+    var modal = document.getElementById('merge-modal');
+    _renderMergePreview(rows);
+    var joinSel = document.getElementById('merge-join');
+    var silSel = document.getElementById('merge-silence');
+    var ta = document.getElementById('merge-transcript');
+    function refreshTranscript() {
+      ta.value = _buildDefaultTranscript(rows, joinSel.value);
+    }
+    refreshTranscript();
+    joinSel.onchange = refreshTranscript;
+    // Live summary
+    function refreshSummary() {
+      var n = rows.length;
+      var totalAudio = rows.reduce(function(s, r) { return s + (r.duration_seconds || 0); }, 0);
+      var gap = (parseInt(silSel.value, 10) || 0) / 1000;
+      var total = totalAudio + gap * Math.max(0, n - 1);
+      document.getElementById('merge-summary').textContent =
+        n + ' segments · Σ ' + total.toFixed(2) + ' s / 28.00 s';
+    }
+    refreshSummary();
+    silSel.onchange = refreshSummary;
+    document.getElementById('merge-cancel').onclick = function() {
+      modal.classList.remove('show');
+    };
+    document.getElementById('merge-commit').onclick = function() {
+      var payload = {
+        member_ids: rows.map(function(r) { return r.id; }),
+        transcript: ta.value || '',
+        join_strategy: joinSel.value,
+        silence_ms: parseInt(silSel.value, 10) || 300,
+      };
+      api('POST', '/captures/api/groups', payload)
+        .then(function() {
+          modal.classList.remove('show');
+          _selection.clear();
+          _lastSelectId = null;
+          toast('Group created');
+          return load();
+        })
+        .catch(function(e) {
+          if (e && e.message !== 'unauthorized') toast(e.message, true);
+        });
+    };
+    modal.classList.add('show');
+  }
+
+  // -------------------------------------------------------------------
+  // Group row rendering — packed-for-fine-tune training samples
+  // -------------------------------------------------------------------
+  function _renderGroupCard(g) {
+    var card = document.createElement('div');
+    card.className = 'capture-card is-group';
+    card.dataset.gid = g.id;
+    var head = document.createElement('div');
+    head.className = 'cc-head';
+    head.innerHTML =
+      '<span class="expand-arrow">›</span>' +
+      '<span class="when">' + escapeHtml(relTime(g.created_ts)) + '</span>' +
+      '<span class="pill group-pill">group</span>' +
+      '<span class="pill" title="speaker">' +
+        escapeHtml((g.user_id || '?').slice(0, 6)) + '</span>' +
+      '<span class="duration">' +
+        ((g.merged_duration_ms || 0) / 1000).toFixed(2) + 's</span>' +
+      (g.is_stale
+        ? '<span class="pill stale-pill" title="member changed since merge">stale</span>'
+        : '') +
+      (g.is_locked
+        ? '<span class="pill lock-pill" title="locked — protect from edits">locked</span>'
+        : '') +
+      '<span class="spacer"></span>';
+    card.appendChild(head);
+
+    var preview = document.createElement('div');
+    preview.style.fontFamily = 'var(--font-mono)';
+    preview.style.fontSize = 'var(--fs-sm)';
+    preview.style.color = 'var(--help)';
+    preview.style.marginTop = '0.3rem';
+    preview.style.whiteSpace = 'nowrap';
+    preview.style.overflow = 'hidden';
+    preview.style.textOverflow = 'ellipsis';
+    preview.textContent = g.transcript || '(empty)';
+    card.appendChild(preview);
+
+    var body = document.createElement('div');
+    body.className = 'cc-body';
+    card.appendChild(body);
+    head.addEventListener('click', function() { _toggleGroupExpand(card, g); });
+    return card;
+  }
+
+  function _toggleGroupExpand(card, g) {
+    if (card.classList.contains('open')) {
+      card.classList.remove('open');
+      return;
+    }
+    card.classList.add('open');
+    var body = card.querySelector('.cc-body');
+    if (body.dataset.built === '1') return;
+    api('GET', '/captures/api/groups/' + encodeURIComponent(g.id))
+      .then(function(j) {
+        var detail = j.group || g;
+        var audio = document.createElement('audio');
+        audio.controls = true;
+        audio.style.marginTop = '0.5rem';
+        api('GET', '/captures/api/groups/' + encodeURIComponent(g.id) + '/audio')
+          .catch(function() { return null; });
+        audio.src = '/captures/api/groups/' + encodeURIComponent(g.id) + '/audio?t='
+          + encodeURIComponent(getToken());
+        // Use Authorization header by re-fetching as blob to avoid token in URL.
+        audio.removeAttribute('src');
+        fetch('/captures/api/groups/' + encodeURIComponent(g.id) + '/audio',
+              { headers: { Authorization: 'Bearer ' + getToken() } })
+          .then(function(r) { return r.blob(); })
+          .then(function(b) { audio.src = URL.createObjectURL(b); })
+          .catch(function(_) {});
+        body.appendChild(audio);
+
+        var ta = document.createElement('textarea');
+        ta.value = detail.transcript || '';
+        ta.style.cssText = 'width:100%;min-height:6rem;margin-top:0.5rem;'
+          + 'background:var(--input-bg);color:var(--fg);'
+          + 'border:1px solid var(--border);border-radius:4px;'
+          + 'padding:0.5rem;font-family:var(--font-mono);'
+          + 'font-size:var(--fs-md);box-sizing:border-box;';
+        body.appendChild(ta);
+
+        var btnRow = document.createElement('div');
+        btnRow.style.cssText = 'display:flex;gap:0.5rem;margin-top:0.5rem;flex-wrap:wrap;';
+        var saveTBtn = document.createElement('button');
+        saveTBtn.textContent = 'Save transcript';
+        saveTBtn.className = 'primary';
+        saveTBtn.onclick = function() {
+          api('PATCH', '/captures/api/groups/' + encodeURIComponent(g.id),
+              { transcript: ta.value })
+            .then(function() { toast('Saved'); return load(); })
+            .catch(function(e) { if (e.message !== 'unauthorized') toast(e.message, true); });
+        };
+        btnRow.appendChild(saveTBtn);
+        if (detail.is_stale) {
+          var regenBtn = document.createElement('button');
+          regenBtn.textContent = 'Regenerate audio (clear stale)';
+          regenBtn.onclick = function() {
+            api('POST', '/captures/api/groups/' + encodeURIComponent(g.id) + '/regenerate')
+              .then(function() { toast('Regenerated'); return load(); })
+              .catch(function(e) { if (e.message !== 'unauthorized') toast(e.message, true); });
+          };
+          btnRow.appendChild(regenBtn);
+        }
+        var lockBtn = document.createElement('button');
+        lockBtn.textContent = detail.is_locked ? 'Unlock' : 'Lock';
+        lockBtn.onclick = function() {
+          api('PATCH', '/captures/api/groups/' + encodeURIComponent(g.id),
+              { is_locked: !detail.is_locked })
+            .then(function() { toast('Updated'); return load(); })
+            .catch(function(e) { if (e.message !== 'unauthorized') toast(e.message, true); });
+        };
+        btnRow.appendChild(lockBtn);
+
+        if (!detail.is_locked) {
+          var dissolveBtn = document.createElement('button');
+          dissolveBtn.textContent = 'Dissolve group';
+          dissolveBtn.className = 'danger';
+          dissolveBtn.onclick = function() {
+            if (!confirm('Dissolve this group? Members return to the flat list; merged WAV is unlinked.'))
+              return;
+            api('DELETE', '/captures/api/groups/' + encodeURIComponent(g.id))
+              .then(function() { toast('Dissolved'); return load(); })
+              .catch(function(e) { if (e.message !== 'unauthorized') toast(e.message, true); });
+          };
+          btnRow.appendChild(dissolveBtn);
+        }
+        body.appendChild(btnRow);
+
+        // Member list
+        var membersDiv = document.createElement('div');
+        membersDiv.className = 'group-members';
+        membersDiv.innerHTML = '<p style="font-size:var(--fs-sm);color:var(--help);margin:0.4rem 0;">Members (' + (detail.members||[]).length + ')</p>';
+        (detail.members || []).forEach(function(m) {
+          var line = document.createElement('div');
+          line.style.cssText = 'font-size:var(--fs-sm);color:var(--dim);padding:0.2rem 0;';
+          line.innerHTML = '[' + (m.group_order + 1) + '] '
+            + (m.duration_seconds || 0).toFixed(1) + 's · '
+            + escapeHtml((m.corrected_text || m.final || m.raw || '').slice(0, 120));
+          membersDiv.appendChild(line);
+        });
+        body.appendChild(membersDiv);
+
+        body.dataset.built = '1';
+      })
+      .catch(function(e) {
+        card.classList.remove('open');
+        if (e && e.message !== 'unauthorized') toast(e.message, true);
+      });
+  }
+
+  // Override render() to also draw group cards interleaved by created_ts.
+  var _originalRender = render;
+  render = function() {
+    var rows = applyFilters(_allCaptures);
+    var list = document.getElementById('list');
+    var openIds = Object.keys(_openRows);
+    list.innerHTML = '';
+    // Build a merged timeline: ungrouped captures + group cards (members
+    // are nested inside group cards, so we exclude them from the flat list).
+    var groupsById = {};
+    _allGroups.forEach(function(g) { groupsById[g.id] = g; });
+    var ungrouped = rows.filter(function(r) { return !r.group_id; });
+    var combined = ungrouped.map(function(r) {
+      return { kind: 'capture', ts: r.created_ts || 0, data: r };
+    }).concat(_allGroups.map(function(g) {
+      return { kind: 'group', ts: g.created_ts || 0, data: g };
+    }));
+    combined.sort(function(a, b) { return b.ts - a.ts; });
+
+    if (combined.length === 0) {
+      var empty = document.createElement('div');
+      empty.className = 'empty-state';
+      empty.innerHTML = _allCaptures.length === 0
+        ? '<strong>No captures yet.</strong> Enable <em>CAPTURE_RECORDINGS_ENABLED</em> in /config and send a transcription request.'
+        : 'No captures match the current filters.';
+      list.appendChild(empty);
+      return;
+    }
+    combined.forEach(function(item) {
+      list.appendChild(item.kind === 'capture'
+        ? renderCard(item.data)
+        : _renderGroupCard(item.data));
+    });
+    openIds.forEach(function(cid) {
+      var card = list.querySelector('.capture-card[data-id="' + cid + '"]');
+      if (card) {
+        var r = _allCaptures.find(function(x) { return x.id === cid; });
+        if (r) toggleExpand(card, r);
+      } else {
+        var st = _openRows[cid];
+        if (st && st.blobUrl) URL.revokeObjectURL(st.blobUrl);
+        delete _openRows[cid];
+      }
+    });
+  };
+
+  // -------------------------------------------------------------------
   // Wire up
   // -------------------------------------------------------------------
   document.getElementById('filt-status').addEventListener('change', render);
@@ -1601,6 +2563,8 @@ _CAPTURES_HTML = r"""<!doctype html>
   document.getElementById('btn-refresh').addEventListener('click', load);
   document.getElementById('btn-export').addEventListener('click', onExport);
   document.getElementById('btn-clear').addEventListener('click', onClearAll);
+  document.getElementById('ab-merge').addEventListener('click', _openMergeModal);
+  document.getElementById('ab-clear').addEventListener('click', _clearSelection);
 
   // Revoke any open audio blob URLs on tab close — also handled per-row
   // on collapse, but this is the safety net.

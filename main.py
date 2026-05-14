@@ -1344,6 +1344,10 @@ async def lifespan(app: FastAPI):
             cfg.CAPTURES_DB, cfg.CAPTURES_DIR,
             getattr(cfg, "CAPTURE_RECORDINGS_ENABLED", False),
         )
+        # capture_groups_store reuses the captures DB connection — single
+        # SQLite file holds both tables.
+        import capture_groups_store
+        capture_groups_store.init(captures_store._require_conn(), cfg.CAPTURES_DIR)
         captures_sweep_task = _asyncio_for_models.create_task(
             _captures_retention_loop()
         )

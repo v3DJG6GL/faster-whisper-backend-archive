@@ -89,8 +89,10 @@ CIDR is accepted (`192.168.0.0/16`) and so are bare IPs (`10.0.0.5`).
 - `GET  /logs/stream` — raw SSE feed.
 - `GET  /stats` — system overview dashboard. Allowlist-gated (`STATS_ALLOWED_HOSTS`; loopback always allowed).
 - `GET  /stats/snapshot`, `GET /stats/stream` — JSON snapshot + SSE stream of the same data (~1 Hz).
-- `GET  /config` — admin WebUI (only when `WHISPER_ADMIN_UI=1`). Allowlist-gated (`ADMIN_ALLOWED_HOSTS`; loopback always allowed).
-- `GET/POST /config/state`, `POST /config/restart` — admin JSON endpoints; require bearer token if `WHISPER_ADMIN_TOKEN` is set.
+- `GET  /config` — admin WebUI (only when `WHISPER_ADMIN_UI=1`). Allowlist-gated (`ADMIN_ALLOWED_HOSTS`; loopback always allowed) plus API-key auth.
+- `GET  /config/api-keys` — admin UI for per-user API key management.
+- `GET/POST /config/state`, `POST /config/restart` — admin JSON endpoints; require `Authorization: Bearer <api_key>` resolving to a user with `is_admin=True`.
+- `GET  /auth/whoami` — resolve the current bearer to `{open_mode, user_id, username, is_admin}`. WebUI uses this to render the login modal and the OPEN-mode banner.
 
 ### Model selection examples
 
@@ -155,40 +157,30 @@ The nav row at the top of every page (logs ↔ stats ↔ config) also surfaces t
 
 A second WebUI at `/config` lets you edit any setting from `config.py` from the browser, with hot-reload for safe knobs (transcribe params, dictation map, prompt) and an automatic service restart for cold ones (server port, log file, preload list).
 
-**Off by default.** Two ways to enable, pick whichever fits your workflow:
+**Off by default.** Set `ADMIN_UI_ENABLED = True` in `config.py` (or `WHISPER_ADMIN_UI=1` env var), then `Restart-Service WhisperAPI`. The `/config` page opens at `http://localhost:8000/config` from the server itself or any host in `ADMIN_ALLOWED_HOSTS`.
 
-*Option 1 — edit `config.py`* (committed in-repo, simplest):
+### Authentication: per-user API keys
 
-```python
-ADMIN_UI_ENABLED = True
-ADMIN_TOKEN = "<paste-token-here>"   # or leave None for loopback-only
-```
+The transcription endpoint and every WebUI page are gated by **per-user API keys**, not a shared token. Each key looks like `wk_<43-char base64>` (256-bit entropy); raw keys are SHA-256-hashed at rest and shown **once** on creation.
 
-Then `Restart-Service WhisperAPI`.
+**Bootstrap.** On a fresh install with no admin key in the DB, the server starts in **OPEN mode**: every request is accepted as a synthetic admin, a red banner appears on every WebUI page, and a `WARNING` log line fires every 60 s. This is the operator's prompt to generate the first admin key. Two ways:
 
-*Option 2 — env vars via WinSW* (good if `config.py` should stay committed without a token in it):
+1. **In the UI** — open `/config/api-keys`, click "+ add user" with admin=true, then "+ generate key", and copy the raw key from the show-once modal.
+2. **Via env var** — set `WHISPER_BOOTSTRAP_ADMIN_KEY=wk_…` on first start. A `bootstrap-admin` user is created (or skipped if the same key hash is already present) with that exact raw key. Subsequent starts no-op.
 
-```powershell
-# Generate a strong token (run once, paste into the install script below):
-[Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
-```
+Once at least one active admin key exists, the OPEN-mode banner disappears and 401 is returned to unauthenticated callers.
 
-Edit `install-service.ps1` and uncomment the `WHISPER_ADMIN_UI` / `WHISPER_ADMIN_TOKEN` `<env>` lines inside the XML here-string (search for `WHISPER_ADMIN_TOKEN`), pasting the token in. Then:
+**Using a key.** Clients (Vowen, curl, the WebUI login modal) send `Authorization: Bearer wk_…`. The WebUI stores it in `sessionStorage` (`whisper_api_key`) until tab close. On any 401 the modal re-prompts.
 
-```powershell
-.\install-service.ps1
-```
+**Lockout protection.** Revoking the last active admin key (or the last admin user) returns 409. Generate a second admin key first.
 
-The script regenerates `WhisperAPI.xml` from the here-string and re-registers the service every run, so edits to those `<env>` lines are picked up by re-running it.
+**Multi-user.** Each capture is tagged with the originating `user_id`. Non-admin users see only their own captures in `/captures`; admins see all and can filter by user. Group merging is locked to a single speaker — the server rejects any merge whose members span more than one user.
 
-Then open `http://localhost:8000/config` **on the server itself** (the endpoint refuses non-loopback callers regardless of `SERVER_HOST`). The page asks for the token, stores it in `sessionStorage`, and attaches it to every fetch.
-
-Security model:
-- **Feature flag**: `WHISPER_ADMIN_UI=1` is required for the routes to be registered at all. Without it, `/config*` returns 404.
-- **Loopback only**: requests from non-loopback IPs return 403 — the public bind address (`SERVER_HOST=0.0.0.0`) doesn't expose the admin endpoints.
-- **Bearer token**: optional but strongly recommended. If `WHISPER_ADMIN_TOKEN` is set, every mutating endpoint requires `Authorization: Bearer <token>`. If unset, loopback alone is the gate.
-- **Server-side validation**: every payload is validated against `config_store.AdminConfig` (Pydantic v2). Unknown keys, out-of-range numbers, malformed paths, and oversize collections are rejected with 422.
-- **Auto-restart**: when a "cold" setting changes (server port, log file, preload list, …), a confirmation modal asks whether to restart the service. Confirming spawns `WhisperAPI.exe restart!` (WinSW's documented self-restart command) and exits the python process after a ~1.5 s flush delay; WinSW relaunches the wrapper, surviving the SCM child-tree kill. The page polls `/v1/models` until the new process is up, then reloads. Total downtime is ~3-4 s.
+Other layers:
+- **Feature flag**: `WHISPER_ADMIN_UI=1` (or `ADMIN_UI_ENABLED = True`) registers the routes at all. Without it, `/config*` returns 404.
+- **Host allowlist**: `ADMIN_ALLOWED_HOSTS` keeps the admin endpoints reachable only from the configured CIDRs (loopback always implicit).
+- **Server-side validation**: every payload is validated against `config_store.AdminConfig` (Pydantic v2).
+- **Auto-restart**: when a "cold" setting changes (server port, log file, preload list, …), a confirmation modal asks whether to restart the service. WinSW relaunches the wrapper; the page polls `/v1/models` until back up.
 
 Edits land in **`config.local.json`** at the repo root (gitignored). See `config.local.example.json` for the schema.
 
@@ -204,6 +196,15 @@ metrics.py                 In-process request metrics (counters, latency ring, r
 system_stats.py            GPU + host snapshot (pynvml + psutil; degrades gracefully if NVML missing)
 web_common.py              Shared helpers: allowlist gate, nav HTML, severity counts
 restart_service.py         Detached self-restart helper (Windows-only)
+auth.py                    HTTPBearer dep — get_current_user / require_admin + OPEN-mode loop
+api_keys_store.py          users + api_keys SQLite store (SHA-256 hash, soft revoke, O(1) lookup)
+api_keys_routes.py         /config/api-keys admin UI for per-user key management
+audio_merge.py             stdlib-wave PCM splicer for ≤28 s training-sample packing
+capture_groups_store.py    capture_groups table + dissolve / stale / regenerate helpers
+captures_store.py          Capture rows + audio fanout, retention, eviction
+captures_routes.py         /captures admin page + merge/dissolve/regenerate API
+reports_store.py / reports_routes.py
+                           User-submitted transcription error reports + admin triage
 config.local.json          Runtime overrides written by the admin UI (gitignored, optional)
 config.local.example.json  Example overrides file
 test.py                    Manual test client (vowen.ai compatibility)

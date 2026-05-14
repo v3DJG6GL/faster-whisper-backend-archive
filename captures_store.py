@@ -623,6 +623,14 @@ def update_capture(cid: str, patch: dict[str, Any]) -> dict[str, Any] | None:
         )
         if cur.rowcount == 0:
             return None
+    # If the capture belongs to a group, recheck the audio-content hash;
+    # transcript-only edits don't change audio so the hash will match and
+    # nothing flips, but a future audio-edit code path is now wired.
+    try:
+        import capture_groups_store
+        capture_groups_store.recompute_stale_for_member(cid)
+    except Exception:
+        pass
     return get_capture(cid)
 
 
