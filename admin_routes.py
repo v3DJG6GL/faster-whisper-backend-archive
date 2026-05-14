@@ -3643,6 +3643,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     showLogin('Bearer token required.');
     return;
   }
+  if (probe.status === 403) {
+    // 403 with a presented bearer = signed-in but not admin. Render a
+    // friendly landing card instead of the opaque "check service logs"
+    // panel. /quick-config is what end-users actually want.
+    if (await _renderAdminOnlyIfNonAdmin()) return;
+  }
   if (!probe.ok) {
     document.body.innerHTML = '<main style="padding:1.25rem;color:#ff7b72">'
       + 'Could not load /config/state (' + probe.status + '). '
@@ -3652,6 +3658,36 @@ document.addEventListener('DOMContentLoaded', async () => {
   showApp();
   await loadState();
 });
+
+// ---- Admin-only landing (shared snippet across admin pages) ----
+async function _renderAdminOnlyIfNonAdmin() {
+  try {
+    const r = await fetch('/auth/whoami', { headers: authHeaders() });
+    if (r.ok) {
+      const j = await r.json();
+      if (j && j.is_admin === false) {
+        document.body.innerHTML =
+          '<main style="max-width:36rem;margin:4rem auto;text-align:center;'
+          + 'padding:2rem;background:#161b22;border:1px solid #30363d;'
+          + 'border-radius:6px;color:#c9d1d9;font-family:system-ui,sans-serif;">'
+          + '<h2 style="margin:0 0 0.5rem;color:#f0f6fc;">Admin only</h2>'
+          + '<p style="color:#8b949e;">This page requires an admin API key. '
+          + 'Sign in with an admin key or go to your personal page.</p>'
+          + '<p style="margin-top:1.2rem;">'
+          + '<a href="/quick-config" style="color:#79c0ff;'
+          + 'border:1px solid #79c0ff;padding:0.45rem 1rem;'
+          + 'border-radius:4px;text-decoration:none;">Open /quick-config</a> '
+          + '<button onclick="sessionStorage.removeItem(\'whisper_api_key\');'
+          + 'location.reload()" style="margin-left:0.5rem;'
+          + 'padding:0.45rem 1rem;border-radius:4px;border:1px solid #30363d;'
+          + 'background:#0d1117;color:#c9d1d9;cursor:pointer;">Sign out</button>'
+          + '</p></main>';
+        return true;
+      }
+    }
+  } catch (_) {}
+  return false;
+}
 
 })();
 </script>

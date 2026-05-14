@@ -1942,7 +1942,7 @@ _LOG_VIEWER_HTML = """<!doctype html>
   if(v)document.documentElement.style.setProperty('--log-zoom',v);})();</script>
 <style>
   :root {
-    --bg: #0d1117; --fg: #c9d1d9; --dim: #6e7681;
+    --bg: #0d1117; --panel: #161b22; --fg: #c9d1d9; --dim: #6e7681;
     --cyan: #79c0ff; --green: #7ee787; --yellow: #f2cc60;
     --red: #ff7b72; --magenta: #d2a8ff; --bold: #f0f6fc;
     --border: #30363d;

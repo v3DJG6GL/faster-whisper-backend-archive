@@ -61,7 +61,20 @@ _VALID_STATUS = frozenset({"new", "reviewed", "ready", "dismissed", "audio_missi
 # admin needs to act on it.
 _EVICTION_ORDER = ("dismissed", "audio_missing", "reviewed", "new", "ready")
 
-_SCHEMA = """
+# Schema is split into THREE phases on purpose, ordered around the
+# user_id / group_id migration:
+#
+#   1. _SCHEMA_CORE  — table + indexes that reference ONLY original
+#      columns. Safe to run against a pre-flag DB.
+#   2. _MIGRATIONS   — ALTER TABLE ADD COLUMN for user_id, group_id,
+#      group_order. Idempotent (catches the "duplicate column" error).
+#   3. _SCHEMA_USER_GROUP_INDEXES — indexes that reference user_id /
+#      group_id. MUST run AFTER step 2 — if we packaged them into
+#      _SCHEMA_CORE with executescript(), the index creation on a
+#      pre-flag DB raised "no such column: user_id" and the executescript
+#      bailed before step 2 could fix it, leaving the table missing
+#      both the columns AND the indexes.
+_SCHEMA_CORE = """
 CREATE TABLE IF NOT EXISTS captures (
   id              TEXT PRIMARY KEY,
   created_ts      REAL NOT NULL,
@@ -87,19 +100,22 @@ CREATE TABLE IF NOT EXISTS captures (
 CREATE INDEX IF NOT EXISTS idx_captures_created    ON captures(created_ts DESC);
 CREATE INDEX IF NOT EXISTS idx_captures_status     ON captures(status);
 CREATE INDEX IF NOT EXISTS idx_captures_request_id ON captures(request_id);
-CREATE INDEX IF NOT EXISTS idx_captures_user       ON captures(user_id, created_ts DESC);
-CREATE INDEX IF NOT EXISTS idx_captures_group      ON captures(group_id, group_order);
 """
 
 # Migrations for installs that predate the user_id / group_id columns.
-# SQLite ALTER ADD COLUMN is cheap and idempotent (we catch OperationalError
-# to skip the no-op repeat call). Run after _SCHEMA so the indexes are also
-# present even if the table existed before.
+# SQLite ALTER ADD COLUMN raises OperationalError("duplicate column …")
+# on a fresh DB whose CREATE TABLE already includes them, so we swallow
+# that specific error and keep going.
 _MIGRATIONS = (
     "ALTER TABLE captures ADD COLUMN user_id TEXT",
     "ALTER TABLE captures ADD COLUMN group_id TEXT",
     "ALTER TABLE captures ADD COLUMN group_order INTEGER",
 )
+
+_SCHEMA_USER_GROUP_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_captures_user  ON captures(user_id, created_ts DESC);
+CREATE INDEX IF NOT EXISTS idx_captures_group ON captures(group_id, group_order);
+"""
 
 
 # ---------------------------------------------------------------------
@@ -119,13 +135,14 @@ def init(db_path: str, audio_dir: str) -> None:
     _conn.row_factory = sqlite3.Row
     _conn.execute("PRAGMA journal_mode=WAL;")
     _conn.execute("PRAGMA synchronous=NORMAL;")
-    _conn.executescript(_SCHEMA)
+    _conn.executescript(_SCHEMA_CORE)
     for stmt in _MIGRATIONS:
         try:
             _conn.execute(stmt)
         except sqlite3.OperationalError:
             # Column already present — idempotent.
             pass
+    _conn.executescript(_SCHEMA_USER_GROUP_INDEXES)
 
 
 def _require_conn() -> sqlite3.Connection:

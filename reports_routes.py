@@ -664,6 +664,14 @@ _REPORTS_HTML = """<!doctype html>
       showTokenModal(function() { /* user re-runs the action */ });
       throw new Error('unauthorized');
     }
+    if (resp.status === 403) {
+      // Probe /auth/whoami to disambiguate "non-admin user" from a
+      // server-side authz problem. On non-admin, swap <main> for the
+      // Admin-only landing and throw a sentinel the load() catch can
+      // suppress (no toast, no console noise).
+      var rendered = await _renderAdminOnlyIfNonAdmin();
+      if (rendered) throw new Error('not-admin');
+    }
     if (!resp.ok) {
       var msg = 'HTTP ' + resp.status;
       try {
@@ -673,6 +681,45 @@ _REPORTS_HTML = """<!doctype html>
       throw new Error(msg);
     }
     return await resp.json();
+  }
+
+  // ---- Admin-only landing ----
+  // Shared with /captures, /api-keys, /config, /stats. Renders a
+  // friendly "this page requires admin" card in place of <main> when
+  // the signed-in API key resolves to a non-admin user.
+  function _renderNotAdminLanding() {
+    document.body.classList.remove('role-admin');
+    var main = document.getElementsByTagName('main')[0];
+    if (!main) return;
+    main.innerHTML =
+      '<div style="max-width:36rem;margin:4rem auto;text-align:center;'
+      + 'padding:2rem;background:var(--panel);border:1px solid var(--border);'
+      + 'border-radius:6px;">'
+      + '<h2 style="margin:0 0 0.5rem;color:var(--bold);">Admin only</h2>'
+      + '<p style="color:var(--help);">This page requires an admin API key. '
+      + 'Sign in with an admin key or go to your personal page.</p>'
+      + '<p style="margin-top:1.2rem;">'
+      + '<a href="/quick-config" style="color:var(--cyan);'
+      + 'border:1px solid var(--cyan);padding:0.45rem 1rem;'
+      + 'border-radius:4px;text-decoration:none;">Open /quick-config</a> '
+      + '<button onclick="sessionStorage.removeItem(\'whisper_api_key\');'
+      + 'location.reload()" style="margin-left:0.5rem;">Sign out</button>'
+      + '</p></div>';
+  }
+  async function _renderAdminOnlyIfNonAdmin() {
+    try {
+      var tok = getToken();
+      var hdrs = tok ? { Authorization: 'Bearer ' + tok } : {};
+      var r = await fetch('/auth/whoami', { headers: hdrs });
+      if (r.ok) {
+        var j = await r.json();
+        if (j && j.is_admin === false) {
+          _renderNotAdminLanding();
+          return true;
+        }
+      }
+    } catch (_) {}
+    return false;
   }
 
   // -------------------------------------------------------------------
@@ -1147,9 +1194,8 @@ _REPORTS_HTML = """<!doctype html>
       render();
       document.body.classList.add('role-admin');
     } catch (e) {
-      if (e.message !== 'unauthorized') {
-        toast('Failed to load reports: ' + e.message, true);
-      }
+      if (e.message === 'unauthorized' || e.message === 'not-admin') return;
+      toast('Failed to load reports: ' + e.message, true);
     }
   }
 

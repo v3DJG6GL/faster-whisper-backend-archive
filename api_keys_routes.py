@@ -391,6 +391,46 @@ _API_KEYS_HTML = r"""<!doctype html>
     return fetch(path, opts);
   }
 
+  // ---- Admin-only landing ----
+  // When an admin-gated API call returns 403, we ask /auth/whoami to
+  // distinguish "I'm signed in as a non-admin user" from a real
+  // server-side problem. On non-admin, we swap <main> for a friendly
+  // landing card and return true so the caller skips the generic
+  // error toast.
+  function _renderNotAdminLanding() {
+    document.body.classList.remove('role-admin');
+    var main = document.getElementsByTagName('main')[0];
+    if (!main) return;
+    main.innerHTML =
+      '<div style="max-width:36rem;margin:4rem auto;text-align:center;'
+      + 'padding:2rem;background:var(--panel);border:1px solid var(--border);'
+      + 'border-radius:6px;">'
+      + '<h2 style="margin:0 0 0.5rem;color:var(--bold);">Admin only</h2>'
+      + '<p style="color:var(--help);">This page requires an admin API key. '
+      + 'Sign in with an admin key or go to your personal page.</p>'
+      + '<p style="margin-top:1.2rem;">'
+      + '<a href="/quick-config" style="color:var(--cyan);'
+      + 'border:1px solid var(--cyan);padding:0.45rem 1rem;'
+      + 'border-radius:4px;text-decoration:none;">Open /quick-config</a> '
+      + '<button onclick="sessionStorage.removeItem(\'whisper_api_key\');'
+      + 'location.reload()" style="margin-left:0.5rem;">Sign out</button>'
+      + '</p></div>';
+  }
+  async function _check403(r) {
+    if (!r || r.status !== 403) return false;
+    try {
+      var who = await fetch('/auth/whoami', { headers: authHeaders() });
+      if (who.ok) {
+        var j = await who.json();
+        if (j && j.is_admin === false) {
+          _renderNotAdminLanding();
+          return true;
+        }
+      }
+    } catch (_) {}
+    return false;
+  }
+
   function showToast(msg, kind) {
     var el = document.getElementById('toast');
     if (!el) {
@@ -656,11 +696,17 @@ _API_KEYS_HTML = r"""<!doctype html>
         return;
       }
     }
+    if (await _check403(r)) return;
     if (!r.ok) {
       showToast('Load failed: HTTP ' + r.status, 'err');
       return;
     }
     var j = await r.json();
+    // Reaching this endpoint successfully means the bearer resolved to
+    // an admin (or the server is in OPEN mode → synthetic admin). Set
+    // body.role-admin so NAV_CSS reveals the admin-only nav links + the
+    // severity pills.
+    document.body.classList.add('role-admin');
     var banner = document.getElementById('open-banner');
     banner.style.display = j.open_mode ? 'block' : 'none';
     var ct = document.getElementById('users-container');
