@@ -485,17 +485,52 @@ _QUICK_CONFIG_HTML = r"""<!doctype html>
     color: var(--fg); font-size: var(--fs-sm); display: none; z-index: 10; }
   #toast.err { border-color: var(--red); color: var(--red); }
   #toast.ok { border-color: var(--green); color: var(--green); }
-  #token-modal { position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+  /* API-key login modal — matches /captures, /reports, /config */
+  #token-modal { position: fixed; inset: 0; background: rgba(0,0,0,0.65);
     display: none; align-items: center; justify-content: center; z-index: 8; }
   #token-modal.show { display: flex; }
-  #token-modal .box { background: var(--panel); border: 1px solid var(--border);
-    border-radius: 6px; padding: 1.25rem; min-width: 18rem; }
-  #token-modal h3 { margin: 0 0 0.5rem 0; }
-  #token-modal input { width: 100%; padding: 0.4rem; background: var(--input-bg);
-    color: var(--fg); border: 1px solid var(--border); border-radius: 3px;
-    font: inherit; }
-  #token-modal .actions { display: flex; gap: 0.5rem; margin-top: 0.75rem;
-    justify-content: flex-end; }
+  #token-modal .box {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 6px; padding: 1.4rem 1.5rem 1.2rem;
+    width: 30rem; max-width: 92vw;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+  }
+  #token-modal h3 {
+    margin: 0 0 0.5rem 0; color: var(--bold); font-size: var(--fs-xl);
+  }
+  #token-modal p {
+    margin: 0 0 0.9rem 0; line-height: 1.45;
+    color: var(--help, var(--dim)); font-size: var(--fs-sm);
+  }
+  #token-modal p code { color: var(--fg); font-family: var(--font-mono); }
+  #token-modal input {
+    box-sizing: border-box; width: 100%;
+    background: var(--input-bg); color: var(--fg);
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 0.55rem 0.7rem; font-family: var(--font-mono);
+    font-size: var(--fs-md); line-height: 1.4;
+  }
+  #token-modal input:focus { outline: none; border-color: var(--cyan); }
+  #token-modal .actions {
+    display: flex; gap: 0.6rem; justify-content: flex-end;
+    margin-top: 1.1rem; padding-top: 0.85rem;
+    border-top: 1px solid var(--border);
+  }
+  #token-modal .actions button {
+    font: inherit; font-size: var(--fs-md);
+    line-height: 1.4;
+    padding: 0.45rem 1rem;
+    min-height: 2.25rem;
+    border-radius: 4px;
+    cursor: pointer;
+    background: var(--input-bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+  }
+  #token-modal .actions button:hover { background: #21262d; color: var(--bold); }
+  #token-modal .actions button.primary {
+    color: var(--green); border-color: var(--green);
+  }
 
   /* Recent transcriptions panel */
   #recent-panel { margin-top: 1.5rem; border-top: 1px solid var(--border);

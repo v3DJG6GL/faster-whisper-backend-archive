@@ -222,8 +222,12 @@ _API_KEYS_HTML = r"""<!doctype html>
   input[type=text], input[type=password] { box-sizing: border-box;
     width: 100%;
     background: var(--input-bg); color: var(--fg);
-    border: 1px solid var(--border); border-radius: 3px;
-    padding: 0.3rem 0.5rem; font: inherit; font-size: var(--fs-sm); }
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 0.5rem 0.65rem; font: inherit; font-size: var(--fs-md);
+    line-height: 1.4; }
+  input[type=text]:focus, input[type=password]:focus {
+    outline: none; border-color: var(--cyan);
+  }
   label.row { display: flex; gap: 0.5rem; align-items: center;
     margin: 0.3rem 0; font-size: var(--fs-sm); }
   .modal { position: fixed; inset: 0; display: none;
@@ -231,20 +235,61 @@ _API_KEYS_HTML = r"""<!doctype html>
     background: rgba(0,0,0,0.7); z-index: 100; }
   .modal.show { display: flex; }
   .modal .box { background: var(--panel); border: 1px solid var(--border);
-    border-radius: 4px; padding: 1rem 1.2rem;
-    width: 28rem; max-width: 92vw; }
-  .modal h3 { margin: 0 0 0.5rem 0; color: var(--bold); }
+    border-radius: 6px; padding: 1.4rem 1.5rem 1.2rem;
+    width: 30rem; max-width: 92vw;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.5); }
+  .modal h3 { margin: 0 0 0.5rem 0; color: var(--bold);
+    font-size: var(--fs-xl); }
+  .modal p { margin: 0 0 0.9rem 0; line-height: 1.45;
+    color: var(--help); font-size: var(--fs-sm); }
+  .modal p strong, .modal p code { color: var(--fg); }
+  .modal p:last-of-type { margin-bottom: 1rem; }
+  .modal input[type=text], .modal input[type=password] {
+    /* Slightly taller inputs in modals (better tap target + reads
+       cleaner next to the buttons below). */
+    padding: 0.55rem 0.7rem; font-size: var(--fs-md);
+  }
   .modal .raw-key {
     font-family: var(--font-mono); font-size: var(--fs-sm);
-    word-break: break-all; padding: 0.5rem; background: var(--input-bg);
-    border: 1px solid var(--border); border-radius: 3px;
-    margin: 0.5rem 0; user-select: all;
+    word-break: break-all; padding: 0.65rem 0.75rem;
+    background: var(--input-bg); color: var(--bold);
+    border: 1px solid var(--border); border-radius: 4px;
+    margin: 0.65rem 0 0.85rem; user-select: all;
+    line-height: 1.5;
   }
+  /* Uniform action-button sizing: same line-height, same padding, same
+     min-height — so Cancel and Save render identical regardless of which
+     border colour they carry. Avoid `padding: …` redeclaration in
+     button.primary etc. so heights stay in sync. */
   .modal .actions {
-    display: flex; gap: 0.5rem; justify-content: flex-end;
-    margin-top: 0.6rem;
+    display: flex; gap: 0.6rem; justify-content: flex-end;
+    margin-top: 1.1rem; padding-top: 0.85rem;
+    border-top: 1px solid var(--border);
+  }
+  .modal .actions button {
+    font: inherit; font-size: var(--fs-md);
+    line-height: 1.4;
+    padding: 0.45rem 1rem;
+    min-height: 2.25rem;
+    border-radius: 4px;
+    cursor: pointer;
+    background: var(--input-bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+  }
+  .modal .actions button:hover { background: #21262d; color: var(--bold); }
+  .modal .actions button:disabled {
+    opacity: 0.45; cursor: not-allowed; background: var(--input-bg);
+  }
+  .modal .actions button.primary {
+    color: var(--green); border-color: var(--green);
+  }
+  .modal .actions button.danger {
+    color: var(--red); border-color: #5a2424;
   }
   .err { color: var(--red); font-size: var(--fs-sm); margin: 0.4rem 0 0 0; }
+  .modal .err { margin: 0.55rem 0 0 0; }
+  .modal .err:empty { display: none; }
   .hint { color: var(--help); font-size: var(--fs-sm); }
   {{NAV_CSS}}
 </style></head>
@@ -304,14 +349,14 @@ _API_KEYS_HTML = r"""<!doctype html>
 <div id="token-modal" class="modal">
   <div class="box">
     <h3>Admin API key</h3>
-    <p>Paste your <code>wk_&hellip;</code> admin key to manage keys. In OPEN
-    mode any value works.</p>
+    <p>Paste your <code>wk_&hellip;</code> admin key to manage users and
+    keys. In OPEN mode (no admin key configured yet) any value works.</p>
     <input id="token-input" type="password" placeholder="wk_&hellip;">
+    <p id="token-err" class="err"></p>
     <div class="actions">
       <button id="token-cancel">Cancel</button>
       <button id="token-save" class="primary">Save</button>
     </div>
-    <p id="token-err" class="err"></p>
   </div>
 </div>
 
