@@ -224,20 +224,54 @@ def create_capture(
     words: list[dict[str, Any]],
     segments: list[dict[str, Any]],
 ) -> str:
-    """Two-phase write: copy audio to its final relpath, then insert row.
-    On row-insert failure we unlink the audio file (best-effort) to avoid
-    orphaning a multi-MB blob. Returns the capture id.
+    """Two-phase write: transcode the source audio into a 16 kHz mono
+    WAV at the final relpath, then insert the SQLite row. On row-insert
+    failure we unlink the audio file (best-effort) to avoid orphaning
+    a multi-MB blob. Returns the capture id.
+
+    Why transcode (vs. raw copy): the dictation clients upload m4a /
+    webm / whatever, and Firefox on Linux can't play AAC in MP4 without
+    a system codec (which the deployment doesn't ship). Storing every
+    file as RIFF/WAVE 16 kHz mono gives:
+      - universal browser playback (no system codec needed)
+      - Whisper's native input rate, so fine-tuning loses no quality
+      - HF datasets.Audio() auto-loads it without further resampling
+
+    The `audio_format` parameter is preserved for backwards
+    compatibility but ignored: every internal file is always `.wav`.
 
     `audio_src_path` is typically the transcribe handler's tmp file —
-    we copy (not move) so the existing finally-unlink stays correct."""
+    we don't mutate or unlink the source."""
+    import audio_transcode
+
     cid = uuid.uuid4().hex
-    relpath = _relpath_for(cid, audio_format)
+    # Force `.wav` on disk regardless of what the caller passed. The
+    # caller may still pass `audio_format` as a hint (e.g. for logs);
+    # we keep the parameter for compat but pin the relpath here.
+    _unused_caller_format = audio_format
+    relpath = _relpath_for(cid, "wav")
     abs_path = abs_audio_path(relpath)
 
-    # Phase 1: write audio with .tmp + os.replace + retry on Windows AV
+    # Phase 1: transcode source → tmp file, then atomic rename to final.
+    # On any transcode failure we leave nothing on disk and propagate
+    # so main.py can log + skip the capture without breaking the
+    # transcription response.
     os.makedirs(os.path.dirname(abs_path), exist_ok=True)
     tmp_path = abs_path + ".tmp"
-    shutil.copyfile(audio_src_path, tmp_path)
+    try:
+        wav_bytes = audio_transcode.transcode_to_wav_16k_mono(
+            audio_src_path, tmp_path,
+        )
+    except Exception as e:
+        # transcode_to_wav_16k_mono already best-effort unlinks the
+        # tmp on its own failures; this is a belt-and-braces cleanup.
+        try:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise RuntimeError(f"audio transcode failed: {e}") from e
+
     # fsync the data before swap so a crash between rename and SQLite
     # insert doesn't leave a zero-length file on disk.
     try:
@@ -262,7 +296,7 @@ def create_capture(
     now = time.time()
     raw_t = (raw or "")[:_CAP_RAW]
     final_t = (final or "")[:_CAP_FINAL]
-    ext_t = audio_format.lstrip(".").lower()[:_CAP_AUDIO_FORMAT] or "bin"
+    ext_t = "wav"  # every internal file is RIFF/WAVE after this change
     words_t = _truncate_json(words or [], _CAP_WORDS_JSON)
     segments_t = _truncate_json(segments or [], _CAP_SEGMENTS_JSON)
 
@@ -291,9 +325,9 @@ def create_capture(
         raise
 
     logger.info(
-        "[captures] created id=%s model=%s dur=%.1fs words=%d",
+        "[captures] created id=%s model=%s dur=%.1fs words=%d wav_bytes=%d",
         cid[:8], model or "?", float(duration_seconds or 0.0),
-        len(words or []),
+        len(words or []), int(wav_bytes),
     )
     return cid
 
