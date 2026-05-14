@@ -47,7 +47,8 @@ CREATE TABLE IF NOT EXISTS capture_groups (
   inter_segment_silence_ms    INTEGER NOT NULL DEFAULT 300,
   is_stale                    INTEGER NOT NULL DEFAULT 0,
   is_locked                   INTEGER NOT NULL DEFAULT 0,
-  corrections_json            TEXT NOT NULL DEFAULT '[]'
+  corrections_json            TEXT NOT NULL DEFAULT '[]',
+  corrections_migrated_at     REAL
 );
 CREATE INDEX IF NOT EXISTS idx_capture_groups_user
   ON capture_groups(user_id, created_ts DESC);
@@ -58,6 +59,7 @@ CREATE INDEX IF NOT EXISTS idx_capture_groups_user
 # CREATE TABLE) raises OperationalError and we swallow it.
 _MIGRATIONS: tuple[str, ...] = (
     "ALTER TABLE capture_groups ADD COLUMN corrections_json TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE capture_groups ADD COLUMN corrections_migrated_at REAL",
 )
 
 
@@ -144,6 +146,10 @@ def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "is_stale":                    bool(row["is_stale"]),
         "is_locked":                   bool(row["is_locked"]),
         "corrections":                 corrections,
+        "corrections_migrated_at":     (
+            float(row["corrections_migrated_at"])
+            if row["corrections_migrated_at"] is not None else None
+        ),
     }
 
 
@@ -252,6 +258,7 @@ def update_group(
         "transcript", "transcript_join_strategy",
         "inter_segment_silence_ms", "is_locked", "is_stale",
         "member_hashes_json", "merged_duration_ms", "corrections_json",
+        "corrections_migrated_at",
     }
     sets: list[str] = []
     args: list[Any] = []

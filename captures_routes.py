@@ -528,6 +528,16 @@ async def create_group_api(
         member_hash_map=hashes,
         duration_ms=duration_ms,
     )
+    # Project member chip corrections into the new group with global
+    # word indices, then mark migrated so _enrich_group's backfill is a
+    # no-op for this gid. Order matters: insert must happen before
+    # get_members can return the freshly-joined rows.
+    members = capture_groups_store.get_members(gid)
+    migrated = _project_member_corrections(members)
+    capture_groups_store.update_group(gid, {
+        "corrections_json": json.dumps(migrated, ensure_ascii=False),
+        "corrections_migrated_at": time.time(),
+    })
     return JSONResponse({"group_id": gid})
 
 
@@ -597,15 +607,79 @@ async def get_group_api(
     return JSONResponse({"group": _enrich_group(g)})
 
 
+def _project_member_corrections(
+    members: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Project each member's chip corrections into a group-level chip
+    list with global word indices. Member chips reference indices into
+    that member's words_json (immutable raw STT). Group chips need
+    indices into the flattened merged_words array. The offset for
+    member m is Σ_{j<m} len(words_j) — silence gaps contribute no
+    words, so they don't shift the index.
+
+    The chip schema stays {wrong, correct, idx, idx_end} — identical to
+    today's group corrections, so the existing renderer + edit flow
+    handle the migrated chips with no changes."""
+    out: list[dict[str, Any]] = []
+    offset = 0
+    for m in members:
+        cap = captures_store.get_capture(m["id"]) or {}
+        words = cap.get("words") or []
+        for c in (cap.get("corrections") or []):
+            try:
+                idx = int(c["idx"]) + offset
+            except (TypeError, ValueError, KeyError):
+                continue
+            c2 = dict(c)
+            c2["idx"] = min(idx, offset + max(0, len(words) - 1))
+            if c.get("idx_end") is not None:
+                try:
+                    end = int(c["idx_end"]) + offset
+                    c2["idx_end"] = min(end, offset + max(0, len(words) - 1))
+                except (TypeError, ValueError):
+                    c2.pop("idx_end", None)
+            out.append(c2)
+        offset += len(words)
+    return out
+
+
 def _enrich_group(g: dict[str, Any]) -> dict[str, Any]:
     """Add `members` + `merged_words` to a group dict so PATCH and
     regenerate responses share the same shape as GET. The client can
     then do an in-place card refresh from any response without a
-    follow-up GET."""
+    follow-up GET.
+
+    Also runs the one-time idempotent migration that projects each
+    member's chip corrections into the group's `corrections_json` for
+    groups created before the migration landed. Gated by
+    `corrections_migrated_at` so the projection runs exactly once and
+    user edits afterwards (including explicit clears) are preserved."""
     import capture_groups_store
-    g["members"] = capture_groups_store.get_members(g["id"])
+    members = capture_groups_store.get_members(g["id"])
+    g["members"] = members
+
+    if g.get("corrections_migrated_at") is None:
+        now = time.time()
+        if not g.get("corrections"):
+            migrated = _project_member_corrections(members)
+            if migrated:
+                capture_groups_store.update_group(g["id"], {
+                    "corrections_json": json.dumps(migrated, ensure_ascii=False),
+                    "corrections_migrated_at": now,
+                })
+                g["corrections"] = migrated
+            else:
+                capture_groups_store.update_group(g["id"], {
+                    "corrections_migrated_at": now,
+                })
+        else:
+            capture_groups_store.update_group(g["id"], {
+                "corrections_migrated_at": now,
+            })
+        g["corrections_migrated_at"] = now
+
     g["merged_words"] = _build_merged_words(
-        g["members"], int(g["inter_segment_silence_ms"]),
+        members, int(g["inter_segment_silence_ms"]),
     )
     return g
 
