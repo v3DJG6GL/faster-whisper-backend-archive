@@ -219,10 +219,14 @@ async def export_captures_api(
 )
 async def list_groups_api(
     user_filter: str | None = Query(None, alias="user_id"),
+    status_filter: str | None = Query(None, alias="status"),
     user: dict[str, Any] = Depends(get_current_user),
 ) -> JSONResponse:
     """List packed training-sample groups. Admin sees all groups (or
     narrow to one user via `?user_id=`); non-admin sees only their own.
+    Optional `?status=` filter accepts the same enum as PatchGroupIn
+    (new/reviewed/ready/dismissed); unknown values fall through to no
+    filter, matching list_captures_api's tolerance.
 
     Declared above `/captures/api/{cid}` because GET with cid="groups"
     would otherwise resolve to the single-capture handler and 404 — the
@@ -233,7 +237,9 @@ async def list_groups_api(
         scope = user.get("user_id")
     else:
         scope = user_filter
-    groups = capture_groups_store.list_groups(user_id=scope)
+    groups = capture_groups_store.list_groups(
+        user_id=scope, status=status_filter,
+    )
     for g in groups:
         # Re-derive transcript + corrections per group so the collapsed
         # card preview reflects chip-applied final text (matches the
@@ -1414,6 +1420,12 @@ _CAPTURES_HTML = r"""<!doctype html>
     border-radius: 6px;
   }
   .toolbar label { font-size: var(--fs-sm); color: var(--help); }
+  /* Used in place of <label> when the wrapped control is a button
+     group; avoids HTML's auto-click-through to first labelable. */
+  .toolbar .filt-label, .cc-actions .cc-status-label {
+    font-size: var(--fs-sm); color: var(--help);
+    display: inline-flex; align-items: center; gap: 0.35rem;
+  }
   .toolbar select, .toolbar input[type="text"] {
     background: var(--input-bg); color: var(--fg);
     border: 1px solid var(--border); border-radius: 4px;
@@ -1431,6 +1443,36 @@ _CAPTURES_HTML = r"""<!doctype html>
   }
   .toolbar .capture-state.on  { color: var(--green); border-color: #2d5a37; }
   .toolbar .capture-state.off { color: var(--dim);   border-color: var(--border); }
+
+  /* Radio-style status button group. Used in the toolbar filter and
+     in the per-row + per-group action rows. Replaces the previous
+     <select> dropdowns; a 1-click switch is faster than open-pick. */
+  .status-btn-group {
+    display: inline-flex; gap: 0;
+    border: 1px solid var(--border); border-radius: 0.375rem;
+    overflow: hidden; font-family: var(--font-sans);
+    vertical-align: middle;
+  }
+  .status-btn {
+    background: var(--input-bg); color: var(--fg);
+    border: 0; border-right: 1px solid var(--border);
+    padding: 0.25rem 0.625rem; font-size: var(--fs-sm);
+    font-family: var(--font-sans); cursor: pointer; line-height: 1.4;
+    border-radius: 0;
+    transition: background-color 0.1s ease, color 0.1s ease;
+  }
+  .status-btn:last-child { border-right: 0; }
+  .status-btn:hover:not(.active):not(:disabled) {
+    background: #21262d; color: var(--bold);
+  }
+  .status-btn.active {
+    background: var(--cyan); color: #0d1117; font-weight: 600;
+  }
+  .status-btn:focus-visible {
+    outline: 2px solid var(--cyan); outline-offset: -2px;
+  }
+  .status-btn:disabled { color: var(--dim); cursor: not-allowed; }
+
   button {
     background: var(--input-bg); color: var(--fg);
     border: 1px solid var(--border); border-radius: 4px;
@@ -1836,16 +1878,7 @@ _CAPTURES_HTML = r"""<!doctype html>
 
 <main>
   <div class="toolbar">
-    <label>status
-      <select id="filt-status">
-        <option value="all">all</option>
-        <option value="new" selected>new</option>
-        <option value="reviewed">reviewed</option>
-        <option value="ready">ready</option>
-        <option value="dismissed">dismissed</option>
-        <option value="audio_missing">audio_missing</option>
-      </select>
-    </label>
+    <span class="filt-label">status <span id="filt-status-wrap"></span></span>
     <label>model
       <select id="filt-model">
         <option value="all">all</option>
@@ -2061,6 +2094,51 @@ _CAPTURES_HTML = r"""<!doctype html>
   }
 
   // -------------------------------------------------------------------
+  // Status button group (radio-style)
+  // -------------------------------------------------------------------
+  // Replaces the per-row <select> + the filter-bar dropdown with a
+  // 1-click switch. Returns { root, setValue }: setValue(v) updates the
+  // visible selection WITHOUT firing onChange (used on server round-trip
+  // echo so the user's click doesn't trigger a second save).
+  function buildStatusButtonGroup(options, current, onChange) {
+    var root = document.createElement('div');
+    root.className = 'status-btn-group';
+    root.setAttribute('role', 'radiogroup');
+    var buttons = new Map();
+    options.forEach(function(opt) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'status-btn';
+      b.dataset.value = opt.value;
+      b.textContent = opt.label;
+      b.setAttribute('role', 'radio');
+      var on = (opt.value === current);
+      b.setAttribute('aria-checked', String(on));
+      if (on) b.classList.add('active');
+      b.addEventListener('click', function() {
+        if (b.classList.contains('active')) return;
+        buttons.forEach(function(other) {
+          other.classList.remove('active');
+          other.setAttribute('aria-checked', 'false');
+        });
+        b.classList.add('active');
+        b.setAttribute('aria-checked', 'true');
+        try { onChange(opt.value); } catch (e) { /* swallow handler errors */ }
+      });
+      buttons.set(opt.value, b);
+      root.appendChild(b);
+    });
+    function setValue(v) {
+      buttons.forEach(function(btn, key) {
+        var on = (key === v);
+        btn.classList.toggle('active', on);
+        btn.setAttribute('aria-checked', String(on));
+      });
+    }
+    return { root: root, setValue: setValue };
+  }
+
+  // -------------------------------------------------------------------
   // State
   // -------------------------------------------------------------------
   var _allCaptures = [];
@@ -2165,8 +2243,13 @@ _CAPTURES_HTML = r"""<!doctype html>
     return d.innerHTML;
   }
 
+  // Filter state — replaces the previous <select id="filt-status">.
+  // Initialised to 'new' to preserve the original page default. The
+  // status filter button-group bootstrap below mirrors this value.
+  var _filtStatus = 'new';
+
   function applyFilters(rows) {
-    var s = document.getElementById('filt-status').value;
+    var s = _filtStatus;
     var m = document.getElementById('filt-model').value;
     var q = (document.getElementById('filt-search').value || '').trim().toLowerCase();
     return rows.filter(function(r) {
@@ -2508,20 +2591,47 @@ _CAPTURES_HTML = r"""<!doctype html>
     // --- action row ---
     var actions = document.createElement('div');
     actions.className = 'cc-actions';
-    var statusLbl = document.createElement('label');
-    statusLbl.textContent = 'status';
-    var statusSel = document.createElement('select');
-    ['new', 'reviewed', 'ready', 'dismissed'].forEach(function(v) {
-      var o = document.createElement('option');
-      o.value = v; o.textContent = v;
-      if (v === state.newStatus) o.selected = true;
-      statusSel.appendChild(o);
-    });
-    statusSel.addEventListener('change', function() {
-      state.newStatus = statusSel.value;
-      markDirty(state);
-    });
-    statusLbl.appendChild(statusSel);
+    var statusLbl = document.createElement('span');
+    statusLbl.className = 'cc-status-label';
+    statusLbl.textContent = 'status ';
+    var statusGrp = buildStatusButtonGroup(
+      [{value: 'new',       label: 'New'},
+       {value: 'reviewed',  label: 'Reviewed'},
+       {value: 'ready',     label: 'Ready'},
+       {value: 'dismissed', label: 'Dismissed'}],
+      state.newStatus,
+      async function(v) {
+        // Auto-save on click. Narrow PATCH: status only — does NOT
+        // include corrections or baseline_corrections, so an unsaved
+        // chip edit stays dirty and only persists when the user clicks
+        // Save. Also avoids the three-way-merge path; status has no
+        // concurrency hazard.
+        var prev = state.newStatus;
+        state.newStatus = v;
+        try {
+          var j = await api('PATCH',
+            '/captures/api/' + encodeURIComponent(state.cid),
+            { status: v });
+          if (j && j.capture) {
+            Object.assign(r, j.capture);
+            // Defensive resync in case server normalized the value.
+            if (j.capture.status) {
+              state.newStatus = j.capture.status;
+              statusGrp.setValue(j.capture.status);
+            }
+          }
+          reloadCounts();
+          toast('Status: ' + v);
+        } catch (e) {
+          statusGrp.setValue(prev);
+          state.newStatus = prev;
+          if (e.message !== 'unauthorized') {
+            toast('Status save failed: ' + e.message, true);
+          }
+        }
+      }
+    );
+    statusLbl.appendChild(statusGrp.root);
     actions.appendChild(statusLbl);
 
     var dirty = document.createElement('span');
@@ -3402,19 +3512,38 @@ _CAPTURES_HTML = r"""<!doctype html>
         // --- Action row: status + save / regenerate / lock / dissolve ---
         var actions = document.createElement('div');
         actions.className = 'cc-actions';
-        var statusLbl = document.createElement('label');
-        statusLbl.textContent = 'status';
-        var statusSel = document.createElement('select');
-        ['new', 'reviewed', 'ready', 'dismissed'].forEach(function(v) {
-          var o = document.createElement('option');
-          o.value = v; o.textContent = v;
-          statusSel.appendChild(o);
-        });
-        statusSel.addEventListener('change', function() {
-          groupState.newStatus = statusSel.value;
-          markDirty(groupState);
-        });
-        statusLbl.appendChild(statusSel);
+        var statusLbl = document.createElement('span');
+        statusLbl.className = 'cc-status-label';
+        statusLbl.textContent = 'status ';
+        var statusGrp = buildStatusButtonGroup(
+          [{value: 'new',       label: 'New'},
+           {value: 'reviewed',  label: 'Reviewed'},
+           {value: 'ready',     label: 'Ready'},
+           {value: 'dismissed', label: 'Dismissed'}],
+          groupState.newStatus || 'new',
+          async function(v) {
+            var prev = groupState.newStatus;
+            groupState.newStatus = v;
+            try {
+              // Narrow PATCH — status only. Concurrent transcript or
+              // chip edits in this view stay dirty and persist only on
+              // Save click; the three-way-merge path isn't engaged.
+              var j = await api('PATCH',
+                '/captures/api/groups/' + encodeURIComponent(g.id),
+                { status: v });
+              if (j && j.group) applyServerGroup(j.group);
+              reloadCounts();
+              toast('Status: ' + v);
+            } catch (e) {
+              statusGrp.setValue(prev);
+              groupState.newStatus = prev;
+              if (e.message !== 'unauthorized') {
+                toast('Status save failed: ' + e.message, true);
+              }
+            }
+          }
+        );
+        statusLbl.appendChild(statusGrp.root);
         actions.appendChild(statusLbl);
         var dirtyEl = document.createElement('span');
         dirtyEl.className = 'dirty hidden';
@@ -3537,8 +3666,8 @@ _CAPTURES_HTML = r"""<!doctype html>
               prefix + 'post-processing', m.final || ''));
           });
 
-          // Status dropdown + admin notes (sync from server snapshot).
-          statusSel.value = d.status || 'new';
+          // Status button-group + admin notes (sync from server snapshot).
+          statusGrp.setValue(d.status || 'new');
           notesArea.value = d.admin_notes || '';
           clearDirty(groupState);
 
@@ -3731,9 +3860,15 @@ _CAPTURES_HTML = r"""<!doctype html>
     var groupsById = {};
     _allGroups.forEach(function(g) { groupsById[g.id] = g; });
     var ungrouped = rows.filter(function(r) { return !r.group_id; });
+    // Apply the same status filter to groups. `audio_missing` is a
+    // captures-only system status — groups don't have it, so the
+    // groups section renders empty when that filter is active.
+    var filteredGroups = (_filtStatus === 'all')
+      ? _allGroups.slice()
+      : _allGroups.filter(function(g) { return g.status === _filtStatus; });
     var combined = ungrouped.map(function(r) {
       return { kind: 'capture', ts: r.created_ts || 0, data: r };
-    }).concat(_allGroups.map(function(g) {
+    }).concat(filteredGroups.map(function(g) {
       return { kind: 'group', ts: g.created_ts || 0, data: g };
     }));
     combined.sort(function(a, b) { return b.ts - a.ts; });
@@ -3768,7 +3903,21 @@ _CAPTURES_HTML = r"""<!doctype html>
   // -------------------------------------------------------------------
   // Wire up
   // -------------------------------------------------------------------
-  document.getElementById('filt-status').addEventListener('change', render);
+  (function() {
+    var opts = [
+      { value: 'all',           label: 'All' },
+      { value: 'new',           label: 'New' },
+      { value: 'reviewed',      label: 'Reviewed' },
+      { value: 'ready',         label: 'Ready' },
+      { value: 'dismissed',     label: 'Dismissed' },
+      { value: 'audio_missing', label: 'Audio missing' },
+    ];
+    var grp = buildStatusButtonGroup(opts, _filtStatus, function(v) {
+      _filtStatus = v;
+      render();
+    });
+    document.getElementById('filt-status-wrap').appendChild(grp.root);
+  })();
   document.getElementById('filt-model').addEventListener('change', render);
   document.getElementById('filt-search').addEventListener('input', render);
   document.getElementById('btn-refresh').addEventListener('click', load);

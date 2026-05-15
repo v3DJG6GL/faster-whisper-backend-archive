@@ -245,20 +245,25 @@ def get_group(gid: str) -> dict[str, Any] | None:
     return _row_to_dict(row) if row else None
 
 
+_VALID_STATUS = {"new", "reviewed", "ready", "dismissed"}
+
+
 def list_groups(
-    *, user_id: str | None = None,
+    *, user_id: str | None = None, status: str | None = None,
 ) -> list[dict[str, Any]]:
-    conn = _require_conn()
-    if user_id is None:
-        rows = conn.execute(
-            "SELECT * FROM capture_groups ORDER BY created_ts DESC"
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT * FROM capture_groups WHERE user_id = ?"
-            " ORDER BY created_ts DESC",
-            (user_id,),
-        ).fetchall()
+    clauses: list[str] = []
+    params: list[Any] = []
+    if user_id is not None:
+        clauses.append("user_id = ?")
+        params.append(user_id)
+    if status is not None and status in _VALID_STATUS:
+        clauses.append("status = ?")
+        params.append(status)
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    rows = _require_conn().execute(
+        f"SELECT * FROM capture_groups{where} ORDER BY created_ts DESC",
+        params,
+    ).fetchall()
     return [_row_to_dict(r) for r in rows]
 
 

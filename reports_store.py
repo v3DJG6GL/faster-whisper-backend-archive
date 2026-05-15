@@ -416,6 +416,31 @@ def recent_reported_request_ids(limit: int = 100) -> list[str]:
     return [r["request_id"] for r in cur.fetchall() if r["request_id"]]
 
 
+def recent_reports_for_user(
+    user_id: str, limit: int = 100,
+) -> list[dict[str, Any]]:
+    """Return up to `limit` of the caller's most-recent open reports as
+    full row dicts (includes corrections + intended_text). Newest-
+    created-first. Feeds /quick-config so the page can re-render chips
+    the user previously submitted, even after a hard reload.
+
+    Filtered by user_id so other users' reports never leak into a
+    different user's /quick-config view. status='open' matches the
+    badge-id query above (resolved/dismissed reports don't trigger the
+    '✓ reported' badge either)."""
+    if not user_id:
+        return []
+    conn = _require_conn()
+    cur = conn.execute(
+        "SELECT * FROM reports"
+        " WHERE user_id = ? AND status = 'open' AND request_id IS NOT NULL"
+        " ORDER BY created_ts DESC"
+        " LIMIT ?",
+        (user_id, int(limit)),
+    )
+    return [_row_to_dict(r) for r in cur.fetchall()]
+
+
 def counts_by_status() -> dict[str, int]:
     """Quick summary for the /reports page toolbar."""
     conn = _require_conn()

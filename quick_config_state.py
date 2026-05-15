@@ -3,7 +3,12 @@ In-memory ring buffer for /quick-config trace panel + cb:map autocomplete.
 
 Holds the last N transcription traces (raw whisper output, per-step
 before/after, final post-pipeline text) plus pre-tokenized
-words/bigrams for the autocomplete datalist on /quick-config.
+words + adjacent two-word phrases (bigrams) for the autocomplete
+datalist on /quick-config. The bigram pass exists for the common
+"whisper split a compound" case — user dictates "Hanspeter", model
+emits "Hans Peter"; typing "Hans" should offer both single-word and
+two-word completions so the user can pick the phrase as a cb:map
+key in one step.
 
 Lost on service restart, capped at _BUFFER_MAX entries. The buffer
 contains literal patient dictation snippets on a medical-deployment
@@ -47,6 +52,11 @@ _STOPWORDS = frozenset({
 # memory and SSE payload size.
 _TOKEN_CAP = 100
 
+# Same idea for adjacent two-word phrases — kept lower because the
+# multiplicative effect (N tokens → ~N-1 bigrams) plus per-trace
+# datalist contribution would otherwise dominate the option list.
+_BIGRAM_CAP = 50
+
 recent_traces: deque[dict[str, Any]] = deque(maxlen=_BUFFER_MAX)
 
 # Each subscriber is a bounded asyncio.Queue. Bounded so a slow / stuck
@@ -75,6 +85,42 @@ def _tokenize(text: str) -> list[str]:
     return list(seen.values())
 
 
+def _extract_bigrams(text: str) -> list[str]:
+    """Adjacent content-token pairs joined with a single space. A pair
+    counts only when BOTH tokens are content (non-stopword, in-range
+    length) AND the original text has nothing but whitespace between
+    them — a comma or period between two words means they belong to
+    different phrases and should NOT form a bigram.
+
+    Insertion-ordered, lowercased de-duped: first-seen casing wins.
+    Cap at _BIGRAM_CAP. Returns [] for empty/whitespace input.
+
+    Example: "Hans Peter, und Anna Müller" → ["Hans Peter", "Anna Müller"]
+    (the comma blocks the "Peter und" pair; "und" is a stopword
+    anyway, which blocks "und Anna")."""
+    matches = list(_TOKEN_RE.finditer(text or ""))
+    seen: dict[str, str] = {}
+    for a, b in zip(matches, matches[1:]):
+        ta, tb = a.group(0), b.group(0)
+        if not (_TOKEN_MIN_LEN <= len(ta) <= _TOKEN_MAX_LEN):
+            continue
+        if not (_TOKEN_MIN_LEN <= len(tb) <= _TOKEN_MAX_LEN):
+            continue
+        if ta.lower() in _STOPWORDS or tb.lower() in _STOPWORDS:
+            continue
+        between = (text or "")[a.end():b.start()]
+        if between.strip():
+            continue
+        phrase = f"{ta} {tb}"
+        key = phrase.lower()
+        if key in seen:
+            continue
+        seen[key] = phrase
+        if len(seen) >= _BIGRAM_CAP:
+            break
+    return list(seen.values())
+
+
 def record_trace(
     *,
     request_id: str | None = None,
@@ -99,15 +145,19 @@ def record_trace(
     so the autocomplete feature still works (raw + final + tokens are
     the only fields the autocomplete needs).
 
-    Only single-word tokens are emitted as autocomplete candidates;
-    multi-word phrases proved noisy in practice (e.g. "Rückenschmerzen
-    Weitere" pairing a content word with a filler) and the user's
-    mapping target is almost always a single misrecognized token."""
+    Emits both single-word tokens AND adjacent two-word phrases
+    (bigrams). The bigram pass catches the common "whisper split a
+    compound" case: user dictates "Hanspeter", model emits "Hans
+    Peter"; the datalist on /quick-config will then offer "Hans Peter"
+    when the user types "Hans" in a cb:map left field. Bigrams are
+    filtered with the same stopword + length rules as tokens to avoid
+    noise."""
     try:
         import api_keys_store
         username = api_keys_store.get_username(user_id)
     except Exception:
         username = None
+    final_text = final or ""
     entry: dict[str, Any] = {
         "ts": time.time(),
         "request_id": request_id,
@@ -115,8 +165,9 @@ def record_trace(
         "raw": raw or "",
         "steps": [list(s) if isinstance(s, (tuple, list)) else s
                   for s in (steps or [])],
-        "final": final or "",
-        "tokens": _tokenize(final or ""),
+        "final": final_text,
+        "tokens": _tokenize(final_text),
+        "bigrams": _extract_bigrams(final_text),
         "user_id": user_id,
         "username": username,
     }

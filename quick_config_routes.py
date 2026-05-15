@@ -176,18 +176,39 @@ async def get_state(
     # server hash the same canonical bytes.
     for rd in canonical:
         rd["_fp"] = _rule_fingerprint(rd)
-    # Server-authoritative "this transcription has been reported" set,
-    # capped at 100 newest. The /quick-config page syncs its badges
-    # from this list on every state load so a report submitted in one
-    # browser shows up in another. Failure to load the reports store
-    # (init_db never ran, etc.) is non-fatal — the client falls back
-    # to its localStorage hint.
+    # Server-authoritative "this transcription has been reported" set
+    # + the user's previously-submitted chip corrections per request_id.
+    # The /quick-config page reads both: badges sync from the id list;
+    # the chip map seeds form._corrections so re-opening a reported
+    # trace shows what was submitted, instead of an empty form. Capped
+    # at 100 newest per user. Failure (init_db never ran, etc.) is
+    # non-fatal — the client falls back to its localStorage hint and
+    # an empty chip map.
     reported_ids: list[str] = []
+    reported_chips: dict[str, dict[str, Any]] = {}
     try:
         import reports_store
-        reported_ids = reports_store.recent_reported_request_ids(limit=100)
+        uid = user.get("user_id") or ""
+        if uid:
+            my_reports = reports_store.recent_reports_for_user(uid, limit=100)
+            for rep in my_reports:
+                rid = rep.get("request_id")
+                if not rid:
+                    continue
+                # Newest-first iteration above; first occurrence wins on
+                # duplicate request_id (the upsert keeps a single row
+                # per (request_id, user_id), so duplicates are rare).
+                if rid not in reported_chips:
+                    reported_chips[rid] = {
+                        "corrections": rep.get("corrections") or [],
+                    }
+            reported_ids = list(reported_chips.keys())
+        else:
+            # No user_id (shouldn't happen post-auth, but keep parity
+            # with the old behaviour as a safety net).
+            reported_ids = reports_store.recent_reported_request_ids(limit=100)
     except Exception:
-        reported_ids = []
+        pass
     return {
         "rules": canonical,
         "service_name": "WhisperAPI",
@@ -195,6 +216,7 @@ async def get_state(
         "user_id": user.get("user_id"),
         "username": user.get("username"),
         "reported_request_ids": reported_ids,
+        "reported_chips": reported_chips,
         "reports_submit_enabled": bool(
             getattr(cfg, "REPORTS_ALLOW_USER_SUBMIT", True)
         ),
@@ -1057,6 +1079,12 @@ const _REPORTED_MAX = 200;
 // that lets a freshly submitted badge show instantly without waiting
 // for the next /state poll.
 let _serverReportedSet = new Set();
+// Per-request_id chip corrections previously submitted by THIS user,
+// keyed on request_id. Populated from /state.reported_chips. Lets the
+// report form re-render chips on form-open instead of starting empty.
+// Filtered server-side to caller's user_id; never contains other
+// users' chips.
+let _serverReportedChips = {};
 
 function getReportedIds() {
   try { return JSON.parse(localStorage.getItem(_REPORTED_KEY) || '[]'); }
@@ -1178,11 +1206,6 @@ function _buildReportForm(entry) {
     + '</div>'
     + '<div class="rep-final-words"></div>'
     + '<div class="rep-corrections"></div>'
-    + '<label class="form-label">What you meant to say'
-    + ' <span class="help">(optional — use this for full rephrases)</span>'
-    + '</label>'
-    + '<textarea class="rep-intended" rows="2"'
-    + ' placeholder="e.g. Varicosis links Vena saphena magna"></textarea>'
     + '<label class="form-label">Comment'
     + ' <span class="help">(optional)</span>'
     + '</label>'
@@ -1193,12 +1216,24 @@ function _buildReportForm(entry) {
     + '  <button type="button" class="rep-remove">Remove report</button>'
     + '  <button type="button" class="rep-submit primary">Submit report</button>'
     + '</div>';
-  form._corrections = [];  // [{wrong, correct, idx, idx_end}]
-                            // idx_end is the inclusive range end; single-word
-                            // chips set idx_end === idx so range-aware code
-                            // doesn't need to special-case them.
+  // Seed chips from the user's previously-submitted report (if any).
+  // Deep-clone so user edits don't mutate the shared server snapshot;
+  // _serverReportedChips is rewritten on every /state load.
+  const _seed = _serverReportedChips[entry.request_id || ''];
+  form._corrections = (_seed && Array.isArray(_seed.corrections))
+    ? JSON.parse(JSON.stringify(_seed.corrections))
+    : [];
+  // idx_end is the inclusive range end; single-word chips set
+  // idx_end === idx so range-aware code doesn't need to special-case.
   form._entry = entry;
   _wordifyFinal(form, entry.final || '');
+  // Render chips + struck-through + inline replacements immediately so
+  // the user sees what they previously submitted. Skipped when there
+  // are no seeded chips — empty render is a no-op but a needless
+  // reflow.
+  if (form._corrections.length) {
+    _renderCorrections(form);
+  }
   form.querySelector('.rep-cancel').addEventListener('click', () => {
     form.classList.remove('open');
   });
@@ -1224,11 +1259,12 @@ function toggleReportForm(item, entry) {
   }
   form.classList.toggle('open');
   if (form.classList.contains('open')) {
-    // Focus the first textarea if there are no corrections yet, else
-    // the first correction input.
+    // Focus the first correction input if any chips are present (e.g.
+    // rehydrated from a previous submission or freshly added). With
+    // no chips yet the user's next action is clicking a word in the
+    // strip, so leave focus where it is.
     const firstCorr = form.querySelector('.rep-correct');
     if (firstCorr) firstCorr.focus();
-    else form.querySelector('.rep-intended').focus();
   }
 }
 
@@ -1396,12 +1432,17 @@ function _renderCorrections(form) {
     inp.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         e.preventDefault();
-        // Move focus to the next input if any, else nudge the user
-        // toward the intended-text textarea.
+        // Move focus to the next chip input if any, else to the
+        // comment textarea so the user can add context. No more
+        // chips + no comment yet = a deliberate done signal; we
+        // don't auto-submit here, the user still clicks the button.
         const inputs = Array.from(form.querySelectorAll('.rep-correct'));
         const next = inputs[i + 1];
         if (next) next.focus();
-        else form.querySelector('.rep-intended').focus();
+        else {
+          const c = form.querySelector('.rep-comment');
+          if (c) c.focus();
+        }
       }
     });
     const x = document.createElement('button');
@@ -1425,7 +1466,6 @@ function _renderCorrections(form) {
 
 async function submitReport(form) {
   const entry = form._entry || {};
-  const intended = form.querySelector('.rep-intended').value.trim();
   const comment = form.querySelector('.rep-comment').value.trim();
   const corrections = form._corrections
     .map(c => {
@@ -1440,8 +1480,8 @@ async function submitReport(form) {
       return out;
     })
     .filter(c => c.correct.length > 0);
-  if (!corrections.length && !intended && !comment) {
-    showToast('Mark a wrong word, write what you meant to say, or leave a comment.', 'err');
+  if (!corrections.length && !comment) {
+    showToast('Mark a wrong word or leave a comment.', 'err');
     return;
   }
   const submitBtn = form.querySelector('.rep-submit');
@@ -1455,7 +1495,6 @@ async function submitReport(form) {
       final: entry.final || '',
       steps: entry.steps || [],
       corrections: corrections,
-      intended_text: intended,
       user_comment: comment,
     });
     if (!r.ok) {
@@ -1464,7 +1503,17 @@ async function submitReport(form) {
       showToast(msg, 'err');
       return;
     }
-    if (entry.request_id) markReported(entry.request_id);
+    if (entry.request_id) {
+      markReported(entry.request_id);
+      _serverReportedSet.add(entry.request_id);
+      // Snapshot the user's just-submitted chips so any re-render that
+      // calls _buildReportForm(entry) again (e.g. a future SSE-driven
+      // refresh) re-seeds correctly. Slight skew if the server merged
+      // with pre-existing chips; the next /state load reconciles.
+      _serverReportedChips[entry.request_id] = {
+        corrections: JSON.parse(JSON.stringify(form._corrections || [])),
+      };
+    }
     // Update the badge + collapse the form. Keep the form's filled-in
     // values intact so the user can re-open it if they want to add more.
     const item = form.closest('.trace-item');
@@ -1515,6 +1564,14 @@ async function removeReport(form) {
       return;
     }
     unmarkReported(rid);
+    // Drop the seed entry so a fresh _buildReportForm call after this
+    // remove starts empty (matches the server-side state). The form
+    // we hold open here keeps form._corrections in-memory; that's
+    // fine — closing the form below means the next open re-uses this
+    // form node, which still has its in-memory chips. The user can
+    // re-submit those by re-clicking Submit. They can also click
+    // each chip's × to clear them.
+    delete _serverReportedChips[rid];
     syncReportedBadges();
     form.classList.remove('open');
     let body = {};
@@ -1758,9 +1815,13 @@ async function load() {
   // sessions never get the class so admin chrome stays hidden.
   if (j.role === 'admin') document.body.classList.add('role-admin');
   else document.body.classList.remove('role-admin');
-  // Server-authoritative "reported" set — refreshes every load. Badges
-  // in already-rendered .trace-item nodes update in-place.
+  // Server-authoritative "reported" set + chip-corrections map. The
+  // ids feed the badge visibility; the chips feed form rehydration on
+  // form-open. Badges in already-rendered .trace-item nodes update
+  // in-place via syncReportedBadges; chip rehydration is lazy (only
+  // applied when the user opens a report form).
   _serverReportedSet = new Set(j.reported_request_ids || []);
+  _serverReportedChips = j.reported_chips || {};
   syncReportedBadges();
   renderCards();
   updateButtons();
