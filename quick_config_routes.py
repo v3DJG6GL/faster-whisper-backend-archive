@@ -1077,26 +1077,54 @@ function markReported(rid) {
   try { localStorage.setItem(_REPORTED_KEY, JSON.stringify(ids)); }
   catch (_) { /* quota — accept that the badge won't survive a reload */ }
 }
+function unmarkReported(rid) {
+  // Called when the user explicitly removes their report. Drops the rid
+  // from the localStorage hint AND the in-memory server set so the
+  // badge clears immediately, without waiting for the next /state poll
+  // to refresh _serverReportedSet from recent_reported_request_ids.
+  if (!rid) return;
+  const ids = getReportedIds().filter((x) => x !== rid);
+  try { localStorage.setItem(_REPORTED_KEY, JSON.stringify(ids)); }
+  catch (_) {}
+  _serverReportedSet.delete(rid);
+}
 
 function syncReportedBadges() {
   // Called after /state load to flip badges visible/hidden on every
   // trace item currently in the DOM, using the freshly fetched server
-  // list. Cheap; the recent panel holds at most 20 items.
+  // list. Cheap; the recent panel holds at most 20 items. Also flips
+  // the "Remove report" button visibility per open report form.
   document.querySelectorAll('.trace-item').forEach((item) => {
     const badge = item.querySelector('.trace-reported-badge');
-    if (!badge) return;
-    let rid = '';
-    try { rid = (JSON.parse(item.dataset.entry || '{}') || {}).request_id || ''; }
-    catch (_) {}
-    badge.style.display = isReported(rid) ? 'inline-flex' : 'none';
+    if (badge) {
+      let rid = '';
+      try { rid = (JSON.parse(item.dataset.entry || '{}') || {}).request_id || ''; }
+      catch (_) {}
+      badge.style.display = isReported(rid) ? 'inline-flex' : 'none';
+    }
+    const removeBtn = item.querySelector('.rep-remove');
+    if (removeBtn) {
+      let rid = '';
+      try { rid = (JSON.parse(item.dataset.entry || '{}') || {}).request_id || ''; }
+      catch (_) {}
+      removeBtn.style.display = isReported(rid) ? 'inline-flex' : 'none';
+    }
   });
 }
 
-// Tokenization that matches quick_config_state.py:_TOKEN_RE — letters
-// (incl. German), digits, hyphen, underscore. We don't split on
-// punctuation: that ships punctuation as its own non-clickable span
-// (rendered as a plain text node between word spans).
-const _WORD_RE = /[A-Za-zÀ-ɏ][\w\-À-ɏ]*/g;
+// Tokenization for the clickable-chip layer. We anchor on any word-char
+// (`\w` = [A-Za-z0-9_]) plus the Latin-Extended range À-ɏ so numeric
+// tokens like "123" and digit-leading mixed tokens ("3D", "5mg") are
+// also selectable — matching /captures' "every Whisper token is
+// clickable" behaviour. Punctuation runs are emitted as plain-text
+// nodes between word spans.
+//
+// We deliberately diverge from quick_config_state.py:_TOKEN_RE here.
+// That server-side regex extracts autocomplete candidates and
+// intentionally rejects digit-only tokens (rule candidates shouldn't
+// be raw numbers). The clickable-chip layer has a different purpose:
+// the user must be able to point at any visible token to correct it.
+const _WORD_RE = /[\wÀ-ɏ][\wÀ-ɏ\-]*/g;
 
 function _wordifyFinal(form, finalText) {
   // Tokenize `final` into clickable word spans + track char offsets so a
@@ -1162,6 +1190,7 @@ function _buildReportForm(entry) {
     + ' placeholder="What went wrong? Anything else the admin should know?"></textarea>'
     + '<div class="rep-actions">'
     + '  <button type="button" class="rep-cancel">Cancel</button>'
+    + '  <button type="button" class="rep-remove">Remove report</button>'
     + '  <button type="button" class="rep-submit primary">Submit report</button>'
     + '</div>';
   form._corrections = [];  // [{wrong, correct, idx, idx_end}]
@@ -1175,6 +1204,14 @@ function _buildReportForm(entry) {
   });
   form.querySelector('.rep-submit').addEventListener('click', () => {
     submitReport(form);
+  });
+  const removeBtn = form.querySelector('.rep-remove');
+  // Visible only when the trace has already been reported. Lives in
+  // the actions row so its placement matches Cancel/Submit.
+  removeBtn.style.display =
+    isReported(entry.request_id) ? 'inline-flex' : 'none';
+  removeBtn.addEventListener('click', () => {
+    removeReport(form);
   });
   return form;
 }
@@ -1449,6 +1486,50 @@ async function submitReport(form) {
     showToast('Report failed: ' + e, 'err');
   } finally {
     submitBtn.disabled = false;
+  }
+}
+
+async function removeReport(form) {
+  // Withdraw the user's report for this trace. The server cascades a
+  // chip-prune to every capture sharing the request_id (subject to
+  // "don't strip what another surviving report still claims"), then
+  // we hide the badge locally so the UI feels instant.
+  const entry = form._entry || {};
+  const rid = entry.request_id || '';
+  if (!rid) {
+    showToast('No request_id for this trace — nothing to remove.', 'err');
+    return;
+  }
+  if (!confirm('Remove your report for this trace?')) return;
+  const removeBtn = form.querySelector('.rep-remove');
+  removeBtn.disabled = true;
+  try {
+    const r = await api(
+      'DELETE',
+      '/quick-config/reports/api/by-request/' + encodeURIComponent(rid),
+    );
+    if (!r.ok) {
+      let msg = 'Remove failed (' + r.status + ')';
+      try { const j = await r.json(); if (j && j.detail) msg = j.detail; } catch (_) {}
+      showToast(msg, 'err');
+      return;
+    }
+    unmarkReported(rid);
+    syncReportedBadges();
+    form.classList.remove('open');
+    let body = {};
+    try { body = await r.json(); } catch (_) {}
+    const nCaps = body.captures_cleaned || 0;
+    let msg = 'Report removed.';
+    if (nCaps > 0) {
+      msg += ' Chips cleared from ' + nCaps
+        + ' capture' + (nCaps === 1 ? '' : 's') + '.';
+    }
+    showToast(msg, 'ok');
+  } catch (e) {
+    showToast('Remove failed: ' + e, 'err');
+  } finally {
+    removeBtn.disabled = false;
   }
 }
 

@@ -376,6 +376,30 @@ def get_report(rid: str) -> dict[str, Any] | None:
     return _row_to_dict(row) if row else None
 
 
+def list_reports_for_request_id(
+    request_id: str,
+    exclude_id: "str | None" = None,
+) -> list[dict[str, Any]]:
+    """Return every report row sharing this `request_id`, optionally
+    excluding one by id. Used by the report-delete cascade to compute
+    which chips other surviving reports still claim — so deleting one
+    report doesn't strip chips that a different report would re-add."""
+    conn = _require_conn()
+    if exclude_id:
+        cur = conn.execute(
+            "SELECT * FROM reports WHERE request_id = ? AND id != ?"
+            " ORDER BY created_ts DESC",
+            (request_id, exclude_id),
+        )
+    else:
+        cur = conn.execute(
+            "SELECT * FROM reports WHERE request_id = ?"
+            " ORDER BY created_ts DESC",
+            (request_id,),
+        )
+    return [_row_to_dict(r) for r in cur.fetchall()]
+
+
 def recent_reported_request_ids(limit: int = 100) -> list[str]:
     """Return up to `limit` distinct request_ids that have at least one
     report. Newest-report-first ordering. Feeds the server-authoritative

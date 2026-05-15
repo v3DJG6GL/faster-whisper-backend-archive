@@ -577,17 +577,57 @@ def get_capture(cid: str) -> dict[str, Any] | None:
 
 
 def find_by_request_id(request_id: str) -> list[dict[str, Any]]:
-    """Cross-link from /reports: find captures matching a request_id.
-    Returns a list (multiple captures per request_id is rare but allowed
-    if sampling+cap-eviction happens to keep multiple)."""
+    """Cross-link from /reports → captures matching a request_id.
+    Returns rows with `corrections_json` decoded into `corrections` so
+    callers can read existing chip lists and merge / prune correctly
+    (submit_report merge path; report-delete cascade)."""
     conn = _require_conn()
     cur = conn.execute(
-        "SELECT id, created_ts, model, duration_seconds, status,"
-        " audio_format, audio_relpath"
+        "SELECT id, created_ts, request_id, model, language,"
+        " duration_seconds, audio_relpath, audio_format,"
+        " raw, final, corrected_text, corrections_json, admin_notes,"
+        " status, reviewed_ts, user_id, group_id, group_order"
         " FROM captures WHERE request_id = ? ORDER BY created_ts DESC",
         (request_id,),
     )
     return [_row_to_dict(r, include_words=False) for r in cur.fetchall()]
+
+
+def prune_chips_for_request_id(
+    request_id: str,
+    chips_to_strip: list[dict[str, Any]],
+) -> int:
+    """Remove chips matching any (idx, correct) pair in `chips_to_strip`
+    from every capture whose request_id matches. Returns the count of
+    captures whose chip list shrank.
+
+    Match key is (idx, correct). If an admin edited a chip's correct
+    text on /captures after it was projected from a report, the new
+    (idx, correct) tuple no longer matches the strip-set — that chip
+    is preserved as admin work.
+
+    The caller is responsible for filtering the strip-set against
+    still-surviving reports' chips so a single-report delete only
+    removes chips that no other report still claims."""
+    if not chips_to_strip:
+        return 0
+    strip_keys = {
+        (c.get("idx"), c.get("correct"))
+        for c in chips_to_strip
+        if isinstance(c, dict)
+    }
+    matches = find_by_request_id(request_id)
+    touched = 0
+    for cap in matches:
+        existing = cap.get("corrections") or []
+        pruned = [
+            c for c in existing
+            if (c.get("idx"), c.get("correct")) not in strip_keys
+        ]
+        if pruned != existing:
+            update_capture(cap["id"], {"corrections": pruned})
+            touched += 1
+    return touched
 
 
 def total_count() -> int:

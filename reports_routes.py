@@ -247,6 +247,78 @@ async def patch_report_api(rid: str, payload: PatchReportIn) -> JSONResponse:
     return JSONResponse({"ok": True, "report": updated})
 
 
+def _delete_report_and_cascade(report: dict[str, Any]) -> int:
+    """Delete a single report row AND prune its corrections from every
+    capture that currently carries them as chips.
+
+    The prune is keyed on (idx, correct) and filters against the chips
+    that OTHER surviving reports for the same request_id still claim —
+    so if two reports both put `(idx=3, correct='Test,')` on a capture
+    and we delete one of them, the chip stays put because the other
+    report still asserts it.
+
+    Returns the count of captures whose chip list shrank. The deleted
+    report itself is gone from the DB on return."""
+    import captures_store
+
+    rid = report.get("id")
+    request_id = report.get("request_id")
+    report_chips = report.get("corrections") or []
+
+    # Compute "surviving" chips: union of corrections from all OTHER
+    # reports sharing this request_id (NOT including the one we're
+    # about to delete).
+    survivor_keys: set[tuple[Any, Any]] = set()
+    if request_id:
+        for other in reports_store.list_reports_for_request_id(
+            request_id, exclude_id=rid,
+        ):
+            for c in (other.get("corrections") or []):
+                if isinstance(c, dict):
+                    survivor_keys.add((c.get("idx"), c.get("correct")))
+
+    # The strip-set is THIS report's chips minus what other reports
+    # still claim. If everything overlaps with a survivor, prune-set is
+    # empty and the cascade is a no-op.
+    prune_set = [
+        c for c in report_chips
+        if isinstance(c, dict)
+        and (c.get("idx"), c.get("correct")) not in survivor_keys
+    ]
+
+    reports_store.delete_report(rid)
+
+    if request_id and prune_set:
+        return captures_store.prune_chips_for_request_id(
+            request_id, prune_set,
+        )
+    return 0
+
+
+@router.delete(
+    "/quick-config/reports/api/by-request/{request_id}",
+    dependencies=[Depends(require_admin_host)],
+)
+async def delete_my_report_api(
+    request_id: str,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> JSONResponse:
+    """Delete the caller's report for a given request_id. One report
+    per (user_id, request_id) is enforced by upsert_report, so this
+    targets exactly the caller's row. Cascades chip cleanup on every
+    capture sharing the request_id (filtered against surviving reports
+    from other users, so we don't strip chips someone else still
+    claims)."""
+    uid = user.get("user_id") or "(open-mode)"
+    existing = reports_store.find_by_request_user(request_id, uid)
+    if not existing:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, "no report to delete",
+        )
+    captures_cleaned = _delete_report_and_cascade(existing)
+    return JSONResponse({"ok": True, "captures_cleaned": captures_cleaned})
+
+
 @router.delete(
     "/reports/api/{rid}",
     dependencies=[
@@ -255,9 +327,11 @@ async def patch_report_api(rid: str, payload: PatchReportIn) -> JSONResponse:
     ],
 )
 async def delete_report_api(rid: str) -> JSONResponse:
-    if not reports_store.delete_report(rid):
+    report = reports_store.get_report(rid)
+    if report is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "report not found")
-    return JSONResponse({"ok": True})
+    captures_cleaned = _delete_report_and_cascade(report)
+    return JSONResponse({"ok": True, "captures_cleaned": captures_cleaned})
 
 
 @router.post(
@@ -268,9 +342,31 @@ async def delete_report_api(rid: str) -> JSONResponse:
     ],
 )
 async def clear_reports_api(request: Request) -> JSONResponse:
+    import captures_store
+
     host = request.client.host if request.client else ""
+    # Snapshot every report's (request_id, corrections) before the wipe
+    # so the cascade has data to act on. No survivor-subtraction needed:
+    # we're deleting EVERY report, so no other report can possibly still
+    # claim a chip.
+    all_reports = reports_store.list_reports()
+    by_req: dict[str, list[dict[str, Any]]] = {}
+    for r in all_reports:
+        req_id = r.get("request_id")
+        if not req_id:
+            continue
+        by_req.setdefault(req_id, []).extend(r.get("corrections") or [])
+
     n = reports_store.clear_all(reporter_host=host)
-    return JSONResponse({"ok": True, "deleted": n})
+
+    captures_cleaned = 0
+    for req_id, chips in by_req.items():
+        captures_cleaned += captures_store.prune_chips_for_request_id(
+            req_id, chips,
+        )
+    return JSONResponse({
+        "ok": True, "deleted": n, "captures_cleaned": captures_cleaned,
+    })
 
 
 @router.get(
