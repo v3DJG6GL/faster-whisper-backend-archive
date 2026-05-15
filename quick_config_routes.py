@@ -597,7 +597,11 @@ _QUICK_CONFIG_HTML = r"""<!doctype html>
   .trace-item { background: var(--panel); border: 1px solid var(--border);
     border-radius: 4px; padding: 0.5rem 0.75rem; margin-bottom: 0.5rem; }
   .trace-meta { display: flex; gap: 0.5rem; color: var(--dim);
-    font-size: var(--fs-xs); margin-bottom: 0.375rem; }
+    font-size: var(--fs-xs); margin-bottom: 0.375rem; align-items: center; }
+  .trace-meta .pill { background: var(--panel-alt, rgba(255,255,255,0.04));
+    border: 1px solid var(--border); border-radius: 999rem;
+    padding: 0.05rem 0.5rem; color: var(--fg); font-family: var(--font-sans);
+    font-size: var(--fs-xs); }
   .trace-text { font-family: var(--font-mono); font-size: var(--fs-sm);
     word-wrap: break-word; }
   .trace-raw { color: var(--dim); margin-bottom: 0.25rem; }
@@ -738,6 +742,33 @@ _QUICK_CONFIG_HTML = r"""<!doctype html>
     background: var(--green); width: 0%; transition: width 0.3s ease-out; }
   header button.reapply { color: var(--cyan); border-color: var(--cyan); }
 
+  /* Non-modal silent-reapply strip — shown under the header bar after
+     Save kicks off the reapply job automatically. Fades out 3s after
+     completion. */
+  #reapply-strip {
+    display: flex; align-items: center; gap: 0.6rem;
+    padding: 0.35rem 0.75rem;
+    background: var(--input-bg); border-bottom: 1px solid var(--border);
+    font-family: var(--font-sans); font-size: var(--fs-sm);
+    color: var(--fg);
+    transition: opacity 0.4s ease-out;
+  }
+  #reapply-strip[hidden] { display: none; }
+  #reapply-strip.fade-out { opacity: 0; }
+  #reapply-strip.err { background: rgba(220, 80, 80, 0.12);
+    border-bottom-color: var(--red, #c84343); }
+  #reapply-strip .r-label { color: var(--dim); flex-shrink: 0; }
+  #reapply-strip .r-bar {
+    display: inline-block; height: 0.5rem; flex: 1; min-width: 4rem;
+    background: var(--border); border-radius: 2px; overflow: hidden;
+  }
+  #reapply-strip .r-fill {
+    display: block; height: 100%; width: 0%; background: var(--green);
+    transition: width 0.3s ease-out;
+  }
+  #reapply-strip .r-stats { font-family: var(--font-mono);
+    font-size: var(--fs-xs); color: var(--dim); flex-shrink: 0; }
+
   {{NAV_CSS}}
 </style>
 </head>
@@ -749,12 +780,18 @@ _QUICK_CONFIG_HTML = r"""<!doctype html>
     {{NAV}}
     <span class="spacer"></span>
     {{SCALE_PICKER}}
-    <button id="reapply-btn" class="reapply" title="Re-run the current pipeline rules over every stored capture and rebuild affected group transcripts. Manual corrections are preserved.">re-apply rules</button>
+    <button id="reapply-btn" class="reapply" title="Manually re-run the pipeline over every stored capture. Save already does this automatically when rules change — use this to force a re-run (e.g. after restoring defaults).">re-apply rules</button>
     <button id="discard-btn" disabled>discard</button>
     <button id="save-btn" class="primary" disabled>save</button>
     <span id="status">loading…</span>
   </div>
 </header>
+
+<div id="reapply-strip" hidden>
+  <span class="r-label">Re-applying…</span>
+  <span class="r-bar"><span class="r-fill"></span></span>
+  <span class="r-stats">0 / 0</span>
+</div>
 
 <datalist id="recent-words"></datalist>
 
@@ -982,6 +1019,19 @@ function renderTrace(entry) {
     const mdl = document.createElement('span');
     mdl.textContent = entry.model;
     meta.appendChild(mdl);
+  }
+  if (entry.username) {
+    const spk = document.createElement('span');
+    spk.className = 'pill';
+    spk.title = 'speaker';
+    spk.textContent = entry.username;
+    meta.appendChild(spk);
+  } else if (entry.user_id) {
+    const spk = document.createElement('span');
+    spk.className = 'pill';
+    spk.title = 'speaker (unknown user)';
+    spk.textContent = String(entry.user_id).slice(0, 6);
+    meta.appendChild(spk);
   }
   item.appendChild(meta);
 
@@ -1449,7 +1499,15 @@ async function submitReport(form) {
       if (badge) badge.style.display = 'inline-flex';
     }
     form.classList.remove('open');
-    showToast('Report sent — thank you.', 'ok');
+    let body = {};
+    try { body = await r.json(); } catch (_) {}
+    const nCaps = body.captures_updated || 0;
+    const wasUpdated = !!body.was_updated;
+    let msg = wasUpdated ? 'Report updated — thank you.' : 'Report sent — thank you.';
+    if (nCaps > 0) {
+      msg += ' Applied to ' + nCaps + ' capture' + (nCaps === 1 ? '' : 's') + '.';
+    }
+    showToast(msg, 'ok');
   } catch (e) {
     showToast('Report failed: ' + e, 'err');
   } finally {
@@ -1778,7 +1836,10 @@ async function doSave() {
     ? ('saved ' + saved.length + ' rule' + (saved.length === 1 ? '' : 's'))
     : 'nothing to save', 'ok');
   if (result.captures_eligible_for_reapply && result.captures_count > 0) {
-    openReapplyModal(result.captures_count);
+    // Auto-trigger the reapply job silently — admins shouldn't have to
+    // click twice. The header strip shows progress; the manual
+    // Re-Apply button + modal remain for explicit on-demand re-runs.
+    startReapplyJobSilent(result.captures_count);
   }
   await load();
 }
@@ -1869,6 +1930,81 @@ async function openReapplyFromButton() {
 document.getElementById('reapply-go').addEventListener('click', doReapplyStart);
 document.getElementById('reapply-cancel').addEventListener('click', closeReapplyModal);
 document.getElementById('reapply-btn').addEventListener('click', openReapplyFromButton);
+
+// --- Silent reapply strip (auto-triggered after Save) ---
+//
+// Same /reapply-rules POST + status-polling as the manual modal, but
+// rendered as an inline header strip so the admin keeps editing.
+// Fades out 3s after completion; sticks (red-tinted) on error so the
+// failure isn't missed.
+let _stripPoll = null;
+let _stripFadeTimer = null;
+
+function _showStrip(n) {
+  const strip = document.getElementById('reapply-strip');
+  strip.hidden = false;
+  strip.classList.remove('fade-out');
+  strip.classList.remove('err');
+  strip.querySelector('.r-label').textContent =
+    'Re-applying to ' + (n || '?') + ' captures…';
+  strip.querySelector('.r-fill').style.width = '0%';
+  strip.querySelector('.r-stats').textContent = '0 / ' + (n || 0);
+  if (_stripFadeTimer) { clearTimeout(_stripFadeTimer); _stripFadeTimer = null; }
+}
+function _hideStripSoon() {
+  const strip = document.getElementById('reapply-strip');
+  strip.classList.add('fade-out');
+  if (_stripFadeTimer) clearTimeout(_stripFadeTimer);
+  _stripFadeTimer = setTimeout(() => {
+    strip.hidden = true;
+    strip.classList.remove('fade-out');
+  }, 3000);
+}
+async function _pollStripOnce() {
+  let r;
+  try { r = await api('GET', '/quick-config/reapply-rules/status'); }
+  catch (_) { return; }
+  if (!r.ok) return;
+  const s = await r.json();
+  const strip = document.getElementById('reapply-strip');
+  const fill = strip.querySelector('.r-fill');
+  const stats = strip.querySelector('.r-stats');
+  const label = strip.querySelector('.r-label');
+  const pct = s.total > 0
+    ? Math.round((s.processed / s.total) * 100)
+    : (s.status === 'done' ? 100 : 0);
+  fill.style.width = pct + '%';
+  stats.textContent = (s.processed || 0) + ' / ' + (s.total || 0)
+    + ' · ' + (s.captures_updated || 0) + ' updated · '
+    + (s.groups_updated || 0) + ' groups';
+  if (s.status === 'running') {
+    label.textContent = 'Re-applying rules…';
+  } else if (s.status === 'done') {
+    label.textContent = 'Re-applied ' + (s.captures_updated || 0)
+      + ' captures · ' + (s.groups_updated || 0) + ' groups';
+    if (_stripPoll) { clearInterval(_stripPoll); _stripPoll = null; }
+    _hideStripSoon();
+  } else if (s.status === 'error') {
+    label.textContent = 'Re-apply failed: ' + (s.error || 'unknown');
+    strip.classList.add('err');
+    if (_stripPoll) { clearInterval(_stripPoll); _stripPoll = null; }
+    // Don't auto-hide on error — the user needs to see it.
+  }
+}
+async function startReapplyJobSilent(n) {
+  _showStrip(n);
+  const r = await api('POST', '/quick-config/reapply-rules');
+  if (!r.ok) {
+    const strip = document.getElementById('reapply-strip');
+    strip.classList.add('err');
+    strip.querySelector('.r-label').textContent =
+      'Re-apply failed: HTTP ' + r.status;
+    return;
+  }
+  _pollStripOnce();
+  if (_stripPoll) clearInterval(_stripPoll);
+  _stripPoll = setInterval(_pollStripOnce, 1500);
+}
 
 function doDiscard() {
   liveRules = JSON.parse(JSON.stringify(initialRules));

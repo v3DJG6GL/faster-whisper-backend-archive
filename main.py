@@ -1787,6 +1787,7 @@ async def transcribe(
                     raw=raw_full_text,
                     steps=trace if trace is not None else [],
                     final=full_text_str,
+                    user_id=user.get("user_id"),
                 )
             except Exception as _qc_err:
                 logger.error("[quick-config] record_trace failed: %s", _qc_err)

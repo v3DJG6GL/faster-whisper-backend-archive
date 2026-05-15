@@ -30,6 +30,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
+import api_keys_store
 import config as cfg
 import reports_store
 import web_common
@@ -135,7 +136,8 @@ async def submit_report(
         )
 
     host = request.client.host if request.client else ""
-    rid = reports_store.create_report(
+    rid, was_updated = reports_store.upsert_report(
+        user_id=user.get("user_id"),
         request_id=payload.request_id,
         trace_ts=float(payload.trace_ts or 0.0),
         model=payload.model or "",
@@ -148,7 +150,37 @@ async def submit_report(
         reporter_role="admin" if is_admin else "user",
         reporter_host=host,
     )
-    return JSONResponse({"ok": True, "id": rid})
+
+    # Apply the report's corrections as visible chip corrections on
+    # every capture matching this report's request_id. The chips show
+    # up at /captures and are re-editable like any other chip — i.e.
+    # the report effectively becomes a per-capture correction, NOT a
+    # global PIPELINE_RULES change. This keeps the shared pipeline
+    # untouched (important since /quick-config is user-accessible) and
+    # the admin still gets a single-action way to "promote a report
+    # into a fix" by just clicking Submit.
+    captures_updated = 0
+    if corrections and payload.request_id:
+        try:
+            import captures_store
+            matches = captures_store.find_by_request_id(payload.request_id)
+            for cap in matches:
+                existing = cap.get("corrections") or []
+                merged = reports_store._merge_corrections(existing, corrections)
+                if merged != existing:
+                    captures_store.update_capture(
+                        cap["id"], {"corrections": merged},
+                    )
+                    captures_updated += 1
+        except Exception as e:
+            logger.warning("[reports] capture chip-merge failed: %s", e)
+
+    return JSONResponse({
+        "ok": True,
+        "id": rid,
+        "was_updated": was_updated,
+        "captures_updated": captures_updated,
+    })
 
 
 # ---------------------------------------------------------------------
@@ -183,8 +215,11 @@ class PatchReportIn(BaseModel):
     ],
 )
 async def list_reports_api() -> JSONResponse:
+    rows = reports_store.list_reports()
+    for r in rows:
+        r["username"] = api_keys_store.get_username(r.get("user_id"))
     return JSONResponse({
-        "reports": reports_store.list_reports(),
+        "reports": rows,
         "counts": reports_store.counts_by_status(),
         "retention_days": int(getattr(cfg, "REPORTS_RETENTION_DAYS", 0)),
     })
@@ -889,6 +924,11 @@ _REPORTS_HTML = """<!doctype html>
         escapeHtml(fmtWhen(r.created_ts)) + '</span>' +
       '<span class="pill role-' + escapeHtml(r.reporter_role || 'user') + '">' +
         escapeHtml(r.reporter_role || 'user') + '</span>' +
+      (r.username
+        ? '<span class="pill" title="reported by">' + escapeHtml(r.username) + '</span>'
+        : (r.user_id
+            ? '<span class="pill" title="reported by (unknown user)">' + escapeHtml((r.user_id||'').slice(0,6)) + '</span>'
+            : '')) +
       (r.model ? '<span class="pill">' + escapeHtml(r.model) + '</span>' : '') +
       (r.request_id
         ? '<span class="req" title="cross-reference key in the log file (grep req=' +

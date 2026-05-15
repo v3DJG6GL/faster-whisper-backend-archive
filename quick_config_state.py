@@ -82,6 +82,7 @@ def record_trace(
     raw: str,
     steps: list,
     final: str,
+    user_id: str | None = None,
 ) -> None:
     """Append a new trace to the ring buffer and broadcast to all SSE
     subscribers. Called from main.py's transcribe handler after the
@@ -102,6 +103,11 @@ def record_trace(
     multi-word phrases proved noisy in practice (e.g. "Rückenschmerzen
     Weitere" pairing a content word with a filler) and the user's
     mapping target is almost always a single misrecognized token."""
+    try:
+        import api_keys_store
+        username = api_keys_store.get_username(user_id)
+    except Exception:
+        username = None
     entry: dict[str, Any] = {
         "ts": time.time(),
         "request_id": request_id,
@@ -111,6 +117,8 @@ def record_trace(
                   for s in (steps or [])],
         "final": final or "",
         "tokens": _tokenize(final or ""),
+        "user_id": user_id,
+        "username": username,
     }
     recent_traces.append(entry)
     _broadcast({"event": "trace", "data": entry})

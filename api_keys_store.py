@@ -239,6 +239,18 @@ def get_user(user_id: str) -> dict[str, Any] | None:
     return _row_to_user_dict(row) if row else None
 
 
+def get_username(user_id: "str | None") -> "str | None":
+    """Return the configured username for a user_id, or None if the user
+    no longer exists / has been revoked / wasn't authenticated (open
+    mode). Cheap render-time lookup — the captures, reports, and
+    quick-config routes all call this to swap the truncated user_id
+    pill for the readable username."""
+    if not user_id or user_id == "(open-mode)":
+        return None
+    u = get_user(user_id)
+    return u.get("username") if u else None
+
+
 def revoke_user(user_id: str) -> None:
     """Soft-delete a user and revoke all their keys. Last-admin guard
     must be checked by the caller — this function unconditionally

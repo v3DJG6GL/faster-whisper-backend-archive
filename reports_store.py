@@ -92,6 +92,18 @@ def init_db(path: str) -> None:
     _conn.execute("PRAGMA journal_mode=WAL;")
     _conn.execute("PRAGMA synchronous=NORMAL;")
     _conn.executescript(_SCHEMA)
+    # Idempotent migration: older DBs lack user_id. ALTER errors with
+    # OperationalError ("duplicate column name") on a second startup —
+    # swallow that one specifically.
+    try:
+        _conn.execute("ALTER TABLE reports ADD COLUMN user_id TEXT")
+    except sqlite3.OperationalError as e:
+        if "duplicate column" not in str(e).lower():
+            raise
+    _conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_reports_user_request "
+        "ON reports(user_id, request_id) WHERE user_id IS NOT NULL"
+    )
 
 
 def _require_conn() -> sqlite3.Connection:
@@ -150,9 +162,131 @@ def _truncate_steps(steps: list) -> list:
 _clean_corrections = text_corrections.clean_corrections
 
 
+def find_by_request_user(
+    request_id: "str | None", user_id: "str | None",
+) -> "dict[str, Any] | None":
+    """Return the most recent report row keyed on (user_id, request_id),
+    or None. Used by upsert_report so re-reporting the same trace
+    updates the existing row instead of stacking duplicates."""
+    if not request_id or not user_id:
+        return None
+    conn = _require_conn()
+    row = conn.execute(
+        "SELECT * FROM reports WHERE request_id = ? AND user_id = ?"
+        " ORDER BY created_ts DESC LIMIT 1",
+        (request_id, user_id),
+    ).fetchone()
+    return _row_to_dict(row) if row else None
+
+
+def _merge_corrections(existing: list, incoming: list) -> list:
+    """Merge two cleaned corrections lists, keyed on idx (the word
+    position). Newer (incoming) entries override older ones with the
+    same idx; unique-idx entries from both lists survive."""
+    by_idx: dict[Any, dict[str, Any]] = {}
+    for c in (existing or []):
+        if isinstance(c, dict):
+            by_idx[c.get("idx")] = c
+    for c in (incoming or []):
+        if isinstance(c, dict):
+            by_idx[c.get("idx")] = c
+    # Preserve idx ordering (numeric first, None last).
+    def _sort_key(c):
+        i = c.get("idx")
+        try:
+            return (0, int(i))
+        except (TypeError, ValueError):
+            return (1, 0)
+    return sorted(by_idx.values(), key=_sort_key)
+
+
+def upsert_report(
+    *,
+    user_id: "str | None",
+    request_id: "str | None",
+    trace_ts: float,
+    model: str,
+    raw: str,
+    final: str,
+    steps: list,
+    corrections: list,
+    intended_text: str,
+    user_comment: str,
+    reporter_role: str,
+    reporter_host: str,
+) -> "tuple[str, bool]":
+    """Insert a new report or update the existing one keyed on
+    (user_id, request_id). Returns (report_id, was_updated). The
+    `was_updated` flag is True when an existing row was merged; False
+    when a fresh row was inserted.
+
+    On update: corrections merge by idx (newer wins), intended_text
+    and user_comment overwrite (latest submission supersedes), and
+    created_ts bumps to "now" so the row re-floats to the top of
+    /reports.
+    """
+    existing = find_by_request_user(request_id, user_id)
+    raw_t = (raw or "")[:_CAP_RAW]
+    final_t = (final or "")[:_CAP_FINAL]
+    steps_t = _truncate_steps(steps or [])
+    corr_in = _clean_corrections(corrections or [])
+    intended_t = (intended_text or "")[:_CAP_INTENDED]
+    comment_t = (user_comment or "")[:_CAP_COMMENT]
+    role_t = "admin" if reporter_role == "admin" else "user"
+    now = time.time()
+
+    conn = _require_conn()
+    if existing is not None:
+        merged = _merge_corrections(existing.get("corrections") or [], corr_in)
+        rid = existing["id"]
+        with _lock:
+            conn.execute(
+                "UPDATE reports SET"
+                "  created_ts = ?, trace_ts = ?, model = ?, raw = ?, final = ?,"
+                "  steps_json = ?, corrections_json = ?,"
+                "  intended_text = ?, user_comment = ?,"
+                "  reporter_role = ?, reporter_host = ?,"
+                "  status = 'open', resolved_ts = NULL"
+                " WHERE id = ?",
+                (
+                    now, float(trace_ts or now), model, raw_t, final_t,
+                    json.dumps(steps_t, ensure_ascii=False),
+                    json.dumps(merged, ensure_ascii=False),
+                    intended_t, comment_t, role_t, reporter_host or "",
+                    rid,
+                ),
+            )
+        logger.info("[reports] upsert-updated id=%s role=%s", rid[:8], role_t)
+        return rid, True
+
+    rid = uuid.uuid4().hex
+    with _lock:
+        conn.execute(
+            "INSERT INTO reports ("
+            " id, created_ts, trace_ts, request_id, model,"
+            " raw, final, steps_json, corrections_json,"
+            " intended_text, user_comment, reporter_role, reporter_host,"
+            " status, admin_notes, resolved_ts, snapshot_trusted_client,"
+            " user_id"
+            ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                rid, now, float(trace_ts or now), request_id, model,
+                raw_t, final_t,
+                json.dumps(steps_t, ensure_ascii=False),
+                json.dumps(corr_in, ensure_ascii=False),
+                intended_t, comment_t, role_t, reporter_host or "",
+                "open", "", None, 1, user_id,
+            ),
+        )
+        _evict_to_cap(conn)
+
+    logger.info("[reports] created id=%s role=%s", rid[:8], role_t)
+    return rid, False
+
+
 def create_report(
     *,
-    request_id: str | None,
+    request_id: "str | None",
     trace_ts: float,
     model: str,
     raw: str,
@@ -164,40 +298,17 @@ def create_report(
     reporter_role: str,
     reporter_host: str,
 ) -> str:
-    """Insert a new report row and return its id. Caller has already
-    cleaned/trimmed inputs at the route layer; this is the last-line
-    enforcer for length caps and the soft-cap eviction policy."""
-    rid = uuid.uuid4().hex
-    now = time.time()
-    raw_t = (raw or "")[:_CAP_RAW]
-    final_t = (final or "")[:_CAP_FINAL]
-    steps_t = _truncate_steps(steps or [])
-    corr_t = _clean_corrections(corrections or [])
-    intended_t = (intended_text or "")[:_CAP_INTENDED]
-    comment_t = (user_comment or "")[:_CAP_COMMENT]
-    role_t = "admin" if reporter_role == "admin" else "user"
-
-    conn = _require_conn()
-    with _lock:
-        conn.execute(
-            "INSERT INTO reports ("
-            " id, created_ts, trace_ts, request_id, model,"
-            " raw, final, steps_json, corrections_json,"
-            " intended_text, user_comment, reporter_role, reporter_host,"
-            " status, admin_notes, resolved_ts, snapshot_trusted_client"
-            ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (
-                rid, now, float(trace_ts or now), request_id, model,
-                raw_t, final_t,
-                json.dumps(steps_t, ensure_ascii=False),
-                json.dumps(corr_t, ensure_ascii=False),
-                intended_t, comment_t, role_t, reporter_host or "",
-                "open", "", None, 1,
-            ),
-        )
-        _evict_to_cap(conn)
-
-    logger.info("[reports] created id=%s role=%s", rid[:8], role_t)
+    """Compatibility shim — delegates to upsert_report with user_id=None
+    so callers that haven't been migrated still get a fresh row each
+    time (no upsert possible without user_id). New code should call
+    upsert_report directly."""
+    rid, _ = upsert_report(
+        user_id=None, request_id=request_id, trace_ts=trace_ts,
+        model=model, raw=raw, final=final, steps=steps,
+        corrections=corrections, intended_text=intended_text,
+        user_comment=user_comment, reporter_role=reporter_role,
+        reporter_host=reporter_host,
+    )
     return rid
 
 

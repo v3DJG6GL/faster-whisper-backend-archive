@@ -39,6 +39,7 @@ from fastapi.responses import (
 )
 from pydantic import BaseModel, Field
 
+import api_keys_store
 import captures_store
 import config as cfg
 import text_corrections
@@ -148,6 +149,9 @@ async def list_captures_api(
         status=status_filter, limit=limit, before_ts=before_ts,
         user_id=effective_user,
     )
+    for r in rows:
+        _refresh_final_if_stale(r)
+        r["username"] = api_keys_store.get_username(r.get("user_id"))
     return JSONResponse({
         "captures": rows,
         "counts": captures_store.counts_by_status(),
@@ -167,7 +171,10 @@ async def list_captures_api(
     ],
 )
 async def by_request_id_api(request_id: str) -> JSONResponse:
-    return JSONResponse({"captures": captures_store.find_by_request_id(request_id)})
+    rows = captures_store.find_by_request_id(request_id)
+    for r in rows:
+        r["username"] = api_keys_store.get_username(r.get("user_id"))
+    return JSONResponse({"captures": rows})
 
 
 # Literal-path GET routes (export, groups) MUST be declared BEFORE the
@@ -234,11 +241,13 @@ async def get_capture_api(cid: str) -> JSONResponse:
     row = captures_store.get_capture(cid)
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "capture not found")
+    _refresh_final_if_stale(row)
     row["words"] = _align_words_to_final(
         row.get("words") or [],
         row.get("final") or "",
         model_name=row.get("model"),
     )
+    row["username"] = api_keys_store.get_username(row.get("user_id"))
     return JSONResponse({"capture": row})
 
 
@@ -662,7 +671,11 @@ def _enrich_group(g: dict[str, Any]) -> dict[str, Any]:
     user edits afterwards (including explicit clears) are preserved."""
     import capture_groups_store
     members = capture_groups_store.get_members(g["id"])
+    for m in members:
+        _refresh_final_if_stale(m)
+        m["username"] = api_keys_store.get_username(m.get("user_id"))
     g["members"] = members
+    g["username"] = api_keys_store.get_username(g.get("user_id"))
 
     if g.get("corrections_migrated_at") is None:
         now = time.time()
@@ -688,6 +701,37 @@ def _enrich_group(g: dict[str, Any]) -> dict[str, Any]:
         members, int(g["inter_segment_silence_ms"]),
     )
     return g
+
+
+def _refresh_final_if_stale(row: dict[str, Any]) -> str:
+    """Recompute `final` from `raw` via the current pipeline. If the
+    result differs from what's stored, write it back and update the row
+    in place. Returns the (possibly refreshed) final text.
+
+    This is the per-row self-heal that keeps fetched captures
+    rule-current without requiring the user to click "Re-apply rules"
+    first. The bulk reapply job is still useful for unfetched captures
+    (export, retention sweep)."""
+    raw = row.get("raw") or ""
+    stored = row.get("final") or ""
+    if not raw:
+        return stored
+    try:
+        import main
+        fresh = main._postprocess_text(raw, model_name=row.get("model"))
+    except Exception:
+        return stored
+    if fresh != stored:
+        try:
+            captures_store.update_capture(row["id"], {"final": fresh})
+        except Exception as e:
+            logger.warning(
+                "[captures] self-heal final write-back failed for %s: %s",
+                str(row.get("id"))[:8], e,
+            )
+        row["final"] = fresh
+        return fresh
+    return stored
 
 
 def _align_key(s: str) -> str:
@@ -1414,11 +1458,13 @@ _CAPTURES_HTML = r"""<!doctype html>
   .cc-correction .remove:hover { color: var(--red); }
 
   .cc-ground {
-    width: 100%; min-height: 5rem; resize: vertical;
+    width: 100%; min-height: 5rem;
     background: var(--input-bg); color: var(--bold);
     border: 1px solid var(--border); border-radius: 4px;
     padding: 0.5rem 0.6rem; font-family: var(--font-mono);
     font-size: var(--fs-md); margin-top: 0.25rem;
+    white-space: pre-wrap; word-wrap: break-word;
+    user-select: text; cursor: text;
   }
 
   .cc-notes textarea {
@@ -2050,9 +2096,11 @@ _CAPTURES_HTML = r"""<!doctype html>
       (r.request_id
         ? '<span class="req">req ' + escapeHtml((r.request_id||'').slice(0,8)) + '</span>'
         : '') +
-      (r.user_id
-        ? '<span class="pill" title="speaker">' + escapeHtml((r.user_id||'').slice(0,6)) + '</span>'
-        : '') +
+      (r.username
+        ? '<span class="pill" title="speaker">' + escapeHtml(r.username) + '</span>'
+        : (r.user_id
+            ? '<span class="pill" title="speaker (unknown user)">' + escapeHtml((r.user_id||'').slice(0,6)) + '</span>'
+            : '')) +
       (r.group_id
         ? '<span class="pill group-pill" title="member of group ' + escapeHtml(r.group_id.slice(0,8)) + '">in group</span>'
         : '') +
@@ -2267,23 +2315,28 @@ _CAPTURES_HTML = r"""<!doctype html>
     state.chipBox = chipBox;
     renderChips(state);
 
-    // --- ground truth (corrected_text) ---
+    // --- ground truth (read-only preview) ---
+    // Locked output preview: shows what Whisper would learn to emit
+    // for this audio = current pipeline output + word-chip corrections.
+    // Not editable — to change the text, edit chips above or change
+    // the pipeline rules on /quick-config.
     var gtSec = document.createElement('div');
     gtSec.className = 'cc-section';
     gtSec.innerHTML = '<h3>Ground truth (exported text)</h3>'
-      + '<div class="help">This is the string Whisper learns to emit '
-      + 'for this audio. Defaults to the post-pipeline <em>final</em> text; '
-      + 'edit freely. Word-chip edits auto-apply on blur / Enter.</div>';
-    var gtArea = document.createElement('textarea');
+      + '<div class="help">Computed from <em>final</em> + word corrections '
+      + '+ current pipeline rules. To change it, edit the chips above or '
+      + 'update rules on /quick-config.</div>';
+    var gtArea = document.createElement('div');
     gtArea.className = 'cc-ground';
-    gtArea.value = state.correctedText || state.finalText;
-    gtArea.addEventListener('input', function() {
-      state.correctedText = gtArea.value;
-      markDirty(state);
-    });
+    gtArea.setAttribute('role', 'textbox');
+    gtArea.setAttribute('aria-readonly', 'true');
+    gtArea.textContent = state.finalText;
     gtSec.appendChild(gtArea);
     body.appendChild(gtSec);
     state.gtArea = gtArea;
+    // Initial paint: layer existing chip corrections onto finalText so
+    // the preview matches what would be exported right now.
+    applyCorrectionsToGround(state);
 
     // --- notes ---
     var notesSec = document.createElement('div');
@@ -2587,6 +2640,11 @@ _CAPTURES_HTML = r"""<!doctype html>
     // spans get replaced as one unit. If a chip's `wrong` isn't found
     // verbatim in the final text (regex special chars / whitespace
     // drift), it's left alone.
+    //
+    // The GT element is now a read-only preview (textContent, not
+    // value) — markDirty stays off here because the user can only
+    // change GT *indirectly*, by editing a chip, which already
+    // markDirty'd on its own.
     var ordered = state.corrections.slice().sort(function(a, b) {
       var ai = typeof a.idx === 'number' ? a.idx : 1e9;
       var bi = typeof b.idx === 'number' ? b.idx : 1e9;
@@ -2598,9 +2656,7 @@ _CAPTURES_HTML = r"""<!doctype html>
       var i = out.indexOf(c.wrong);
       if (i >= 0) out = out.slice(0, i) + c.correct + out.slice(i + c.wrong.length);
     });
-    state.correctedText = out;
-    state.gtArea.value = out;
-    markDirty(state);
+    state.gtArea.textContent = out;
   }
 
   function markDirty(state) {
@@ -2633,7 +2689,6 @@ _CAPTURES_HTML = r"""<!doctype html>
         });
       var body = {
         status: state.newStatus,
-        corrected_text: state.correctedText,
         corrections: corrections,
         admin_notes: state.adminNotes,
       };
@@ -2913,8 +2968,10 @@ _CAPTURES_HTML = r"""<!doctype html>
         escapeHtml(absTime(g.created_ts)) + '">' +
         escapeHtml(fmtWhen(g.created_ts)) + '</span>' +
       '<span class="pill group-pill">group</span>' +
-      '<span class="pill" title="speaker">' +
-        escapeHtml((g.user_id || '?').slice(0, 6)) + '</span>' +
+      (g.username
+        ? '<span class="pill" title="speaker">' + escapeHtml(g.username) + '</span>'
+        : '<span class="pill" title="speaker (unknown user)">' +
+            escapeHtml((g.user_id || '?').slice(0, 6)) + '</span>') +
       '<span class="duration">' +
         ((g.merged_duration_ms || 0) / 1000).toFixed(2) + 's</span>' +
       (g.is_stale
