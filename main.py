@@ -314,7 +314,8 @@ rebuild_caches()
 
 
 def _postprocess_text(text: str, model_name: "str | None" = None,
-                       trace: "list | None" = None) -> str:
+                       trace: "list | None" = None,
+                       extra_excludes: "set[str] | None" = None) -> str:
     """Run the unified pipeline rule list on `text`. If `trace` is a list,
     each rule that changes the text appends `(label_with_ordinal, before, after)`
     so the per-request log block can render a diff view.
@@ -327,6 +328,13 @@ def _postprocess_text(text: str, model_name: "str | None" = None,
 
     Effective:  (rule.enabled AND slug NOT in EXCLUDE) OR (slug IN INCLUDE).
     A rule cannot appear in both lists — pydantic validator rejects that.
+
+    `extra_excludes` is an additional set of rule slugs to skip on top of
+    the per-model EXCLUDE. Used by the /captures storage path to produce
+    a training-form transcript (cfg.CAPTURES_PIPELINE_RULES_EXCLUDE) while
+    leaving the runtime /transcribe response untouched. Rules in
+    `extra_excludes` are skipped even when they appear in INCLUDE — the
+    captures-specific intent overrides the per-model force-on.
     """
     exclude: "set[str]" = set()
     include: "set[str]" = set()
@@ -340,6 +348,9 @@ def _postprocess_text(text: str, model_name: "str | None" = None,
                 exclude = set(ex)
             if isinstance(inc, list):
                 include = set(inc)
+    if extra_excludes:
+        exclude = exclude | set(extra_excludes)
+        include = include - set(extra_excludes)
     for ordinal, rule in enumerate(_COMPILED_RULES, start=1):
         # Force-EXCLUDE wins outright — admin explicitly turned this off.
         if rule.name in exclude:
@@ -1685,6 +1696,27 @@ async def transcribe(
             raw_full_text = "".join(raw_full_text_parts)
             trace: "list | None" = [] if cfg.TRACE_ENABLED else None
             full_text_str = _postprocess_text(raw_full_text, model_name=resolved_model, trace=trace)
+            # Captures-form text — same pipeline minus the captures-specific
+            # exclude set (default-skips `dictation-map` + `capitalize-after-
+            # terminator` so the stored text matches Whisper's raw output
+            # under SUPPRESS_CHARS for fine-tune training). Computed
+            # unconditionally — cheap; only stored if the capture is
+            # persisted below. No trace participation: the runtime trace
+            # describes the user-facing pipeline, not the training-form
+            # variant.
+            try:
+                training_text_str = _postprocess_text(
+                    raw_full_text,
+                    model_name=resolved_model,
+                    trace=None,
+                    extra_excludes=getattr(cfg, "CAPTURES_PIPELINE_RULES_EXCLUDE", None),
+                )
+            except Exception as _tte:
+                logger.warning(
+                    "[capture] training-form pipeline failed (using final as fallback): %s",
+                    _tte,
+                )
+                training_text_str = full_text_str
             # Output wrappers (G/PM): plain prefix/suffix concatenated to
             # the final transcript text after the pipeline runs and BEFORE
             # the final whitespace trim. Per-model overrides win.
@@ -1740,6 +1772,7 @@ async def transcribe(
                                 duration_seconds=audio_dur_s,
                                 raw=raw_full_text,
                                 final=full_text_str,
+                                text_for_training=training_text_str,
                                 words=all_words,
                                 segments=seg_diag,
                                 user_id=user.get("user_id"),

@@ -449,6 +449,32 @@ FIELD_DESCRIPTIONS: dict[str, str] = {
         "Pre-transcribe upload-size guard. Captures eligibility roll is "
         "skipped for uploads larger than this many bytes, even when "
         "sampling would otherwise pass.",
+    "CAPTURES_PIPELINE_RULES_EXCLUDE":
+        "Set of PIPELINE_RULES slugs to SKIP when computing each "
+        "capture's `text_for_training` (the column /captures shows and "
+        "the export emits). All other PIPELINE_RULES still run. Default "
+        "skips `dictation-map` + `capitalize-after-terminator` so the "
+        "stored training text matches Whisper's raw output under "
+        "SUPPRESS_CHARS — \"Komma\"/\"Punkt\" stay as words; sentence-"
+        "internal lowercase preserved. /transcribe runtime output is "
+        "unaffected (it still applies the full pipeline). Edit + run "
+        "Reprocess all to apply changes to existing captures.",
+    "CAPTURES_VAD_TRIM_ENABLED_FOR_GROUPS":
+        "When True, group merged WAVs are silence-trimmed via Silero "
+        "VAD after merge_wavs() concatenates members. Trims leading/"
+        "trailing silence only; inter-utterance gaps inside the merged "
+        "clip are preserved. Mitigates the Whisper hallucination failure "
+        "mode documented in arXiv:2505.12969 (Calm-Whisper).",
+    "CAPTURES_VAD_TRIM_ENABLED_FOR_SINGLETONS":
+        "Currently advisory only — singletons are trimmed via the per-"
+        "capture \"Trim silence\" button on /captures detail. Reserved "
+        "for a future auto-trim-at-capture-time pass; setting this True "
+        "today has no effect.",
+    "CAPTURES_VAD_TRIM_MARGIN_MS":
+        "Silence preserved on either side of detected speech when "
+        "trimming. Default 300 ms — matches the inter-segment gap "
+        "merge_wavs inserts between group members so trimmed and "
+        "untrimmed clips have consistent edge silence.",
 }
 
 
@@ -780,6 +806,18 @@ class AdminConfig(BaseModel):
     CAPTURE_RECORDINGS_MIN_DURATION_SEC: Annotated[float, Field(ge=0.0, le=3600.0)] | None = _F("CAPTURE_RECORDINGS_MIN_DURATION_SEC")
     CAPTURE_RECORDINGS_MAX_DURATION_SEC: Annotated[float, Field(ge=0.1, le=86400.0)] | None = _F("CAPTURE_RECORDINGS_MAX_DURATION_SEC")
     CAPTURE_RECORDINGS_AUDIO_BYTES_HARD_LIMIT: Annotated[int, Field(ge=1024, le=10_000_000_000)] | None = _F("CAPTURE_RECORDINGS_AUDIO_BYTES_HARD_LIMIT")
+    # Captures-specific pipeline-rule exclusion (set of rule slugs).
+    # Stored as a list in JSON; coerced back to set at use time. The
+    # admin UI surfaces this as the same rule-checklist widget used for
+    # per-model PIPELINE_RULES_EXCLUDE so the editing affordance is
+    # identical.
+    CAPTURES_PIPELINE_RULES_EXCLUDE: Annotated[
+        list[Annotated[str, Field(min_length=1, max_length=64)]],
+        Field(max_length=64),
+    ] | None = _F("CAPTURES_PIPELINE_RULES_EXCLUDE")
+    CAPTURES_VAD_TRIM_ENABLED_FOR_GROUPS: bool | None = _F("CAPTURES_VAD_TRIM_ENABLED_FOR_GROUPS")
+    CAPTURES_VAD_TRIM_ENABLED_FOR_SINGLETONS: bool | None = _F("CAPTURES_VAD_TRIM_ENABLED_FOR_SINGLETONS")
+    CAPTURES_VAD_TRIM_MARGIN_MS: Annotated[int, Field(ge=0, le=2000)] | None = _F("CAPTURES_VAD_TRIM_MARGIN_MS")
 
     @field_validator("LOG_FILE")
     @classmethod

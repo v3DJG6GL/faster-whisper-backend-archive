@@ -86,6 +86,8 @@ CREATE TABLE IF NOT EXISTS captures (
   audio_format    TEXT NOT NULL,
   raw             TEXT NOT NULL,
   final           TEXT NOT NULL,
+  text_for_training TEXT,
+  audio_trimmed_relpath TEXT,
   words_json      TEXT NOT NULL,
   segments_json   TEXT NOT NULL DEFAULT '[]',
   corrected_text  TEXT NOT NULL DEFAULT '',
@@ -102,14 +104,26 @@ CREATE INDEX IF NOT EXISTS idx_captures_status     ON captures(status);
 CREATE INDEX IF NOT EXISTS idx_captures_request_id ON captures(request_id);
 """
 
-# Migrations for installs that predate the user_id / group_id columns.
-# SQLite ALTER ADD COLUMN raises OperationalError("duplicate column …")
-# on a fresh DB whose CREATE TABLE already includes them, so we swallow
-# that specific error and keep going.
+# Migrations for installs that predate later columns. SQLite ALTER ADD
+# COLUMN raises OperationalError("duplicate column …") on a fresh DB
+# whose CREATE TABLE already includes them, so we swallow that specific
+# error and keep going.
+#
+# text_for_training: post-processing text built with the captures-specific
+#   pipeline-rule exclude set applied (default-skipped: `dictation-map` +
+#   `capitalize-after-terminator`). Used by /captures UI + the export
+#   manifest so reviewers see — and Whisper trains on — the word-form
+#   transcript that matches the model's raw output at inference time
+#   under SUPPRESS_CHARS.
+# audio_trimmed_relpath: optional separate WAV with leading/trailing
+#   silence cut via Silero VAD (per-singleton manual trim). NULL means
+#   "use audio_relpath".
 _MIGRATIONS = (
     "ALTER TABLE captures ADD COLUMN user_id TEXT",
     "ALTER TABLE captures ADD COLUMN group_id TEXT",
     "ALTER TABLE captures ADD COLUMN group_order INTEGER",
+    "ALTER TABLE captures ADD COLUMN text_for_training TEXT",
+    "ALTER TABLE captures ADD COLUMN audio_trimmed_relpath TEXT",
 )
 
 _SCHEMA_USER_GROUP_INDEXES = """
@@ -258,6 +272,7 @@ def create_capture(
     duration_seconds: float | None,
     raw: str,
     final: str,
+    text_for_training: str | None = None,
     words: list[dict[str, Any]],
     segments: list[dict[str, Any]],
     user_id: str | None = None,
@@ -313,6 +328,7 @@ def create_capture(
     now = time.time()
     raw_t = (raw or "")[:_CAP_RAW]
     final_t = (final or "")[:_CAP_FINAL]
+    training_t = (text_for_training or "")[:_CAP_FINAL] if text_for_training is not None else None
     words_t = _truncate_json(words or [], _CAP_WORDS_JSON)
     segments_t = _truncate_json(segments or [], _CAP_SEGMENTS_JSON)
 
@@ -323,14 +339,16 @@ def create_capture(
                 "INSERT INTO captures ("
                 " id, created_ts, request_id, model, language,"
                 " duration_seconds, audio_relpath, audio_format,"
-                " raw, final, words_json, segments_json,"
+                " raw, final, text_for_training, audio_trimmed_relpath,"
+                " words_json, segments_json,"
                 " corrected_text, corrections_json, admin_notes,"
                 " status, reviewed_ts, user_id, group_id, group_order"
-                ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     cid, now, request_id, model or "", language or "",
                     float(duration_seconds or 0.0), relpath, "wav",
-                    raw_t, final_t, words_t, segments_t,
+                    raw_t, final_t, training_t, None,
+                    words_t, segments_t,
                     "", "[]", "",
                     "new", None,
                     user_id, None, None,
@@ -538,7 +556,8 @@ def list_captures(
     cur = conn.execute(
         f"SELECT id, created_ts, request_id, model, language,"
         f" duration_seconds, audio_relpath, audio_format,"
-        f" raw, final, corrected_text, corrections_json, admin_notes,"
+        f" raw, final, text_for_training, audio_trimmed_relpath,"
+        f" corrected_text, corrections_json, admin_notes,"
         f" status, reviewed_ts, user_id, group_id, group_order"
         f" FROM captures{where}"
         f" ORDER BY created_ts DESC LIMIT ?",
@@ -585,7 +604,8 @@ def find_by_request_id(request_id: str) -> list[dict[str, Any]]:
     cur = conn.execute(
         "SELECT id, created_ts, request_id, model, language,"
         " duration_seconds, audio_relpath, audio_format,"
-        " raw, final, corrected_text, corrections_json, admin_notes,"
+        " raw, final, text_for_training, audio_trimmed_relpath,"
+        " corrected_text, corrections_json, admin_notes,"
         " status, reviewed_ts, user_id, group_id, group_order"
         " FROM captures WHERE request_id = ? ORDER BY created_ts DESC",
         (request_id,),
@@ -687,6 +707,14 @@ def update_capture(cid: str, patch: dict[str, Any]) -> dict[str, Any] | None:
     if "final" in patch:
         sets.append("final = ?")
         params.append(str(patch["final"] or ""))
+    if "text_for_training" in patch:
+        sets.append("text_for_training = ?")
+        val = patch["text_for_training"]
+        params.append(str(val)[:_CAP_FINAL] if val is not None else None)
+    if "audio_trimmed_relpath" in patch:
+        sets.append("audio_trimmed_relpath = ?")
+        val = patch["audio_trimmed_relpath"]
+        params.append(str(val) if val else None)
     if not sets:
         return get_capture(cid)
     params.append(cid)
@@ -721,7 +749,8 @@ def delete_capture(cid: str) -> bool:
     conn = _require_conn()
     with _lock:
         row = conn.execute(
-            "SELECT audio_relpath, group_id FROM captures WHERE id = ?",
+            "SELECT audio_relpath, audio_trimmed_relpath, group_id"
+            " FROM captures WHERE id = ?",
             (cid,),
         ).fetchone()
         if row is None:
@@ -732,6 +761,13 @@ def delete_capture(cid: str) -> bool:
         _safe_unlink(abs_audio_path(row["audio_relpath"]))
     except ValueError:
         pass
+    # Also clean up the trimmed companion file if one was produced.
+    trimmed = row["audio_trimmed_relpath"] if "audio_trimmed_relpath" in row.keys() else None
+    if trimmed:
+        try:
+            _safe_unlink(abs_audio_path(trimmed))
+        except ValueError:
+            pass
     if gid:
         try:
             import capture_groups_store
@@ -807,7 +843,8 @@ def reconcile_on_startup() -> tuple[int, int]:
     known_paths: set[str] = set()
     with _lock:
         cur = conn.execute(
-            "SELECT id, audio_relpath, status FROM captures",
+            "SELECT id, audio_relpath, audio_trimmed_relpath, status"
+            " FROM captures",
         )
         for r in cur.fetchall():
             try:
@@ -823,6 +860,16 @@ def reconcile_on_startup() -> tuple[int, int]:
                         (r["id"],),
                     )
                     rows_marked += 1
+            # Trimmed companion (if present) is also a known artifact;
+            # without this it gets unlinked as "orphan" on every restart.
+            trimmed_rel = r["audio_trimmed_relpath"] if "audio_trimmed_relpath" in r.keys() else None
+            if trimmed_rel:
+                try:
+                    t_abs = abs_audio_path(trimmed_rel)
+                except ValueError:
+                    continue
+                if os.path.isfile(t_abs):
+                    known_paths.add(os.path.abspath(t_abs))
 
     # Walk the audio directory and unlink anything not in known_paths.
     # The `groups/` subtree is owned by capture_groups_store and has its

@@ -325,12 +325,25 @@ async def get_audio_api(cid: str, request: Request) -> FileResponse:
     row = captures_store.get_capture(cid)
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "capture not found")
-    try:
-        abs_path = captures_store.abs_audio_path(row["audio_relpath"])
-    except ValueError:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "audio path invalid")
-    if not os.path.isfile(abs_path):
-        raise HTTPException(status.HTTP_410_GONE, "audio file is gone")
+    # Prefer the trimmed WAV when one exists — that's what the export
+    # uses, so reviewers should hear the same thing. Falls back to the
+    # original if the trimmed file is missing on disk for any reason.
+    trimmed_rel = row.get("audio_trimmed_relpath")
+    abs_path: str | None = None
+    if trimmed_rel:
+        try:
+            cand = captures_store.abs_audio_path(trimmed_rel)
+            if os.path.isfile(cand):
+                abs_path = cand
+        except ValueError:
+            abs_path = None
+    if abs_path is None:
+        try:
+            abs_path = captures_store.abs_audio_path(row["audio_relpath"])
+        except ValueError:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "audio path invalid")
+        if not os.path.isfile(abs_path):
+            raise HTTPException(status.HTTP_410_GONE, "audio file is gone")
     mime = _sniff_audio_mime(abs_path, row.get("audio_format", ""))
     # FileResponse handles Range automatically — seeking in the karaoke
     # player won't re-download the whole file.
@@ -411,6 +424,146 @@ async def clear_captures_api(payload: ClearIn, request: Request) -> JSONResponse
 
 
 # ---------------------------------------------------------------------
+# Per-capture audio trim (manual, opt-in)
+# ---------------------------------------------------------------------
+
+@router.post(
+    "/captures/api/{cid}/trim",
+    dependencies=[
+        Depends(require_admin_host),
+        Depends(require_admin),
+    ],
+)
+async def trim_capture_audio_api(cid: str) -> JSONResponse:
+    """Cut leading/trailing silence from a singleton's WAV via Silero VAD.
+
+    Writes the trimmed audio to a NEW file (`<id>.trimmed.wav`) so the
+    original `audio_relpath` is preserved. The audio GET endpoint then
+    prefers the trimmed path; export emits the trimmed file as the
+    sample's `audio_filepath`.
+
+    Returns:
+      {"trimmed": True} on success.
+      {"trimmed": False, "reason": "..."} when nothing was trimmed
+      (no speech detected / already tight / VAD unavailable).
+    """
+    import audio_vad_trim
+    row = captures_store.get_capture(cid)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "capture not found")
+    src_rel = row.get("audio_relpath") or ""
+    if not src_rel:
+        raise HTTPException(status.HTTP_410_GONE, "audio file is gone")
+    try:
+        src_abs = captures_store.abs_audio_path(src_rel)
+    except ValueError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "audio path invalid")
+    if not os.path.isfile(src_abs):
+        raise HTTPException(status.HTTP_410_GONE, "audio file is gone")
+
+    # Compute the trimmed path as a sibling of the original (same
+    # fanout). Suffix `.trimmed` keeps it discoverable without a
+    # schema migration on the relpath helper.
+    base, ext = os.path.splitext(src_rel)
+    dst_rel = f"{base}.trimmed{ext or '.wav'}"
+    dst_abs = captures_store.abs_audio_path(dst_rel)
+
+    margin = int(getattr(cfg, "CAPTURES_VAD_TRIM_MARGIN_MS", 300))
+    try:
+        ok = audio_vad_trim.trim_wav(src_abs, dst_abs, margin_ms=margin)
+    except Exception as e:
+        logger.warning("[trim] cid=%s VAD trim failed: %s", cid[:8], e)
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            f"VAD trim failed: {e}",
+        )
+    if not ok:
+        # Nothing to do — either no speech was detected or the file was
+        # already tight. Don't persist a half-written trimmed_relpath.
+        return JSONResponse({
+            "trimmed": False,
+            "reason": "no_speech_or_already_tight",
+        })
+    captures_store.update_capture(cid, {"audio_trimmed_relpath": dst_rel})
+    return JSONResponse({"trimmed": True, "audio_trimmed_relpath": dst_rel})
+
+
+# ---------------------------------------------------------------------
+# Per-capture pipeline reprocess (re-run rules on `raw`)
+# ---------------------------------------------------------------------
+
+@router.post(
+    "/captures/api/{cid}/reprocess",
+    dependencies=[
+        Depends(require_admin_host),
+        Depends(require_admin),
+    ],
+)
+async def reprocess_capture_api(cid: str) -> JSONResponse:
+    """Re-run the post-processing pipeline on the stored `raw` text and
+    update both `final` and `text_for_training` to reflect the current
+    PIPELINE_RULES (and the captures-specific exclude set).
+
+    Use case: after editing PIPELINE_RULES (e.g. adding a typo-fix or
+    a new dictation-map entry), a reviewer wants this specific capture
+    re-derived without waiting for the bulk reapply job. The bulk job
+    /quick-config/reapply-rules also handles this row eventually, but
+    the per-row trigger gives immediate feedback in the UI.
+    """
+    row = captures_store.get_capture(cid)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "capture not found")
+    import main
+    raw = row.get("raw") or ""
+    captures_excludes = getattr(cfg, "CAPTURES_PIPELINE_RULES_EXCLUDE", None)
+    try:
+        new_final = main._postprocess_text(raw, model_name=row.get("model"))
+    except Exception as e:
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            f"pipeline failed on `final`: {e}",
+        )
+    try:
+        new_training = main._postprocess_text(
+            raw,
+            model_name=row.get("model"),
+            extra_excludes=captures_excludes,
+        )
+    except Exception as e:
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            f"pipeline failed on `text_for_training`: {e}",
+        )
+    patch: dict[str, Any] = {}
+    if new_final != (row.get("final") or ""):
+        patch["final"] = new_final
+    if new_training != (row.get("text_for_training") or ""):
+        patch["text_for_training"] = new_training
+    if patch:
+        captures_store.update_capture(cid, patch)
+    updated = captures_store.get_capture(cid) or row
+    return JSONResponse({"capture": updated, "changed": list(patch.keys())})
+
+
+@router.post(
+    "/captures/api/reprocess-all",
+    dependencies=[
+        Depends(require_admin_host),
+        Depends(require_admin),
+    ],
+)
+async def reprocess_all_captures_api() -> JSONResponse:
+    """Trigger the bulk pipeline-reapply job — same worker used by
+    /quick-config/reapply-rules. Idempotent: a second call while the
+    job is running returns the current state instead of spawning a
+    duplicate worker. Use after PIPELINE_RULES edits to bring every
+    capture's `final` + `text_for_training` (and downstream group
+    `transcript`) in line with the current rules."""
+    import captures_reapply
+    return JSONResponse(captures_reapply.start())
+
+
+# ---------------------------------------------------------------------
 # Capture groups (≤28 s packed training samples)
 # ---------------------------------------------------------------------
 
@@ -418,14 +571,14 @@ class CreateGroupIn(BaseModel):
     model_config = {"extra": "forbid"}
     member_ids: list[str] = Field(min_length=2, max_length=30)
     transcript: str = Field(default="", max_length=20_000)
-    join_strategy: Literal["space", "period_space", "newline"] = "space"
+    join_strategy: Literal["space", "period_space"] = "space"
     silence_ms: int = Field(default=300, ge=0, le=2000)
 
 
 class PatchGroupIn(BaseModel):
     model_config = {"extra": "forbid"}
     transcript: str | None = Field(default=None, max_length=20_000)
-    join_strategy: Literal["space", "period_space", "newline"] | None = None
+    join_strategy: Literal["space", "period_space"] | None = None
     silence_ms: int | None = Field(default=None, ge=0, le=2000)
     is_locked: bool | None = None
     corrections: list[CorrectionIn] | None = Field(default=None, max_length=200)
@@ -438,7 +591,7 @@ class PatchGroupIn(BaseModel):
     admin_notes: str | None = Field(default=None, max_length=8000)
 
 
-_JOIN_STR = {"space": " ", "period_space": ". ", "newline": "\n"}
+_JOIN_STR = {"space": " ", "period_space": ". "}
 
 
 def _apply_chips_to_text(text: str, corrections: list[dict[str, Any]]) -> str:
@@ -472,12 +625,14 @@ def _apply_chips_to_text(text: str, corrections: list[dict[str, Any]]) -> str:
 
 def _build_default_transcript(members: list[dict[str, Any]], strategy: str) -> str:
     """Concatenate member transcripts with chips applied. Each member's
-    post-processing text (`final`) gets its chip corrections layered on
-    top before the join, so the merged result reflects what the export
-    pipeline would actually produce."""
+    training-form text (`text_for_training`) gets its chip corrections
+    layered on top before the join, so the merged result reflects what
+    the export pipeline will actually produce. Falls back through `final`
+    then `raw` for legacy members predating the `text_for_training`
+    column."""
     parts: list[str] = []
     for m in members:
-        base = m.get("final") or m.get("raw") or ""
+        base = m.get("text_for_training") or m.get("final") or m.get("raw") or ""
         t = _apply_chips_to_text(base, m.get("corrections") or []).strip()
         if t:
             parts.append(t)
@@ -605,6 +760,17 @@ async def create_group_api(
         member_ids=member_ids,
         silence_ms=payload.silence_ms,
     )
+    # Derive language from the first member with a populated value —
+    # Whisper detects language per-clip; members of the same group should
+    # all share it, but if a member somehow has an empty language we
+    # tolerate that and fall through to the next one rather than
+    # emitting an empty `language` in the export manifest.
+    group_language = ""
+    for _c in captures:
+        _lang = (_c.get("language") or "").strip()
+        if _lang:
+            group_language = _lang
+            break
     try:
         _insert_group_with_gid(
             gid=gid,
@@ -615,6 +781,7 @@ async def create_group_api(
             silence_ms=payload.silence_ms,
             member_hash_map=hashes,
             duration_ms=duration_ms,
+            language=group_language,
         )
     except Exception:
         # Insert failed — roll back the WAV we just wrote so the
@@ -638,6 +805,7 @@ def _insert_group_with_gid(
     silence_ms: int,
     member_hash_map: dict[str, str],
     duration_ms: int,
+    language: str | None = None,
 ) -> None:
     """Direct insert that honours a pre-allocated gid (needed because the
     audio file is written at the gid path before this call). Mirrors the
@@ -660,13 +828,15 @@ def _insert_group_with_gid(
                 " (id, user_id, created_ts, merged_wav_relpath,"
                 "  merged_duration_ms, transcript,"
                 "  transcript_join_strategy, member_hashes_json,"
-                "  inter_segment_silence_ms, is_stale, is_locked)"
-                " VALUES (?,?,?,?,?,?,?,?,?,0,0)",
+                "  inter_segment_silence_ms, is_stale, is_locked,"
+                "  language)"
+                " VALUES (?,?,?,?,?,?,?,?,?,0,0,?)",
                 (
                     gid, user_id, now, relpath, int(duration_ms),
                     transcript, join_strategy,
                     _json.dumps(member_hash_map, sort_keys=True),
                     int(silence_ms),
+                    language or None,
                 ),
             )
             for order, mid in enumerate(member_ids):
@@ -815,34 +985,60 @@ def _enrich_group(g: dict[str, Any]) -> dict[str, Any]:
 
 
 def _refresh_final_if_stale(row: dict[str, Any]) -> str:
-    """Recompute `final` from `raw` via the current pipeline. If the
-    result differs from what's stored, write it back and update the row
-    in place. Returns the (possibly refreshed) final text.
+    """Recompute `final` AND `text_for_training` from `raw` via the
+    current pipeline. If either differs from what's stored, write it
+    back and update the row in place. Returns the (possibly refreshed)
+    final text.
 
     This is the per-row self-heal that keeps fetched captures
     rule-current without requiring the user to click "Re-apply rules"
     first. The bulk reapply job is still useful for unfetched captures
-    (export, retention sweep)."""
+    (export, retention sweep).
+
+    `text_for_training` is the canonical /captures display text — it
+    must reflect current PIPELINE_RULES (minus the captures-specific
+    excludes) so reviewers see what the export will emit and chips
+    apply against the same text the trainer will consume."""
     raw = row.get("raw") or ""
-    stored = row.get("final") or ""
+    stored_final = row.get("final") or ""
+    stored_training = row.get("text_for_training") or ""
     if not raw:
-        return stored
+        return stored_final
     try:
         import main
-        fresh = main._postprocess_text(raw, model_name=row.get("model"))
+        fresh_final = main._postprocess_text(raw, model_name=row.get("model"))
     except Exception:
-        return stored
-    if fresh != stored:
+        return stored_final
+    patch: dict[str, Any] = {}
+    if fresh_final != stored_final:
+        patch["final"] = fresh_final
+        row["final"] = fresh_final
+    # Self-heal text_for_training even when `final` is up-to-date — the
+    # captures-excludes set could have changed (admin tweaked
+    # CAPTURES_PIPELINE_RULES_EXCLUDE) without an underlying PIPELINE_RULES
+    # change, and stale training text would mislead reviewers and
+    # the export.
+    try:
+        captures_excludes = getattr(cfg, "CAPTURES_PIPELINE_RULES_EXCLUDE", None)
+        fresh_training = main._postprocess_text(
+            raw,
+            model_name=row.get("model"),
+            extra_excludes=captures_excludes,
+        )
+    except Exception:
+        fresh_training = None
+    if fresh_training is not None and fresh_training != stored_training:
+        patch["text_for_training"] = fresh_training
+        row["text_for_training"] = fresh_training
+    if patch:
         try:
-            captures_store.update_capture(row["id"], {"final": fresh})
+            captures_store.update_capture(row["id"], patch)
         except Exception as e:
             logger.warning(
-                "[captures] self-heal final write-back failed for %s: %s",
+                "[captures] self-heal write-back failed for %s: %s",
                 str(row.get("id"))[:8], e,
             )
-        row["final"] = fresh
-        return fresh
-    return stored
+    return row.get("final") or stored_final
 
 
 def _align_key(s: str) -> str:
@@ -1247,12 +1443,80 @@ async def get_group_audio_api(
 # Export: streamed tar.gz
 # ---------------------------------------------------------------------
 
+_EXPORT_MANIFEST_KEYS = (
+    "audio_filepath",
+    "text",
+    "duration",
+    "language",
+    "source",
+    "user_id",
+    "status",
+    "created_ts",
+    "model",
+    "request_id",
+    "member_count",
+    "admin_notes",
+    "corrections",
+)
+
+
+def _build_manifest_row(
+    *,
+    audio_filepath: str,
+    text: str,
+    duration: float,
+    language: str,
+    source: str,
+    user_id: str,
+    status_value: str,
+    created_ts: float,
+    model: str,
+    request_id: str,
+    member_count: int,
+    admin_notes: str,
+    corrections: list,
+) -> dict[str, Any]:
+    """Build a single manifest line dict with the unified 13-key schema.
+
+    Same keys for singletons and groups — defaults populate the keys
+    that don't apply (e.g. groups → request_id=""; singletons →
+    member_count=1). Heterogeneous-field-set was a documented pain
+    point for cross-corpus filtering during fine-tuning."""
+    return {
+        "audio_filepath": audio_filepath,
+        "text": text,
+        "duration": float(duration or 0.0),
+        "language": language or "",
+        "source": source,
+        "user_id": user_id or "",
+        "status": status_value or "",
+        "created_ts": float(created_ts or 0.0),
+        "model": model or "",
+        "request_id": request_id or "",
+        "member_count": int(member_count or 0),
+        "admin_notes": admin_notes or "",
+        "corrections": list(corrections or []),
+    }
+
+
 def _build_export_stream(only_status: str | None, include_audio: bool):
     """Generator that yields tar.gz bytes containing manifest.jsonl and,
     optionally, audio/<id>.wav entries. One manifest entry per training
     unit — a "unit" is either a capture group (≤28 s packed sample) OR
     an ungrouped singleton capture. Group members never appear as
-    singletons (no double-counting; the group transcript covers them)."""
+    singletons (no double-counting; the group transcript covers them).
+
+    Hard filters applied regardless of `only_status`:
+      - `is_stale=true` (group audio/text drift) → skipped
+      - `is_locked=true` (admin-flagged anomaly) → skipped
+      - `status=audio_missing` (file is gone) → skipped
+      - missing WAV on disk → both manifest entry AND tar entry skipped
+        (prevents the manifest from referencing files that don't exist
+        in the tarball)
+    `only_status` (default "ready" from the route) further narrows.
+    `audio_missing` rows leak only when `only_status='all'`, and even
+    then the hard filter above drops them.
+    """
     import capture_groups_store
 
     buf = io.BytesIO()
@@ -1267,9 +1531,16 @@ def _build_export_stream(only_status: str | None, include_audio: bool):
         if only_status and only_status != "all":
             if (g.get("status") or "new") != only_status:
                 continue
+        # Hard filters (apply even on `only_status=all`). These rows are
+        # never valid training data: stale = audio/text drift, locked =
+        # admin-flagged anomaly.
+        if g.get("is_stale") or g.get("is_locked"):
+            continue
         # Always rebuild the transcript at export time from members +
         # chips, so the exported text reflects current corrections even
-        # if the stored snapshot is stale.
+        # if the stored snapshot is stale. Source from the training-form
+        # column so reviewers see — and the trainer learns from — the
+        # same text.
         gid = g["id"]
         members = capture_groups_store.get_members(gid)
         text = _build_default_transcript(
@@ -1277,29 +1548,36 @@ def _build_export_stream(only_status: str | None, include_audio: bool):
         ).strip()
         if not text:
             continue
+        # Audio existence gate: skip the manifest entry entirely if the
+        # WAV isn't on disk, to avoid manifest pointing at missing files.
+        try:
+            abs_p = capture_groups_store.abs_path_for(g["merged_wav_relpath"])
+        except ValueError:
+            continue
+        if not os.path.isfile(abs_p):
+            continue
+
         audio_name = f"audio/{gid}.wav"
-        manifest_lines.append(json.dumps({
-            "audio_filepath": audio_name,
-            "text": text,
-            "language": "",
-            "duration": float(g.get("merged_duration_ms") or 0) / 1000.0,
-            "source": "group",
-            "user_id": g.get("user_id") or "",
-            "status": g.get("status") or "new",
-            "admin_notes": g.get("admin_notes") or "",
-            "is_stale": bool(g.get("is_stale")),
-            "is_locked": bool(g.get("is_locked")),
-            "member_count": len(members),
-            "created_ts": float(g.get("created_ts") or 0.0),
-        }, ensure_ascii=False).encode("utf-8") + b"\n")
+        # Group `model` and `request_id` are intentionally empty — a
+        # group has multiple members each with their own model id. Per-
+        # member audit is reachable via the group's GET /members endpoint.
+        manifest_lines.append(json.dumps(_build_manifest_row(
+            audio_filepath=audio_name,
+            text=text,
+            duration=float(g.get("merged_duration_ms") or 0) / 1000.0,
+            language=g.get("language") or "",
+            source="group",
+            user_id=g.get("user_id") or "",
+            status_value=g.get("status") or "new",
+            created_ts=float(g.get("created_ts") or 0.0),
+            model="",
+            request_id="",
+            member_count=len(members),
+            admin_notes=g.get("admin_notes") or "",
+            corrections=[],
+        ), ensure_ascii=False).encode("utf-8") + b"\n")
 
         if include_audio:
-            try:
-                abs_p = capture_groups_store.abs_path_for(g["merged_wav_relpath"])
-            except ValueError:
-                continue
-            if not os.path.isfile(abs_p):
-                continue
             info = tarfile.TarInfo(audio_name)
             info.size = os.path.getsize(abs_p)
             info.mtime = int(g.get("created_ts") or time.time())
@@ -1314,37 +1592,52 @@ def _build_export_stream(only_status: str | None, include_audio: bool):
     for row in captures_store.iter_captures_for_export(status=only_status):
         if row.get("group_id"):
             continue
+        # Hard filter: `audio_missing` rows have no WAV; never valid
+        # training data. (Caught here even when only_status='all'.)
+        if (row.get("status") or "") == "audio_missing":
+            continue
         cid = row["id"]
-        # Chip-applied post-processing text is what the export should
-        # carry — `corrected_text` is dead surface; chips are canonical.
-        base = row.get("final") or row.get("raw") or ""
+        # Source training-form text first so the export matches what
+        # reviewers see on /captures. Chip-applied on top. `final` and
+        # `raw` fall-backs cover captures from before the
+        # text_for_training column existed.
+        base = (row.get("text_for_training")
+                or row.get("final")
+                or row.get("raw") or "")
         text = _apply_chips_to_text(base, row.get("corrections") or [])
         if not text.strip():
             continue
-        ext = (row.get("audio_format") or "bin").lower().lstrip(".")
+        # Audio path: prefer the trimmed companion if one was produced.
+        # Either way, the manifest line is skipped if the file isn't on
+        # disk (defense against the audio_missing leak path).
+        rel = row.get("audio_trimmed_relpath") or row.get("audio_relpath")
+        if not rel:
+            continue
+        try:
+            abs_p = captures_store.abs_audio_path(rel)
+        except ValueError:
+            continue
+        if not os.path.isfile(abs_p):
+            continue
+        ext = os.path.splitext(rel)[1].lstrip(".").lower() or "wav"
         audio_name = f"audio/{cid}.{ext}"
-        manifest_lines.append(json.dumps({
-            "audio_filepath": audio_name,
-            "text": text,
-            "language": row.get("language") or "",
-            "duration": float(row.get("duration_seconds") or 0.0),
-            "model": row.get("model") or "",
-            "corrections": row.get("corrections") or [],
-            "admin_notes": row.get("admin_notes") or "",
-            "status": row.get("status") or "",
-            "source": "singleton",
-            "user_id": row.get("user_id") or "",
-            "created_ts": float(row.get("created_ts") or 0.0),
-            "request_id": row.get("request_id") or "",
-        }, ensure_ascii=False).encode("utf-8") + b"\n")
+        manifest_lines.append(json.dumps(_build_manifest_row(
+            audio_filepath=audio_name,
+            text=text,
+            duration=float(row.get("duration_seconds") or 0.0),
+            language=row.get("language") or "",
+            source="singleton",
+            user_id=row.get("user_id") or "",
+            status_value=row.get("status") or "",
+            created_ts=float(row.get("created_ts") or 0.0),
+            model=row.get("model") or "",
+            request_id=row.get("request_id") or "",
+            member_count=1,
+            admin_notes=row.get("admin_notes") or "",
+            corrections=row.get("corrections") or [],
+        ), ensure_ascii=False).encode("utf-8") + b"\n")
 
         if include_audio:
-            try:
-                abs_p = captures_store.abs_audio_path(row["audio_relpath"])
-            except ValueError:
-                continue
-            if not os.path.isfile(abs_p):
-                continue
             info = tarfile.TarInfo(audio_name)
             info.size = os.path.getsize(abs_p)
             info.mtime = int(row.get("created_ts") or time.time())
@@ -1891,6 +2184,7 @@ _CAPTURES_HTML = r"""<!doctype html>
     <span class="spacer"></span>
     <span id="capture-state" class="capture-state off">capture OFF</span>
     <button id="btn-refresh">Refresh</button>
+    <button id="btn-reprocess-all" title="Re-run PIPELINE_RULES on every capture's raw text. Use after editing rules.">Reprocess all</button>
     <button id="btn-export" title="Download ready captures as a tar.gz (manifest.jsonl + audio/)">Export ready</button>
     <button id="btn-clear" class="danger" title="Permanently delete every capture">Clear all</button>
   </div>
@@ -1921,7 +2215,6 @@ _CAPTURES_HTML = r"""<!doctype html>
         <select id="merge-join">
           <option value="space">space</option>
           <option value="period_space">period + space</option>
-          <option value="newline">newline</option>
         </select>
       </label>
       <label>Silence gap:
@@ -2258,6 +2551,7 @@ _CAPTURES_HTML = r"""<!doctype html>
       if (!q) return true;
       var hay = (
         (r.raw || '') + ' ' + (r.final || '') + ' ' +
+        (r.text_for_training || '') + ' ' +
         (r.corrected_text || '') + ' ' + (r.admin_notes || '')
       ).toLowerCase();
       return hay.indexOf(q) !== -1;
@@ -2413,7 +2707,12 @@ _CAPTURES_HTML = r"""<!doctype html>
       audio: null,
       blobUrl: null,
       words: r.words || [],
-      finalText: r.final || '',
+      // Training-form text is the canonical column reviewers see and
+      // chips operate against — it's what the export emits and what
+      // Whisper will be fine-tuned on. Fall back to `final` (runtime
+      // form) then `raw` for captures from before the
+      // text_for_training column existed.
+      finalText: r.text_for_training || r.final || r.raw || '',
       corrections: (r.corrections || []).map(function(c) {
         return {
           wrong: c.wrong || '',
@@ -2540,7 +2839,17 @@ _CAPTURES_HTML = r"""<!doctype html>
       return row;
     }
     body.appendChild(textLine('raw',             'raw',             r.raw));
-    body.appendChild(textLine('post-processing', 'post-processing', r.final));
+    body.appendChild(textLine(
+      'post-processing', 'post-processing (training)',
+      state.finalText));
+    // Runtime/symbol-form `final` shown as a secondary line so reviewers
+    // can compare against what the dictation client sees in real time.
+    // Tagged with the rule-difference so the relationship is explicit.
+    if (r.final && r.final !== state.finalText) {
+      body.appendChild(textLine(
+        'post-processing runtime',
+        'runtime (dictation-map applied)', r.final));
+    }
 
     // Chip list nests inside the same Corrections section started above,
     // so the word band and its chip editors render as one harmonized
@@ -2643,6 +2952,30 @@ _CAPTURES_HTML = r"""<!doctype html>
     var spc = document.createElement('span');
     spc.className = 'spacer';
     actions.appendChild(spc);
+
+    // Trim silence — cuts leading/trailing silence via Silero VAD, writes
+    // a sibling `.trimmed.wav` and pivots the audio GET to serve it. The
+    // export also picks up the trimmed companion. Opt-in per singleton.
+    var trimBtn = document.createElement('button');
+    trimBtn.type = 'button';
+    trimBtn.textContent = 'Trim silence';
+    trimBtn.title = 'Cut leading/trailing silence (Silero VAD)';
+    trimBtn.addEventListener('click', function() {
+      onTrimAudio(state, r, trimBtn);
+    });
+    actions.appendChild(trimBtn);
+
+    // Reprocess — re-runs PIPELINE_RULES on the stored `raw` so the
+    // training-form text reflects current rule edits without waiting
+    // for the bulk reapply job.
+    var reBtn = document.createElement('button');
+    reBtn.type = 'button';
+    reBtn.textContent = 'Reprocess';
+    reBtn.title = 'Re-run PIPELINE_RULES on raw → refresh training text';
+    reBtn.addEventListener('click', function() {
+      onReprocess(state, r, reBtn);
+    });
+    actions.appendChild(reBtn);
 
     var saveBtn = document.createElement('button');
     saveBtn.className = 'primary';
@@ -2994,6 +3327,87 @@ _CAPTURES_HTML = r"""<!doctype html>
     }
   }
 
+  // Trim leading/trailing silence on a singleton via the per-capture
+  // /trim endpoint. On success, refetch the audio so the player picks
+  // up the trimmed companion file the server now prefers.
+  async function onTrimAudio(state, r, btn) {
+    var origLabel = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Trimming…';
+    try {
+      var j = await api('POST',
+        '/captures/api/' + encodeURIComponent(state.cid) + '/trim', {});
+      if (j && j.trimmed) {
+        toast('Trimmed silence.');
+        // Force audio reload so the player picks up the trimmed file.
+        if (state.audio) {
+          var tok = getToken();
+          try {
+            if (state.blobUrl) URL.revokeObjectURL(state.blobUrl);
+          } catch(_) {}
+          state.blobUrl = null;
+          fetch('/captures/api/' + encodeURIComponent(r.id) + '/audio', {
+            headers: tok ? { 'Authorization': 'Bearer ' + tok } : {},
+          }).then(function(resp) {
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            return resp.blob();
+          }).then(function(blob) {
+            state.blobUrl = URL.createObjectURL(blob);
+            state.audio.src = state.blobUrl;
+          }).catch(function(e) {
+            toast('Audio reload failed: ' + e.message, true);
+          });
+        }
+      } else {
+        toast('Nothing to trim — already tight or silent.');
+      }
+    } catch (e) {
+      if (e.message !== 'unauthorized') {
+        toast('Trim failed: ' + e.message, true);
+      }
+    } finally {
+      btn.disabled = false;
+      btn.textContent = origLabel;
+    }
+  }
+
+  // Re-run the pipeline on the stored `raw` so the training-form text
+  // reflects current PIPELINE_RULES edits. Updates the visible word-
+  // strip + preview in place when the text changed.
+  async function onReprocess(state, r, btn) {
+    var origLabel = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Reprocessing…';
+    try {
+      var j = await api('POST',
+        '/captures/api/' + encodeURIComponent(state.cid) + '/reprocess', {});
+      var fresh = j && j.capture ? j.capture : null;
+      var changed = j && j.changed ? j.changed : [];
+      if (fresh) {
+        Object.assign(r, fresh);
+        // Update local state.finalText so chips/preview reflect new text.
+        state.finalText =
+          fresh.text_for_training || fresh.final || fresh.raw || '';
+        if (state.gtArea) {
+          state.gtArea.textContent = state.finalText;
+          applyCorrectionsToGround(state);
+        }
+      }
+      if (changed && changed.length) {
+        toast('Reprocessed: ' + changed.join(', ') + '.');
+      } else {
+        toast('No change — pipeline output already up to date.');
+      }
+    } catch (e) {
+      if (e.message !== 'unauthorized') {
+        toast('Reprocess failed: ' + e.message, true);
+      }
+    } finally {
+      btn.disabled = false;
+      btn.textContent = origLabel;
+    }
+  }
+
   // -------------------------------------------------------------------
   // Clear-all (typed confirmation)
   // -------------------------------------------------------------------
@@ -3031,6 +3445,24 @@ _CAPTURES_HTML = r"""<!doctype html>
   // -------------------------------------------------------------------
   // Export
   // -------------------------------------------------------------------
+  // Bulk-reprocess: trigger the background job that re-runs PIPELINE_RULES
+  // on every capture's `raw` text and updates `final` + `text_for_training`.
+  // Same worker /quick-config/reapply-rules uses; idempotent — a second
+  // call while running returns the current state.
+  async function onReprocessAll() {
+    if (!confirm('Re-run PIPELINE_RULES on every capture? Updates final + training text in place.\n\nThis runs in the background.'))
+      return;
+    try {
+      var j = await api('POST', '/captures/api/reprocess-all', {});
+      var st = j && j.status ? j.status : 'started';
+      toast('Reprocess-all ' + st + '.');
+    } catch (e) {
+      if (e.message !== 'unauthorized') {
+        toast('Reprocess-all failed: ' + e.message, true);
+      }
+    }
+  }
+
   function onExport() {
     var tok = getToken();
     if (!tok && hasAdminToken) {
@@ -3154,7 +3586,7 @@ _CAPTURES_HTML = r"""<!doctype html>
   // -------------------------------------------------------------------
   // Merge modal
   // -------------------------------------------------------------------
-  var JOIN_STR = { space: ' ', period_space: '. ', newline: '\n' };
+  var JOIN_STR = { space: ' ', period_space: '. ' };
   function _seamMarker() { return '¶'; }   // ¶
 
   function _applyChipsToText(text, corrections) {
@@ -3183,13 +3615,13 @@ _CAPTURES_HTML = r"""<!doctype html>
   }
 
   function _buildDefaultTranscript(rows, strategy) {
-    // Chips-applied join. Each member's post-processing text gets its
-    // chips substituted in before the join, matching the server-side
-    // _build_default_transcript so the merge-preview matches what the
-    // group's stored transcript will actually be.
+    // Chips-applied join. Source from `text_for_training` so the preview
+    // matches the word-form training text the export will actually emit
+    // (falls back to `final` then `raw` for legacy captures predating
+    // text_for_training).
     var sep = JOIN_STR[strategy] || ' ';
     return rows.map(function(r) {
-      var base = r.final || r.raw || '';
+      var base = r.text_for_training || r.final || r.raw || '';
       return _applyChipsToText(base, r.corrections || []).trim();
     }).filter(Boolean).join(sep);
   }
@@ -3200,7 +3632,8 @@ _CAPTURES_HTML = r"""<!doctype html>
     rows.forEach(function(r, i) {
       var line = document.createElement('div');
       line.className = 'seg-line';
-      var memberText = _applyChipsToText(r.final || r.raw || '', r.corrections || []);
+      var base = r.text_for_training || r.final || r.raw || '';
+      var memberText = _applyChipsToText(base, r.corrections || []);
       line.innerHTML = '<span class="seg-time">[' + (i + 1) + '] '
         + (r.duration_seconds || 0).toFixed(1) + 's</span>'
         + escapeHtml(memberText.slice(0, 200));
@@ -3446,11 +3879,10 @@ _CAPTURES_HTML = r"""<!doctype html>
         joinLabel.style.cssText = 'display:flex;gap:0.4rem;align-items:center;';
         joinLabel.appendChild(document.createTextNode('Join style: '));
         var joinSel = document.createElement('select');
-        ['space','period_space','newline'].forEach(function(v) {
+        ['space','period_space'].forEach(function(v) {
           var opt = document.createElement('option');
           opt.value = v;
-          opt.textContent = v === 'space' ? 'space'
-            : v === 'period_space' ? 'period + space' : 'newline';
+          opt.textContent = v === 'space' ? 'space' : 'period + space';
           joinSel.appendChild(opt);
         });
         joinLabel.appendChild(joinSel);
@@ -3657,13 +4089,16 @@ _CAPTURES_HTML = r"""<!doctype html>
           ta.textContent = d.transcript || '';
 
           // Per-member raw + post-processing reference rows.
+          // "post-processing" line sources from the training-form text
+          // so the displayed member transcript matches the export.
           refsWrap.innerHTML = '';
           (d.members || []).forEach(function(m, i) {
             var prefix = '[' + (i + 1) + '] ';
             refsWrap.appendChild(_textLine('raw',
               prefix + 'raw', m.raw || ''));
+            var training = m.text_for_training || m.final || '';
             refsWrap.appendChild(_textLine('post-processing',
-              prefix + 'post-processing', m.final || ''));
+              prefix + 'post-processing (training)', training));
           });
 
           // Status button-group + admin notes (sync from server snapshot).
@@ -3737,7 +4172,8 @@ _CAPTURES_HTML = r"""<!doctype html>
           (d.members || []).forEach(function(m) {
             var line = document.createElement('div');
             line.style.cssText = 'font-size:var(--fs-sm);color:var(--dim);padding:0.2rem 0;';
-            var memberText = _applyChipsToText(m.final || m.raw || '', m.corrections || []);
+            var base = m.text_for_training || m.final || m.raw || '';
+            var memberText = _applyChipsToText(base, m.corrections || []);
             line.innerHTML = '[' + (m.group_order + 1) + '] '
               + (m.duration_seconds || 0).toFixed(1) + 's · '
               + escapeHtml(memberText.slice(0, 120));
@@ -3923,6 +4359,7 @@ _CAPTURES_HTML = r"""<!doctype html>
   document.getElementById('btn-refresh').addEventListener('click', load);
   document.getElementById('btn-export').addEventListener('click', onExport);
   document.getElementById('btn-clear').addEventListener('click', onClearAll);
+  document.getElementById('btn-reprocess-all').addEventListener('click', onReprocessAll);
   document.getElementById('ab-merge').addEventListener('click', _openMergeModal);
   document.getElementById('ab-clear').addEventListener('click', _clearSelection);
 

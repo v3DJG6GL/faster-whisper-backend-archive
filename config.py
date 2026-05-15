@@ -708,6 +708,53 @@ CAPTURE_RECORDINGS_MAX_DURATION_SEC = 600.0
 CAPTURE_RECORDINGS_AUDIO_BYTES_HARD_LIMIT = 100_000_000
 
 
+# ---------------------------------------------------------------------
+# Captures-specific pipeline rule exclusion
+# ---------------------------------------------------------------------
+# /transcribe runs PIPELINE_RULES → produces `final` (the runtime
+# response). The captures pipeline runs the SAME rules minus this
+# exclude set → produces `text_for_training` (the column the export
+# manifest reads).
+#
+# Default skip-set produces word-form training text that matches
+# Whisper's raw output at inference time under SUPPRESS_CHARS:
+#   - `dictation-map`: converts spoken "Komma"/"Punkt"/"Klammer auf"
+#     into ","/"."/"(" etc. Keeping the WORDS in training text avoids
+#     teaching the model to emit tokens it will then be suppressed
+#     from at inference.
+#   - `capitalize-after-terminator`: depends on terminators (.?!)
+#     existing — with dictation-map skipped, there are no terminators,
+#     so the rule would partial-fire only on `\n`. Cleaner to skip
+#     entirely; the training text matches raw Whisper casing exactly.
+#
+# All other rules (ß→ss, ẞ→SS, digit-range normalisation, dedup-space,
+# edge-trim, etc.) continue to run — those are general-correction
+# rules that improve training data quality without changing the
+# punctuation distribution.
+CAPTURES_PIPELINE_RULES_EXCLUDE: "set[str]" = {
+    "dictation-map",
+    "capitalize-after-terminator",
+}
+
+
+# ---------------------------------------------------------------------
+# Captures-specific silence trimming (Silero VAD)
+# ---------------------------------------------------------------------
+# Separate from the transcription-side VAD knobs (cfg.VAD_FILTER etc.)
+# because the concerns differ: transcription VAD affects what Whisper
+# hears for the inference response; captures VAD trims the stored audio
+# so reviewers see — and the fine-tune learns from — clips without
+# excessive leading/trailing silence (Calm-Whisper arXiv:2505.12969
+# documents silence-induced hallucination as a fine-tune failure mode).
+#
+# Groups: auto-trim after merge_wavs() produces the merged WAV.
+# Singletons: manual button on the /captures detail page (opt-in per
+#   sample; original audio is preserved at audio_relpath either way).
+CAPTURES_VAD_TRIM_ENABLED_FOR_GROUPS = True
+CAPTURES_VAD_TRIM_ENABLED_FOR_SINGLETONS = False
+CAPTURES_VAD_TRIM_MARGIN_MS = 300
+
+
 # Snapshot the in-file defaults BEFORE config.local.json + env overrides apply.
 # Used by main.py's request log block to mark non-default scalar values with
 # `*` so the operator can see at a glance which knobs are overridden.
@@ -1061,7 +1108,7 @@ def _coerce_override_value(field: str, raw: str) -> object:
         "REPETITION_PENALTY", "PROMPT_RESET_ON_TEMPERATURE",
         "LANGUAGE_DETECTION_THRESHOLD", "HALLUCINATION_SILENCE_THRESHOLD",
     }
-    list_fields = {"PIPELINE_RULES_EXCLUDE"}
+    list_fields = {"PIPELINE_RULES_EXCLUDE", "CAPTURES_PIPELINE_RULES_EXCLUDE"}
     if field in bool_fields:
         return raw == "1"
     if field in int_fields:

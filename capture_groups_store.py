@@ -69,7 +69,8 @@ CREATE TABLE IF NOT EXISTS capture_groups (
   is_stale                    INTEGER NOT NULL DEFAULT 0,
   is_locked                   INTEGER NOT NULL DEFAULT 0,
   status                      TEXT NOT NULL DEFAULT 'new',
-  admin_notes                 TEXT NOT NULL DEFAULT ''
+  admin_notes                 TEXT NOT NULL DEFAULT '',
+  language                    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_capture_groups_user
   ON capture_groups(user_id, created_ts DESC);
@@ -84,6 +85,15 @@ _MIGRATIONS: tuple[str, ...] = (
     # Live columns that may need adding on older DBs that pre-date them.
     "ALTER TABLE capture_groups ADD COLUMN status TEXT NOT NULL DEFAULT 'new'",
     "ALTER TABLE capture_groups ADD COLUMN admin_notes TEXT NOT NULL DEFAULT ''",
+    # `language` per-group (BCP-47-ish, e.g. "de"). Whisper-detected at
+    # the first member; emitted in the export manifest so fine-tune
+    # loaders force the right language token.
+    "ALTER TABLE capture_groups ADD COLUMN language TEXT",
+    # Drop the `newline` join strategy: Whisper never emits literal `\n`
+    # in continuous speech, so training samples that join members with
+    # \n confuse the model. Normalise any historical rows to 'space'.
+    "UPDATE capture_groups SET transcript_join_strategy='space' "
+    "WHERE transcript_join_strategy='newline'",
 )
 
 _SCHEMA_POST_MIGRATIONS = """
@@ -115,6 +125,36 @@ def init(conn: sqlite3.Connection, captures_audio_root: str) -> None:
             # Column already present (fresh DB or migrated previously).
             pass
     _conn.executescript(_SCHEMA_POST_MIGRATIONS)
+    # One-time backfill of group `language` from the first member with
+    # a populated language. Rows with `language` already set are left
+    # alone. Cheap on small stores; bounded SELECT-per-group on large.
+    try:
+        cur = _conn.execute(
+            "SELECT id FROM capture_groups"
+            " WHERE language IS NULL OR language = ''"
+        )
+        targets = [r[0] for r in cur.fetchall()]
+        for gid in targets:
+            row = _conn.execute(
+                "SELECT language FROM captures"
+                " WHERE group_id = ? AND language IS NOT NULL AND language != ''"
+                " ORDER BY group_order ASC LIMIT 1",
+                (gid,),
+            ).fetchone()
+            lang = (row[0] if row else "") or ""
+            if lang:
+                _conn.execute(
+                    "UPDATE capture_groups SET language = ? WHERE id = ?",
+                    (lang, gid),
+                )
+        if targets:
+            logger.info(
+                "[groups] language-backfill checked %d groups", len(targets),
+            )
+    except sqlite3.OperationalError as e:
+        # Schema not as expected (e.g. very old DB pre-migration order);
+        # log and continue — backfill is best-effort.
+        logger.warning("[groups] language-backfill skipped: %s", e)
 
 
 def _require_conn() -> sqlite3.Connection:
@@ -164,6 +204,10 @@ def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     # (see captures_routes._enrich_group / list_groups_api). The DB row
     # has no chip storage of its own — single source of truth lives on
     # the member captures.
+    try:
+        language = row["language"]
+    except (IndexError, KeyError):
+        language = None
     return {
         "id":                          row["id"],
         "user_id":                     row["user_id"],
@@ -178,6 +222,7 @@ def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "is_locked":                   bool(row["is_locked"]),
         "status":                      row["status"] or "new",
         "admin_notes":                 row["admin_notes"] or "",
+        "language":                    language or "",
     }
 
 
@@ -194,12 +239,16 @@ def create_group(
     inter_segment_silence_ms: int,
     member_hash_map: dict[str, str],
     merged_duration_ms: int,
+    language: str | None = None,
 ) -> str:
     """Insert the group row AND wire members' (group_id, group_order)
     in the same transaction. Returns the new group_id.
 
     Callers must build the merged WAV BEFORE this call — we record its
     relpath, but don't write the file ourselves.
+
+    `language` is the BCP-47-ish tag (e.g. "de") detected by Whisper at
+    capture time. Typically derived from the first member by the caller.
     """
     if len(member_ids) < 2:
         raise ValueError("group must have at least 2 members")
@@ -214,13 +263,15 @@ def create_group(
                 " (id, user_id, created_ts, merged_wav_relpath,"
                 "  merged_duration_ms, transcript,"
                 "  transcript_join_strategy, member_hashes_json,"
-                "  inter_segment_silence_ms, is_stale, is_locked)"
-                " VALUES (?,?,?,?,?,?,?,?,?,0,0)",
+                "  inter_segment_silence_ms, is_stale, is_locked,"
+                "  language)"
+                " VALUES (?,?,?,?,?,?,?,?,?,0,0,?)",
                 (
                     gid, user_id, now, relpath, int(merged_duration_ms),
                     transcript, transcript_join_strategy,
                     json.dumps(member_hash_map, sort_keys=True),
                     int(inter_segment_silence_ms),
+                    language or None,
                 ),
             )
             for order, mid in enumerate(member_ids):
@@ -275,7 +326,9 @@ def get_members(gid: str) -> list[dict[str, Any]]:
     conn = _require_conn()
     rows = conn.execute(
         "SELECT id, created_ts, duration_seconds, raw, final,"
-        " corrected_text, corrections_json, status, group_order, user_id"
+        " text_for_training, audio_trimmed_relpath,"
+        " corrected_text, corrections_json, status, group_order, user_id,"
+        " language"
         " FROM captures WHERE group_id = ? ORDER BY group_order ASC",
         (gid,),
     ).fetchall()
@@ -307,7 +360,7 @@ def update_group(
         "transcript", "transcript_join_strategy",
         "inter_segment_silence_ms", "is_locked", "is_stale",
         "member_hashes_json", "merged_duration_ms",
-        "status", "admin_notes",
+        "status", "admin_notes", "language",
     }
     sets: list[str] = []
     args: list[Any] = []

@@ -114,6 +114,14 @@ _FIELD_GROUPS: list[tuple[str, list[tuple[str | None, list[str]]]]] = [
             "CAPTURE_RECORDINGS_MAX_DURATION_SEC",
             "CAPTURE_RECORDINGS_AUDIO_BYTES_HARD_LIMIT",
         ]),
+        ("Training-form pipeline", [
+            "CAPTURES_PIPELINE_RULES_EXCLUDE",
+        ]),
+        ("Silence trim (Silero VAD)", [
+            "CAPTURES_VAD_TRIM_ENABLED_FOR_GROUPS",
+            "CAPTURES_VAD_TRIM_ENABLED_FOR_SINGLETONS",
+            "CAPTURES_VAD_TRIM_MARGIN_MS",
+        ]),
     ]),
 ]
 
@@ -1418,6 +1426,25 @@ function makeEditor(name) {
   // drag-to-reorder, per-row test badge). Routed by name BEFORE shape checks
   // since the value is a list.
   if (name === 'PIPELINE_RULES') return makeRuleListEditor(name, v || [], 'full', {});
+  // Captures-specific exclude list — same checklist widget as per-model
+  // PIPELINE_RULES_EXCLUDE, sourced from the live PIPELINE_RULES. The
+  // widget's `excludeSet` drives the visible state; `onToggle(slug,
+  // excluded)` reflects the new state, which we collect into the flat
+  // list this field stores as.
+  if (name === 'CAPTURES_PIPELINE_RULES_EXCLUDE') {
+    const allRules = currentValue('PIPELINE_RULES') || [];
+    return makeRuleListEditor(name, allRules, 'checklist', {
+      excludeSet: new Set(v || []),
+      includeSet: new Set(),
+      onToggle: (slug, excluded) => {
+        const cur = currentValue(name) || [];
+        const next = excluded
+          ? Array.from(new Set([...cur, slug]))
+          : cur.filter(s => s !== slug);
+        setDirty(name, next);
+      },
+    });
+  }
   // MODEL_OVERRIDES is a dict[model_id, dict[field, value]] — too freeform
   // for the standard editors. Render as a JSON textarea with parse-validation
   // on every input. Save sends the parsed object; pydantic validates server-

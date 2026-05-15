@@ -153,6 +153,23 @@ def merge_wavs(
             pass
         raise
 
+    # Optional: trim leading/trailing silence from the merged WAV via
+    # Silero VAD. Same disk path is overwritten (merged WAV is already
+    # derivative; the un-trimmed version isn't independently useful).
+    # On VAD unavailability or no-speech, we keep the merged-as-written
+    # WAV. After a successful trim we re-measure the sample count so
+    # capture_groups.merged_duration_ms reflects the trimmed length.
+    try:
+        import config as _cfg
+        if getattr(_cfg, "CAPTURES_VAD_TRIM_ENABLED_FOR_GROUPS", False):
+            import audio_vad_trim
+            margin_ms = int(getattr(_cfg, "CAPTURES_VAD_TRIM_MARGIN_MS", 300))
+            if audio_vad_trim.trim_wav(dst_path, dst_path, margin_ms=margin_ms):
+                with wave.open(dst_path, "rb") as _w:
+                    total_samples = _w.getnframes()
+    except Exception as _ve:
+        logger.warning("[merge] VAD trim skipped: %s", _ve)
+
     return os.path.getsize(dst_path), total_samples
 
 

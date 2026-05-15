@@ -74,10 +74,13 @@ def _run() -> None:
         import main
         import captures_store
         import capture_groups_store
+        import config as cfg
+
+        captures_excludes = getattr(cfg, "CAPTURES_PIPELINE_RULES_EXCLUDE", None)
 
         conn = captures_store._require_conn()
         rows = conn.execute(
-            "SELECT id, raw, final, model, group_id"
+            "SELECT id, raw, final, text_for_training, model, group_id"
             " FROM captures ORDER BY created_ts DESC"
         ).fetchall()
         with _state_lock:
@@ -86,6 +89,7 @@ def _run() -> None:
         affected_group_ids: set[str] = set()
         for r in rows:
             cid = r["id"]
+            patch: dict[str, str] = {}
             try:
                 new_final = main._postprocess_text(
                     r["raw"] or "", model_name=r["model"],
@@ -98,11 +102,29 @@ def _run() -> None:
                     _state["processed"] += 1
                 continue
             if new_final != (r["final"] or ""):
-                captures_store.update_capture(cid, {"final": new_final})
-                with _state_lock:
-                    _state["captures_updated"] += 1
+                patch["final"] = new_final
                 if r["group_id"]:
                     affected_group_ids.add(r["group_id"])
+            # Also recompute the training-form text so /captures display
+            # and the export reflect any edits to PIPELINE_RULES (the
+            # admin's primary intent when triggering reapply).
+            try:
+                new_training = main._postprocess_text(
+                    r["raw"] or "", model_name=r["model"],
+                    extra_excludes=captures_excludes,
+                )
+            except Exception as e:
+                logger.warning(
+                    "[reapply] capture %s training-form skipped: %s",
+                    cid[:8], e,
+                )
+                new_training = None
+            if new_training is not None and new_training != (r["text_for_training"] or ""):
+                patch["text_for_training"] = new_training
+            if patch:
+                captures_store.update_capture(cid, patch)
+                with _state_lock:
+                    _state["captures_updated"] += 1
             with _state_lock:
                 _state["processed"] += 1
 
