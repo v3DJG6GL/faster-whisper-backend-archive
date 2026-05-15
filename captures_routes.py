@@ -562,34 +562,46 @@ async def create_group_api(
     transcript = payload.transcript.strip() or _build_default_transcript(
         captures, payload.join_strategy,
     )
+    # Project each member's chip corrections into the new group with
+    # global word indices BEFORE the INSERT — that way the INSERT
+    # writes the final group row in one shot. No follow-up UPDATE
+    # means no window where captures are wired into a group whose
+    # corrections_json hasn't been written yet (which is what produced
+    # the half-committed state behind the original "already in a group"
+    # 500 bug). `captures` already carries each member's `words` +
+    # `corrections` (decoded by captures_store._row_to_dict), so the
+    # projector reads them in-memory without re-hitting the DB.
+    migrated = _project_member_corrections(captures)
+    migrated_json = json.dumps(migrated, ensure_ascii=False)
+    migrated_ts = time.time()
+
     duration_ms, hashes = _build_merged_wav(
         gid=gid,
         member_ids=member_ids,
         silence_ms=payload.silence_ms,
     )
-    # Insert under the gid we already built audio for.
-    # capture_groups_store.create_group generates its OWN gid → use a
-    # local helper to honour the pre-computed gid instead.
-    _insert_group_with_gid(
-        gid=gid,
-        user_id=owner_user_id,
-        member_ids=member_ids,
-        transcript=transcript,
-        join_strategy=payload.join_strategy,
-        silence_ms=payload.silence_ms,
-        member_hash_map=hashes,
-        duration_ms=duration_ms,
-    )
-    # Project member chip corrections into the new group with global
-    # word indices, then mark migrated so _enrich_group's backfill is a
-    # no-op for this gid. Order matters: insert must happen before
-    # get_members can return the freshly-joined rows.
-    members = capture_groups_store.get_members(gid)
-    migrated = _project_member_corrections(members)
-    capture_groups_store.update_group(gid, {
-        "corrections_json": json.dumps(migrated, ensure_ascii=False),
-        "corrections_migrated_at": time.time(),
-    })
+    try:
+        _insert_group_with_gid(
+            gid=gid,
+            user_id=owner_user_id,
+            member_ids=member_ids,
+            transcript=transcript,
+            join_strategy=payload.join_strategy,
+            silence_ms=payload.silence_ms,
+            member_hash_map=hashes,
+            duration_ms=duration_ms,
+            corrections_json=migrated_json,
+            corrections_migrated_at=migrated_ts,
+        )
+    except Exception:
+        # Insert failed — roll back the WAV we just wrote so the
+        # next merge attempt for the same captures starts clean.
+        try:
+            os.unlink(capture_groups_store.abs_path_for(
+                capture_groups_store._relpath_for(gid)))
+        except OSError:
+            pass
+        raise
     return JSONResponse({"group_id": gid})
 
 
@@ -603,16 +615,28 @@ def _insert_group_with_gid(
     silence_ms: int,
     member_hash_map: dict[str, str],
     duration_ms: int,
+    corrections_json: str = "[]",
+    corrections_migrated_at: float | None = None,
 ) -> None:
     """Direct insert that honours a pre-allocated gid (needed because the
     audio file is written at the gid path before this call). Mirrors the
-    transactional shape of capture_groups_store.create_group."""
+    transactional shape of capture_groups_store.create_group.
+
+    `corrections_json` + `corrections_migrated_at` are written in the
+    same INSERT so the group row is complete in one transaction — no
+    follow-up UPDATE → no half-committed state if the caller crashes
+    immediately after the INSERT."""
     import capture_groups_store
     import json as _json
     import time as _time
 
     relpath = capture_groups_store._relpath_for(gid)
     now = _time.time()
+    migrated_ts = (
+        corrections_migrated_at
+        if corrections_migrated_at is not None
+        else now
+    )
     conn = capture_groups_store._require_conn()
     with capture_groups_store._lock:
         with conn:
@@ -621,13 +645,15 @@ def _insert_group_with_gid(
                 " (id, user_id, created_ts, merged_wav_relpath,"
                 "  merged_duration_ms, transcript,"
                 "  transcript_join_strategy, member_hashes_json,"
-                "  inter_segment_silence_ms, is_stale, is_locked)"
-                " VALUES (?,?,?,?,?,?,?,?,?,0,0)",
+                "  inter_segment_silence_ms, is_stale, is_locked,"
+                "  corrections_json, corrections_migrated_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,0,0,?,?)",
                 (
                     gid, user_id, now, relpath, int(duration_ms),
                     transcript, join_strategy,
                     _json.dumps(member_hash_map, sort_keys=True),
                     int(silence_ms),
+                    corrections_json, migrated_ts,
                 ),
             )
             for order, mid in enumerate(member_ids):

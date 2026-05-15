@@ -34,7 +34,28 @@ _lock = threading.Lock()
 _conn: sqlite3.Connection | None = None
 _groups_audio_dir: str | None = None    # e.g. CAPTURES_DIR/groups
 
-_SCHEMA = """
+# Schema init runs in three phases — the same pattern documented at
+# captures_store.py:64-76:
+#
+#   1. _SCHEMA_CORE     — CREATE TABLE IF NOT EXISTS + indexes that only
+#                         reference columns present on the very first
+#                         shipped version of the table.
+#   2. _MIGRATIONS      — idempotent ALTER TABLE ADD COLUMN for every
+#                         column added after the first ship. Each ALTER
+#                         is run in its own try/except so a fresh DB
+#                         (where the CREATE TABLE already includes the
+#                         column) swallows "duplicate column …" and
+#                         keeps going.
+#   3. _SCHEMA_POST_MIGRATIONS — indexes that reference columns added
+#                         by phase 2. If we put `CREATE INDEX … ON
+#                         capture_groups(status)` in phase 1 alongside
+#                         the CREATE TABLE, then on a DB upgraded from
+#                         before `status` existed the CREATE TABLE is a
+#                         no-op, the CREATE INDEX raises "no such
+#                         column: status", and `executescript` aborts —
+#                         which skips phase 2 entirely and leaves the
+#                         store unable to read its own rows.
+_SCHEMA_CORE = """
 CREATE TABLE IF NOT EXISTS capture_groups (
   id                          TEXT PRIMARY KEY,
   user_id                     TEXT NOT NULL,
@@ -54,19 +75,19 @@ CREATE TABLE IF NOT EXISTS capture_groups (
 );
 CREATE INDEX IF NOT EXISTS idx_capture_groups_user
   ON capture_groups(user_id, created_ts DESC);
-CREATE INDEX IF NOT EXISTS idx_capture_groups_status
-  ON capture_groups(status);
 """
 
-# Idempotent ALTER TABLE additions for DBs created under an older schema.
-# Run after _SCHEMA so a fresh DB (with the column already present in
-# CREATE TABLE) raises OperationalError and we swallow it.
 _MIGRATIONS: tuple[str, ...] = (
     "ALTER TABLE capture_groups ADD COLUMN corrections_json TEXT NOT NULL DEFAULT '[]'",
     "ALTER TABLE capture_groups ADD COLUMN corrections_migrated_at REAL",
     "ALTER TABLE capture_groups ADD COLUMN status TEXT NOT NULL DEFAULT 'new'",
     "ALTER TABLE capture_groups ADD COLUMN admin_notes TEXT NOT NULL DEFAULT ''",
 )
+
+_SCHEMA_POST_MIGRATIONS = """
+CREATE INDEX IF NOT EXISTS idx_capture_groups_status
+  ON capture_groups(status);
+"""
 
 _VALID_STATUS = frozenset({"new", "reviewed", "ready", "dismissed"})
 _CAP_ADMIN_NOTES = 8000
@@ -84,13 +105,14 @@ def init(conn: sqlite3.Connection, captures_audio_root: str) -> None:
     _conn = conn
     _groups_audio_dir = os.path.join(captures_audio_root, "groups")
     os.makedirs(_groups_audio_dir, exist_ok=True)
-    _conn.executescript(_SCHEMA)
+    _conn.executescript(_SCHEMA_CORE)
     for stmt in _MIGRATIONS:
         try:
             _conn.execute(stmt)
         except sqlite3.OperationalError:
             # Column already present (fresh DB or migrated previously).
             pass
+    _conn.executescript(_SCHEMA_POST_MIGRATIONS)
 
 
 def _require_conn() -> sqlite3.Connection:
@@ -349,10 +371,10 @@ def clear_all_groups() -> int:
     return n
 
 
-def reconcile_on_startup() -> tuple[int, int]:
-    """Audit the merged-group WAV subtree (`<CAPTURES_DIR>/groups/`).
-    Mirrors `captures_store.reconcile_on_startup` but scoped to this
-    store's files.
+def reconcile_on_startup() -> tuple[int, int, int]:
+    """Audit the merged-group WAV subtree (`<CAPTURES_DIR>/groups/`)
+    AND the captures→group_id FKs. Mirrors
+    `captures_store.reconcile_on_startup` but scoped to this store.
 
       1. For each group whose merged WAV is missing on disk, count it.
          No column is set — the GET /audio route already returns 404
@@ -361,8 +383,15 @@ def reconcile_on_startup() -> tuple[int, int]:
       2. For each file under `groups/` with no matching capture_groups
          row, unlink (true orphans: dissolved groups whose unlink
          failed, crashed regenerates leaving stale `.tmp`s, etc.).
+      3. For each capture whose `group_id` points to a group row that
+         doesn't exist, NULL out `group_id` + `group_order`. This catches
+         half-committed merges from earlier server versions and
+         crash-recovery edge cases; without this, the capture is
+         effectively unreachable (UI filters grouped captures from the
+         flat list, and merge attempts are rejected with "already in
+         a group").
 
-    Returns (rows_with_missing_wav, files_unlinked).
+    Returns (rows_with_missing_wav, files_unlinked, orphan_fks_cleared).
     """
     conn = _require_conn()
     groups_dir = _require_audio_root()
@@ -403,12 +432,23 @@ def reconcile_on_startup() -> tuple[int, int]:
                     except OSError:
                         pass
 
+    # Pass 3: orphan-FK sweep. A capture whose group_id points to a
+    # missing group row gets returned to the flat list.
+    orphan_fks_cleared = 0
+    with _lock:
+        cur = conn.execute(
+            "UPDATE captures SET group_id = NULL, group_order = NULL"
+            " WHERE group_id IS NOT NULL"
+            " AND group_id NOT IN (SELECT id FROM capture_groups)"
+        )
+        orphan_fks_cleared = cur.rowcount or 0
+
     logger.info(
         "[groups] reconcile: %d rows with missing WAV, "
-        "%d orphan files removed",
-        rows_missing, files_unlinked,
+        "%d orphan files removed, %d orphan group_id FKs cleared",
+        rows_missing, files_unlinked, orphan_fks_cleared,
     )
-    return rows_missing, files_unlinked
+    return rows_missing, files_unlinked, orphan_fks_cleared
 
 
 def find_group_for_member(capture_id: str) -> str | None:
