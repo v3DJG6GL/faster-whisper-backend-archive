@@ -229,6 +229,15 @@ async def list_groups_api(
         scope = user_filter
     groups = capture_groups_store.list_groups(user_id=scope)
     for g in groups:
+        # Re-derive transcript + corrections per group so the collapsed
+        # card preview reflects chip-applied final text (matches the
+        # expanded card + export). Members fetched once per group; no
+        # merged_words on the list path — that's expand-only.
+        members = capture_groups_store.get_members(g["id"])
+        g["transcript"] = _build_default_transcript(
+            members, g.get("transcript_join_strategy") or "space",
+        )
+        g["corrections"] = _project_member_corrections(members)
         g["username"] = api_keys_store.get_username(g.get("user_id"))
     return JSONResponse({"groups": groups})
 
@@ -721,17 +730,69 @@ def _project_member_corrections(
     return out
 
 
-def _enrich_group(g: dict[str, Any]) -> dict[str, Any]:
-    """Add `members` + `merged_words` to a group dict so PATCH and
-    regenerate responses share the same shape as GET. The client can
-    then do an in-place card refresh from any response without a
-    follow-up GET.
+def _split_corrections_to_members(
+    corrections: list[dict[str, Any]],
+    members: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Inverse of `_project_member_corrections`. Given a list of
+    group-level chips with global word indices, return a dict mapping
+    each member_id → list of chips with member-local indices.
 
-    Also runs the one-time idempotent migration that projects each
-    member's chip corrections into the group's `corrections_json` for
-    groups created before the migration landed. Gated by
-    `corrections_migrated_at` so the projection runs exactly once and
-    user edits afterwards (including explicit clears) are preserved."""
+    Every member is represented in the result (with `[]` if it owns no
+    chips after the split) so the caller can fan out via
+    `update_capture(member_id, {"corrections": chips})` and reliably
+    REPLACE each member's chip list. Chips whose `idx` is out of range
+    are silently dropped; `idx_end` is clipped to the same member's
+    last word."""
+    word_counts: list[int] = []
+    for m in members:
+        cap = captures_store.get_capture(m["id"]) or {}
+        word_counts.append(len(cap.get("words") or []))
+    offsets = [0]
+    for n in word_counts[:-1]:
+        offsets.append(offsets[-1] + n)
+    out: dict[str, list[dict[str, Any]]] = {m["id"]: [] for m in members}
+    for c in (corrections or []):
+        if not isinstance(c, dict):
+            continue
+        try:
+            gidx = int(c["idx"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        target: int | None = None
+        for i in range(len(members)):
+            start = offsets[i]
+            end = start + word_counts[i]
+            if start <= gidx < end:
+                target = i
+                break
+        if target is None:
+            continue
+        c2 = dict(c)
+        c2["idx"] = gidx - offsets[target]
+        if c.get("idx_end") is not None:
+            try:
+                end_local = int(c["idx_end"]) - offsets[target]
+                max_local = word_counts[target] - 1
+                c2["idx_end"] = min(max(end_local, c2["idx"]), max_local)
+            except (TypeError, ValueError):
+                c2.pop("idx_end", None)
+        out[members[target]["id"]].append(c2)
+    return out
+
+
+def _enrich_group(g: dict[str, Any]) -> dict[str, Any]:
+    """Add `members` + `merged_words` to a group dict and re-derive the
+    chip-dependent fields (transcript + corrections) from current
+    member state.
+
+    Source of truth for chips is each MEMBER's `corrections` list. The
+    group's own `corrections_json` column is a leftover cache from the
+    earlier "one-time projection" design; it's never read here. With
+    every read going through this function, report cascades and direct
+    member-chip edits on /captures flow through to the group's
+    Corrections section automatically — no separate migration pass or
+    in-DB chip storage needed at the group level."""
     import capture_groups_store
     members = capture_groups_store.get_members(g["id"])
     for m in members:
@@ -739,35 +800,10 @@ def _enrich_group(g: dict[str, Any]) -> dict[str, Any]:
         m["username"] = api_keys_store.get_username(m.get("user_id"))
     g["members"] = members
     g["username"] = api_keys_store.get_username(g.get("user_id"))
-    # The stored `transcript` is a snapshot taken at create / save time.
-    # The UI shows it as a read-only preview, so the rendered text must
-    # reflect current members + current chips, not the snapshot. Recompute
-    # here so /captures always displays the same string the export
-    # tarball would carry right now.
     g["transcript"] = _build_default_transcript(
         members, g.get("transcript_join_strategy") or "space",
     )
-
-    if g.get("corrections_migrated_at") is None:
-        now = time.time()
-        if not g.get("corrections"):
-            migrated = _project_member_corrections(members)
-            if migrated:
-                capture_groups_store.update_group(g["id"], {
-                    "corrections_json": json.dumps(migrated, ensure_ascii=False),
-                    "corrections_migrated_at": now,
-                })
-                g["corrections"] = migrated
-            else:
-                capture_groups_store.update_group(g["id"], {
-                    "corrections_migrated_at": now,
-                })
-        else:
-            capture_groups_store.update_group(g["id"], {
-                "corrections_migrated_at": now,
-            })
-        g["corrections_migrated_at"] = now
-
+    g["corrections"] = _project_member_corrections(members)
     g["merged_words"] = _build_merged_words(
         members, int(g["inter_segment_silence_ms"]),
     )
@@ -991,10 +1027,18 @@ async def patch_group_api(
     if payload.admin_notes is not None:
         patch["admin_notes"] = payload.admin_notes
     if payload.corrections is not None:
-        import json as _json
-        patch["corrections_json"] = _json.dumps(
-            [c.model_dump() for c in payload.corrections], ensure_ascii=False,
+        # Fan group-level chip edits DOWN to the owning members. Group
+        # corrections are derived from members on every read (see
+        # `_enrich_group`); writing to `group.corrections_json` here
+        # would be discarded by the next GET. Translate each chip's
+        # global word idx back to a member-local idx and replace each
+        # member's chip list with its slice of the new state.
+        cleaned = [c.model_dump() for c in payload.corrections]
+        by_member = _split_corrections_to_members(
+            cleaned, capture_groups_store.get_members(gid),
         )
+        for member_id, chips in by_member.items():
+            captures_store.update_capture(member_id, {"corrections": chips})
 
     if rebuild_audio:
         # Re-run the merge with the new silence. Member set is unchanged.
