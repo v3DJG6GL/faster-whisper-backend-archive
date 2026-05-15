@@ -74,12 +74,18 @@ def merge_wavs(
     dst_path: str,
     *,
     gap_ms: int = 300,
-) -> tuple[int, int]:
+) -> tuple[int, int, int, int]:
     """Concatenate the given WAVs into a single PCM WAV at dst_path, with
     `gap_ms` of silence between each adjacent pair (no leading or
     trailing silence — the feature extractor zero-pads to 30 s anyway).
 
-    Returns `(bytes_written, n_samples)`.
+    Returns `(bytes_written, n_samples, lead_trim_ms, trail_trim_ms)`.
+
+    The last two values are non-zero only when post-merge VAD trim
+    (cfg.CAPTURES_VAD_TRIM_ENABLED_FOR_GROUPS) ran and actually cut
+    silence. The route layer needs these to keep group word-level
+    timestamps in sync with the trimmed merged WAV — without them, the
+    karaoke band drifts for the first member's words.
 
     Raises:
       WavFormatError: any source doesn't match (1ch, 16-bit, 16 kHz).
@@ -158,19 +164,28 @@ def merge_wavs(
     # derivative; the un-trimmed version isn't independently useful).
     # On VAD unavailability or no-speech, we keep the merged-as-written
     # WAV. After a successful trim we re-measure the sample count so
-    # capture_groups.merged_duration_ms reflects the trimmed length.
+    # capture_groups.merged_duration_ms reflects the trimmed length AND
+    # propagate the lead/trail offsets so the route layer can shift
+    # per-member word timestamps to match.
+    lead_trim_ms = 0
+    trail_trim_ms = 0
     try:
         import config as _cfg
         if getattr(_cfg, "CAPTURES_VAD_TRIM_ENABLED_FOR_GROUPS", False):
             import audio_vad_trim
             margin_ms = int(getattr(_cfg, "CAPTURES_VAD_TRIM_MARGIN_MS", 300))
-            if audio_vad_trim.trim_wav(dst_path, dst_path, margin_ms=margin_ms):
+            result = audio_vad_trim.trim_wav(
+                dst_path, dst_path, margin_ms=margin_ms,
+            )
+            if result and result.get("trimmed"):
+                lead_trim_ms = int(result.get("lead_ms") or 0)
+                trail_trim_ms = int(result.get("trail_ms") or 0)
                 with wave.open(dst_path, "rb") as _w:
                     total_samples = _w.getnframes()
     except Exception as _ve:
         logger.warning("[merge] VAD trim skipped: %s", _ve)
 
-    return os.path.getsize(dst_path), total_samples
+    return os.path.getsize(dst_path), total_samples, lead_trim_ms, trail_trim_ms
 
 
 def hash_wav_pcm(src_path: str) -> str:

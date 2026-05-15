@@ -70,7 +70,9 @@ CREATE TABLE IF NOT EXISTS capture_groups (
   is_locked                   INTEGER NOT NULL DEFAULT 0,
   status                      TEXT NOT NULL DEFAULT 'new',
   admin_notes                 TEXT NOT NULL DEFAULT '',
-  language                    TEXT
+  language                    TEXT,
+  merged_lead_trim_ms         INTEGER NOT NULL DEFAULT 0,
+  merged_trail_trim_ms        INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_capture_groups_user
   ON capture_groups(user_id, created_ts DESC);
@@ -94,6 +96,13 @@ _MIGRATIONS: tuple[str, ...] = (
     # \n confuse the model. Normalise any historical rows to 'space'.
     "UPDATE capture_groups SET transcript_join_strategy='space' "
     "WHERE transcript_join_strategy='newline'",
+    # VAD-trim offsets on the merged WAV. NOT NULL DEFAULT 0 so the
+    # `_build_merged_words` math can rely on a numeric value without
+    # a COALESCE — un-trimmed groups simply contribute 0.
+    "ALTER TABLE capture_groups ADD COLUMN merged_lead_trim_ms "
+    "INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE capture_groups ADD COLUMN merged_trail_trim_ms "
+    "INTEGER NOT NULL DEFAULT 0",
 )
 
 _SCHEMA_POST_MIGRATIONS = """
@@ -208,6 +217,14 @@ def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         language = row["language"]
     except (IndexError, KeyError):
         language = None
+    try:
+        lead_trim = int(row["merged_lead_trim_ms"] or 0)
+    except (IndexError, KeyError, TypeError):
+        lead_trim = 0
+    try:
+        trail_trim = int(row["merged_trail_trim_ms"] or 0)
+    except (IndexError, KeyError, TypeError):
+        trail_trim = 0
     return {
         "id":                          row["id"],
         "user_id":                     row["user_id"],
@@ -223,6 +240,8 @@ def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "status":                      row["status"] or "new",
         "admin_notes":                 row["admin_notes"] or "",
         "language":                    language or "",
+        "merged_lead_trim_ms":         lead_trim,
+        "merged_trail_trim_ms":        trail_trim,
     }
 
 
@@ -240,6 +259,8 @@ def create_group(
     member_hash_map: dict[str, str],
     merged_duration_ms: int,
     language: str | None = None,
+    merged_lead_trim_ms: int = 0,
+    merged_trail_trim_ms: int = 0,
 ) -> str:
     """Insert the group row AND wire members' (group_id, group_order)
     in the same transaction. Returns the new group_id.
@@ -264,14 +285,16 @@ def create_group(
                 "  merged_duration_ms, transcript,"
                 "  transcript_join_strategy, member_hashes_json,"
                 "  inter_segment_silence_ms, is_stale, is_locked,"
-                "  language)"
-                " VALUES (?,?,?,?,?,?,?,?,?,0,0,?)",
+                "  language, merged_lead_trim_ms, merged_trail_trim_ms)"
+                " VALUES (?,?,?,?,?,?,?,?,?,0,0,?,?,?)",
                 (
                     gid, user_id, now, relpath, int(merged_duration_ms),
                     transcript, transcript_join_strategy,
                     json.dumps(member_hash_map, sort_keys=True),
                     int(inter_segment_silence_ms),
                     language or None,
+                    int(merged_lead_trim_ms or 0),
+                    int(merged_trail_trim_ms or 0),
                 ),
             )
             for order, mid in enumerate(member_ids):
@@ -361,6 +384,7 @@ def update_group(
         "inter_segment_silence_ms", "is_locked", "is_stale",
         "member_hashes_json", "merged_duration_ms",
         "status", "admin_notes", "language",
+        "merged_lead_trim_ms", "merged_trail_trim_ms",
     }
     sets: list[str] = []
     args: list[Any] = []

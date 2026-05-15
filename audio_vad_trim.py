@@ -37,13 +37,21 @@ def trim_wav(
     *,
     margin_ms: int = 300,
     threshold: float = 0.5,
-) -> bool:
+) -> dict:
     """Trim leading/trailing silence from src_path, write to dst_path.
 
-    Returns True if the trim ran and produced a different file, False if
-    no speech was detected or the file was already tight (output written
-    anyway when src != dst, so callers can rely on dst_path existing
-    after a True OR False return when src != dst).
+    Returns a dict with the trim outcome — callers need both the success
+    flag AND the offsets to keep stored word-level timestamps in sync
+    with the trimmed audio:
+
+      {
+        "trimmed":           bool,   # True iff dst was written
+        "lead_ms":           int,    # samples cut from front (0 if not trimmed)
+        "trail_ms":          int,    # samples cut from back  (0 if not trimmed)
+        "orig_duration_ms":  int,    # original WAV duration in ms
+        "new_duration_ms":   int,    # post-trim duration (equals orig when
+                                     # trimmed=False)
+      }
 
     `margin_ms` is the silence preserved on each side of detected speech
     (default 300 ms — matches the merge inter-segment gap so a trimmed
@@ -55,10 +63,10 @@ def trim_wav(
     other capture pipeline uses). Same format is written out.
 
     Failure modes:
-      - import of faster_whisper.vad fails → log warning, return False
-        without writing dst (caller should treat this as "trim
+      - import of faster_whisper.vad fails → log warning, return a dict
+        with trimmed=False (caller should treat this as "trim
         unavailable" and use src as-is).
-      - VAD finds no speech (silent clip) → return False, no write.
+      - VAD finds no speech (silent clip) → trimmed=False, no write.
       - Source/dest IO error → propagated.
 
     Atomic write: writes to dst_path + ".tmp" and os.replace.
@@ -73,11 +81,18 @@ def trim_wav(
         logger.warning(
             "[vad-trim] faster_whisper.vad unavailable (%s); skipping trim", e,
         )
-        return False
+        return {
+            "trimmed": False, "lead_ms": 0, "trail_ms": 0,
+            "orig_duration_ms": 0, "new_duration_ms": 0,
+        }
 
     pcm, n_samples = audio_merge.read_pcm(src_path)
+    orig_duration_ms = int(round(n_samples * 1000 / _REQ_RATE))
     if n_samples == 0:
-        return False
+        return {
+            "trimmed": False, "lead_ms": 0, "trail_ms": 0,
+            "orig_duration_ms": 0, "new_duration_ms": 0,
+        }
 
     # int16 PCM bytes → float32 [-1, 1] numpy array. Silero VAD's
     # threshold function operates on normalised float audio.
@@ -99,7 +114,11 @@ def trim_wav(
             "[vad-trim] no speech detected in %s; skipping",
             os.path.basename(src_path),
         )
-        return False
+        return {
+            "trimmed": False, "lead_ms": 0, "trail_ms": 0,
+            "orig_duration_ms": orig_duration_ms,
+            "new_duration_ms": orig_duration_ms,
+        }
 
     first_start = int(speeches[0]["start"])
     last_end = int(speeches[-1]["end"])
@@ -107,7 +126,11 @@ def trim_wav(
     start_sample = max(0, first_start - margin_samples)
     end_sample = min(n_samples, last_end + margin_samples)
     if start_sample >= end_sample:
-        return False
+        return {
+            "trimmed": False, "lead_ms": 0, "trail_ms": 0,
+            "orig_duration_ms": orig_duration_ms,
+            "new_duration_ms": orig_duration_ms,
+        }
 
     # Bail out if the trim wouldn't actually save anything meaningful
     # (under ~50 ms on either side) AND we're overwriting in place.
@@ -117,7 +140,11 @@ def trim_wav(
     trailing_trimmed = n_samples - end_sample
     if (leading_trimmed + trailing_trimmed) < int(_REQ_RATE * 0.05):
         if os.path.abspath(src_path) == os.path.abspath(dst_path):
-            return False
+            return {
+                "trimmed": False, "lead_ms": 0, "trail_ms": 0,
+                "orig_duration_ms": orig_duration_ms,
+                "new_duration_ms": orig_duration_ms,
+            }
 
     out_bytes = pcm[start_sample * audio_merge.BYTES_PER_SAMPLE:
                     end_sample * audio_merge.BYTES_PER_SAMPLE]
@@ -159,11 +186,18 @@ def trim_wav(
             pass
         raise
 
+    lead_ms = int(leading_trimmed * 1000 / _REQ_RATE)
+    trail_ms = int(trailing_trimmed * 1000 / _REQ_RATE)
+    new_samples = end_sample - start_sample
+    new_duration_ms = int(round(new_samples * 1000 / _REQ_RATE))
     logger.info(
         "[vad-trim] %s: trimmed %d ms leading, %d ms trailing (margin=%d ms)",
-        os.path.basename(src_path),
-        int(leading_trimmed * 1000 / _REQ_RATE),
-        int(trailing_trimmed * 1000 / _REQ_RATE),
-        margin_ms,
+        os.path.basename(src_path), lead_ms, trail_ms, margin_ms,
     )
-    return True
+    return {
+        "trimmed": True,
+        "lead_ms": lead_ms,
+        "trail_ms": trail_ms,
+        "orig_duration_ms": orig_duration_ms,
+        "new_duration_ms": new_duration_ms,
+    }

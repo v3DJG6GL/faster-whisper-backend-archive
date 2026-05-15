@@ -88,6 +88,8 @@ CREATE TABLE IF NOT EXISTS captures (
   final           TEXT NOT NULL,
   text_for_training TEXT,
   audio_trimmed_relpath TEXT,
+  audio_trim_lead_ms INTEGER,
+  audio_trim_trail_ms INTEGER,
   words_json      TEXT NOT NULL,
   segments_json   TEXT NOT NULL DEFAULT '[]',
   corrected_text  TEXT NOT NULL DEFAULT '',
@@ -124,6 +126,14 @@ _MIGRATIONS = (
     "ALTER TABLE captures ADD COLUMN group_order INTEGER",
     "ALTER TABLE captures ADD COLUMN text_for_training TEXT",
     "ALTER TABLE captures ADD COLUMN audio_trimmed_relpath TEXT",
+    # VAD silence-trim offset bookkeeping. NULL means "row was never
+    # trimmed"; populated values record how many ms were cut from each
+    # edge of the original WAV. Words/segments stay in original-audio
+    # time in the JSON columns — the route layer applies the offset
+    # before responding so the karaoke player aligns with the trimmed
+    # audio file served by GET /audio.
+    "ALTER TABLE captures ADD COLUMN audio_trim_lead_ms INTEGER",
+    "ALTER TABLE captures ADD COLUMN audio_trim_trail_ms INTEGER",
 )
 
 _SCHEMA_USER_GROUP_INDEXES = """
@@ -557,6 +567,7 @@ def list_captures(
         f"SELECT id, created_ts, request_id, model, language,"
         f" duration_seconds, audio_relpath, audio_format,"
         f" raw, final, text_for_training, audio_trimmed_relpath,"
+        f" audio_trim_lead_ms, audio_trim_trail_ms,"
         f" corrected_text, corrections_json, admin_notes,"
         f" status, reviewed_ts, user_id, group_id, group_order"
         f" FROM captures{where}"
@@ -605,6 +616,7 @@ def find_by_request_id(request_id: str) -> list[dict[str, Any]]:
         "SELECT id, created_ts, request_id, model, language,"
         " duration_seconds, audio_relpath, audio_format,"
         " raw, final, text_for_training, audio_trimmed_relpath,"
+        " audio_trim_lead_ms, audio_trim_trail_ms,"
         " corrected_text, corrections_json, admin_notes,"
         " status, reviewed_ts, user_id, group_id, group_order"
         " FROM captures WHERE request_id = ? ORDER BY created_ts DESC",
@@ -715,6 +727,14 @@ def update_capture(cid: str, patch: dict[str, Any]) -> dict[str, Any] | None:
         sets.append("audio_trimmed_relpath = ?")
         val = patch["audio_trimmed_relpath"]
         params.append(str(val) if val else None)
+    if "audio_trim_lead_ms" in patch:
+        sets.append("audio_trim_lead_ms = ?")
+        val = patch["audio_trim_lead_ms"]
+        params.append(int(val) if val is not None else None)
+    if "audio_trim_trail_ms" in patch:
+        sets.append("audio_trim_trail_ms = ?")
+        val = patch["audio_trim_trail_ms"]
+        params.append(int(val) if val is not None else None)
     if not sets:
         return get_capture(cid)
     params.append(cid)

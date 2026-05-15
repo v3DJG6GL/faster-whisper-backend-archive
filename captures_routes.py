@@ -157,6 +157,11 @@ async def list_captures_api(
     )
     for r in rows:
         _refresh_final_if_stale(r)
+        # Expose effective_duration_seconds so the duration pill on the
+        # list view matches what the audio player actually plays for
+        # trimmed captures. Words/segments aren't included in this
+        # endpoint (list view drops them), so this is a no-op for those.
+        _apply_trim_to_capture_row(r)
         r["username"] = api_keys_store.get_username(r.get("user_id"))
     return JSONResponse({
         "captures": rows,
@@ -179,6 +184,7 @@ async def list_captures_api(
 async def by_request_id_api(request_id: str) -> JSONResponse:
     rows = captures_store.find_by_request_id(request_id)
     for r in rows:
+        _apply_trim_to_capture_row(r)
         r["username"] = api_keys_store.get_username(r.get("user_id"))
     return JSONResponse({"captures": rows})
 
@@ -271,6 +277,12 @@ async def get_capture_api(cid: str) -> JSONResponse:
         row.get("final") or "",
         model_name=row.get("model"),
     )
+    # Shift word/segment timestamps onto the trimmed-audio timeline
+    # when the capture has been VAD-trimmed; the karaoke band plays the
+    # trimmed WAV so time math has to match. Stored words stay in
+    # original-audio time in the DB — this is read-time projection
+    # only.
+    _apply_trim_to_capture_row(row)
     row["username"] = api_keys_store.get_username(row.get("user_id"))
     return JSONResponse({"capture": row})
 
@@ -470,22 +482,66 @@ async def trim_capture_audio_api(cid: str) -> JSONResponse:
 
     margin = int(getattr(cfg, "CAPTURES_VAD_TRIM_MARGIN_MS", 300))
     try:
-        ok = audio_vad_trim.trim_wav(src_abs, dst_abs, margin_ms=margin)
+        result = audio_vad_trim.trim_wav(src_abs, dst_abs, margin_ms=margin)
     except Exception as e:
         logger.warning("[trim] cid=%s VAD trim failed: %s", cid[:8], e)
         raise HTTPException(
             status.HTTP_500_INTERNAL_SERVER_ERROR,
             f"VAD trim failed: {e}",
         )
-    if not ok:
+    if not (result and result.get("trimmed")):
         # Nothing to do — either no speech was detected or the file was
         # already tight. Don't persist a half-written trimmed_relpath.
         return JSONResponse({
             "trimmed": False,
             "reason": "no_speech_or_already_tight",
         })
-    captures_store.update_capture(cid, {"audio_trimmed_relpath": dst_rel})
-    return JSONResponse({"trimmed": True, "audio_trimmed_relpath": dst_rel})
+    captures_store.update_capture(cid, {
+        "audio_trimmed_relpath": dst_rel,
+        "audio_trim_lead_ms": int(result.get("lead_ms") or 0),
+        "audio_trim_trail_ms": int(result.get("trail_ms") or 0),
+    })
+    return JSONResponse({
+        "trimmed": True,
+        "audio_trimmed_relpath": dst_rel,
+        "lead_ms": int(result.get("lead_ms") or 0),
+        "trail_ms": int(result.get("trail_ms") or 0),
+        "new_duration_ms": int(result.get("new_duration_ms") or 0),
+    })
+
+
+@router.post(
+    "/captures/api/{cid}/untrim",
+    dependencies=[
+        Depends(require_admin_host),
+        Depends(require_admin),
+    ],
+)
+async def untrim_capture_audio_api(cid: str) -> JSONResponse:
+    """Restore a singleton's untrimmed audio: unlink the `<id>.trimmed.wav`
+    companion file and clear the offset columns. The audio GET endpoint
+    then serves the original `audio_relpath` again, and the karaoke band
+    uses un-shifted word times (which are still in original-audio time
+    in the DB — the trim was non-destructive at the data layer).
+
+    Idempotent: returns OK even if the capture was never trimmed."""
+    row = captures_store.get_capture(cid)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "capture not found")
+    trimmed_rel = row.get("audio_trimmed_relpath")
+    if trimmed_rel:
+        try:
+            captures_store._safe_unlink(
+                captures_store.abs_audio_path(trimmed_rel),
+            )
+        except ValueError:
+            pass
+    captures_store.update_capture(cid, {
+        "audio_trimmed_relpath": None,
+        "audio_trim_lead_ms": None,
+        "audio_trim_trail_ms": None,
+    })
+    return JSONResponse({"untrimmed": True})
 
 
 # ---------------------------------------------------------------------
@@ -594,6 +650,82 @@ class PatchGroupIn(BaseModel):
 _JOIN_STR = {"space": " ", "period_space": ". "}
 
 
+def _shift_word_times(
+    items: list[dict[str, Any]] | None,
+    lead_ms: int,
+    eff_duration_s: float | None,
+) -> list[dict[str, Any]]:
+    """Return a NEW list with each item's start/end shifted by -lead_ms/1000
+    and clamped to [0, eff_duration_s] (when given).
+
+    Used after a VAD trim where the served audio is shorter than the
+    original: stored words/segments live in original-audio time so the
+    DB stays canonical; this helper rebases them onto the trimmed
+    audio's timeline so audio.currentTime alignment is correct.
+
+    Items whose interval lies entirely outside [0, eff_duration_s] are
+    dropped — they map to audio that was cut away. All other fields
+    (word, raw_word, removed, member_idx, …) are preserved verbatim.
+    Returns a deep-enough copy (dicts re-built so the originals are
+    untouched).
+
+    Returns an empty list when items is empty / None. Returns items
+    unchanged (as a fresh list) when both lead_ms and eff_duration_s
+    indicate no work (no shift, no clamp)."""
+    if not items:
+        return []
+    shift_s = float(lead_ms or 0) / 1000.0
+    if shift_s <= 0 and eff_duration_s is None:
+        return list(items)
+    out: list[dict[str, Any]] = []
+    for it in items:
+        try:
+            s_old = float(it.get("start") or 0.0)
+            e_old = float(it.get("end", s_old) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        s_new = s_old - shift_s
+        e_new = e_old - shift_s
+        if e_new <= 0:
+            continue
+        if eff_duration_s is not None and s_new >= eff_duration_s:
+            continue
+        s_clamped = max(0.0, s_new)
+        e_clamped = e_new
+        if eff_duration_s is not None:
+            e_clamped = min(eff_duration_s, e_clamped)
+        new_it = dict(it)
+        new_it["start"] = s_clamped
+        new_it["end"] = max(s_clamped, e_clamped)
+        out.append(new_it)
+    return out
+
+
+def _apply_trim_to_capture_row(row: dict[str, Any]) -> None:
+    """In-place: if `row` carries trim offsets, shift its `words` and
+    `segments` onto the trimmed-audio timeline and add an
+    `effective_duration_seconds` field. No-op when the capture was
+    never trimmed (lead/trail = None or 0)."""
+    if not row:
+        return
+    lead = row.get("audio_trim_lead_ms")
+    trail = row.get("audio_trim_trail_ms")
+    if not lead and not trail:
+        # Still expose effective_duration_seconds equal to duration_seconds
+        # so consumers can use a single field uniformly.
+        row["effective_duration_seconds"] = float(row.get("duration_seconds") or 0.0)
+        return
+    lead_ms = int(lead or 0)
+    trail_ms = int(trail or 0)
+    orig_s = float(row.get("duration_seconds") or 0.0)
+    eff = max(0.0, orig_s - (lead_ms + trail_ms) / 1000.0)
+    row["effective_duration_seconds"] = eff
+    if "words" in row:
+        row["words"] = _shift_word_times(row.get("words"), lead_ms, eff)
+    if "segments" in row:
+        row["segments"] = _shift_word_times(row.get("segments"), lead_ms, eff)
+
+
 def _apply_chips_to_text(text: str, corrections: list[dict[str, Any]]) -> str:
     """Substitute each chip's `wrong` text with its `correct` text in
     `text`. Walk in idx order so multi-word spans replace as a unit.
@@ -644,10 +776,14 @@ def _build_merged_wav(
     gid: str,
     member_ids: list[str],
     silence_ms: int,
-) -> tuple[int, dict[str, str]]:
+) -> tuple[int, dict[str, str], int, int]:
     """Resolve member audio paths, run the merge, return (duration_ms,
-    member_hash_map). Caller must have validated member_ids belong to
-    the same user and total ≤28 s."""
+    member_hash_map, lead_trim_ms, trail_trim_ms). Caller must have
+    validated member_ids belong to the same user and total ≤28 s.
+
+    The trim offsets are non-zero only when CAPTURES_VAD_TRIM_ENABLED_FOR_GROUPS
+    auto-trims the merged WAV — they're needed by _build_merged_words to
+    keep per-member karaoke timestamps in sync with the trimmed audio."""
     import audio_merge
     import capture_groups_store
 
@@ -670,7 +806,7 @@ def _build_merged_wav(
     dst_relpath = capture_groups_store._relpath_for(gid)
     dst_abs = capture_groups_store.abs_path_for(dst_relpath)
     try:
-        _bytes, n_samples = audio_merge.merge_wavs(
+        _bytes, n_samples, lead_trim_ms, trail_trim_ms = audio_merge.merge_wavs(
             member_paths, dst_abs, gap_ms=silence_ms,
         )
     except audio_merge.WavFormatError as e:
@@ -678,7 +814,7 @@ def _build_merged_wav(
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
     duration_ms = int(round(n_samples / 16.0))  # 16 samples/ms at 16 kHz
-    return duration_ms, hashes
+    return duration_ms, hashes, lead_trim_ms, trail_trim_ms
 
 
 @router.post(
@@ -755,7 +891,7 @@ async def create_group_api(
     transcript = payload.transcript.strip() or _build_default_transcript(
         captures, payload.join_strategy,
     )
-    duration_ms, hashes = _build_merged_wav(
+    duration_ms, hashes, lead_trim_ms, trail_trim_ms = _build_merged_wav(
         gid=gid,
         member_ids=member_ids,
         silence_ms=payload.silence_ms,
@@ -782,6 +918,8 @@ async def create_group_api(
             member_hash_map=hashes,
             duration_ms=duration_ms,
             language=group_language,
+            lead_trim_ms=lead_trim_ms,
+            trail_trim_ms=trail_trim_ms,
         )
     except Exception:
         # Insert failed — roll back the WAV we just wrote so the
@@ -806,6 +944,8 @@ def _insert_group_with_gid(
     member_hash_map: dict[str, str],
     duration_ms: int,
     language: str | None = None,
+    lead_trim_ms: int = 0,
+    trail_trim_ms: int = 0,
 ) -> None:
     """Direct insert that honours a pre-allocated gid (needed because the
     audio file is written at the gid path before this call). Mirrors the
@@ -829,14 +969,16 @@ def _insert_group_with_gid(
                 "  merged_duration_ms, transcript,"
                 "  transcript_join_strategy, member_hashes_json,"
                 "  inter_segment_silence_ms, is_stale, is_locked,"
-                "  language)"
-                " VALUES (?,?,?,?,?,?,?,?,?,0,0,?)",
+                "  language, merged_lead_trim_ms, merged_trail_trim_ms)"
+                " VALUES (?,?,?,?,?,?,?,?,?,0,0,?,?,?)",
                 (
                     gid, user_id, now, relpath, int(duration_ms),
                     transcript, join_strategy,
                     _json.dumps(member_hash_map, sort_keys=True),
                     int(silence_ms),
                     language or None,
+                    int(lead_trim_ms or 0),
+                    int(trail_trim_ms or 0),
                 ),
             )
             for order, mid in enumerate(member_ids):
@@ -980,7 +1122,15 @@ def _enrich_group(g: dict[str, Any]) -> dict[str, Any]:
     g["corrections"] = _project_member_corrections(members)
     g["merged_words"] = _build_merged_words(
         members, int(g["inter_segment_silence_ms"]),
+        merged_lead_trim_ms=int(g.get("merged_lead_trim_ms") or 0),
+        merged_trail_trim_ms=int(g.get("merged_trail_trim_ms") or 0),
+        merged_duration_ms=int(g.get("merged_duration_ms") or 0),
     )
+    # Effective duration mirrors the singleton field: equals
+    # merged_duration_ms / 1000 since merged_duration_ms is already the
+    # post-trim value. Exposed for a uniform display shape with
+    # singletons.
+    g["effective_duration_seconds"] = float(g.get("merged_duration_ms") or 0) / 1000.0
     return g
 
 
@@ -1146,6 +1296,10 @@ def _clone_word(w: dict[str, Any]) -> dict[str, Any]:
 def _build_merged_words(
     members: list[dict[str, Any]],
     silence_ms: int,
+    *,
+    merged_lead_trim_ms: int = 0,
+    merged_trail_trim_ms: int = 0,
+    merged_duration_ms: int | None = None,
 ) -> list[dict[str, Any]]:
     """Project each member's per-word timestamps onto the merged-audio
     timeline. Member i starts at (Σ_{j<i} dur_j) + i × silence_s seconds —
@@ -1153,18 +1307,31 @@ def _build_merged_words(
     member. start/end are returned in seconds (matches audio.currentTime
     and the single-capture karaoke band's expectation).
 
+    When the merged WAV was VAD-trimmed at merge time, `merged_lead_trim_ms`
+    + `merged_trail_trim_ms` shift the produced times so the karaoke
+    aligns with the trimmed audio:
+      - Subtract `merged_lead_trim_ms / 1000` from every word's start/end.
+      - Drop words whose interval falls entirely outside the trimmed
+        clip's [0, effective_duration_s] range; clamp partial overlaps.
+    Un-trimmed groups (lead = trail = 0) take the no-op path and
+    behaviour matches the pre-trim implementation.
+
     `get_members` strips heavy fields for the list view, so we re-fetch
     each capture to get `words`. Each member's words are run through
     `_per_word_postprocess` so the displayed text matches what's in
-    `final` / what gets exported — the user clicks a word and the
-    chip's `wrong` matches the exported text instead of the raw STT
-    output. Cost is bounded — ≤30 members, ≤a few hundred words total
-    per ≤28 s group — and only runs on expand."""
+    `final` / what gets exported. Cost is bounded — ≤30 members,
+    ≤a few hundred words total per ≤28 s group — and only runs on expand."""
     silence_s = max(0, int(silence_ms)) / 1000.0
+    lead_s = max(0, int(merged_lead_trim_ms or 0)) / 1000.0
+    eff_dur_s: float | None = None
+    if merged_duration_ms is not None:
+        # merged_duration_ms reflects the TRIMMED duration (we re-measure
+        # post-trim in audio_merge.merge_wavs), so use it directly.
+        eff_dur_s = max(0.0, float(merged_duration_ms) / 1000.0)
     merged: list[dict[str, Any]] = []
     cum = 0.0
     for i, m in enumerate(members):
-        offset = cum + i * silence_s
+        offset = cum + i * silence_s - lead_s
         cap = captures_store.get_capture(m["id"]) or {}
         ws = _align_words_to_final(
             cap.get("words") or [],
@@ -1177,10 +1344,20 @@ def _build_merged_words(
             word = w.get("word", "")
             if start is None or end is None:
                 continue
+            s_new = float(start) + offset
+            e_new = float(end) + offset
+            if e_new <= 0:
+                continue
+            if eff_dur_s is not None and s_new >= eff_dur_s:
+                continue
+            s_clamped = max(0.0, s_new)
+            e_clamped = e_new
+            if eff_dur_s is not None:
+                e_clamped = min(eff_dur_s, e_clamped)
             entry = {
                 "word":       word,
-                "start":      float(start) + offset,
-                "end":        float(end) + offset,
+                "start":      s_clamped,
+                "end":        max(s_clamped, e_clamped),
                 "member_idx": i,
                 "member_id":  m["id"],
             }
@@ -1297,7 +1474,7 @@ async def regenerate_group_api(
     if not user.get("is_admin") and g["user_id"] != user.get("user_id"):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "not your group")
     members = capture_groups_store.get_members(gid)
-    duration_ms, hashes = _build_merged_wav(
+    duration_ms, hashes, lead_trim_ms, trail_trim_ms = _build_merged_wav(
         gid=gid,
         member_ids=[m["id"] for m in members],
         silence_ms=g["inter_segment_silence_ms"],
@@ -1306,6 +1483,8 @@ async def regenerate_group_api(
         "is_stale": 0,
         "merged_duration_ms": duration_ms,
         "member_hashes_json": _json.dumps(hashes, sort_keys=True),
+        "merged_lead_trim_ms": int(lead_trim_ms or 0),
+        "merged_trail_trim_ms": int(trail_trim_ms or 0),
     })
     return JSONResponse({"group": _enrich_group(updated)})
 
@@ -1398,7 +1577,7 @@ def _ensure_group_wav(g: dict[str, Any]) -> str:
             "[groups] gid=%s auto-rebuilding missing WAV from %d members",
             g["id"][:8], len(member_ids),
         )
-        duration_ms, hashes = _build_merged_wav(
+        duration_ms, hashes, lead_trim_ms, trail_trim_ms = _build_merged_wav(
             gid=g["id"],
             member_ids=member_ids,
             silence_ms=int(g["inter_segment_silence_ms"]),
@@ -1407,6 +1586,8 @@ def _ensure_group_wav(g: dict[str, Any]) -> str:
             "merged_duration_ms": int(duration_ms),
             "member_hashes_json": json.dumps(hashes, sort_keys=True),
             "is_stale":           0,
+            "merged_lead_trim_ms":  int(lead_trim_ms or 0),
+            "merged_trail_trim_ms": int(trail_trim_ms or 0),
         })
     return abs_p
 
@@ -2620,7 +2801,11 @@ _CAPTURES_HTML = r"""<!doctype html>
         escapeHtml(r.status || 'new') + '</span>' +
       (r.model ? '<span class="pill">' + escapeHtml(r.model) + '</span>' : '') +
       (r.language ? '<span class="pill">' + escapeHtml(r.language) + '</span>' : '') +
-      '<span class="duration">' + (r.duration_seconds || 0).toFixed(1) + 's</span>' +
+      '<span class="duration">'
+        + ((r.effective_duration_seconds !== undefined
+            ? r.effective_duration_seconds
+            : (r.duration_seconds || 0)).toFixed(1))
+        + 's</span>' +
       (r.request_id
         ? '<span class="req">req ' + escapeHtml((r.request_id||'').slice(0,8)) + '</span>'
         : '') +
@@ -2964,6 +3149,20 @@ _CAPTURES_HTML = r"""<!doctype html>
       onTrimAudio(state, r, trimBtn);
     });
     actions.appendChild(trimBtn);
+
+    // Untrim — only shown when a trimmed companion exists. Deletes the
+    // trimmed file + clears the offsets so the original audio is served
+    // again and the karaoke uses un-shifted word times.
+    if (r.audio_trimmed_relpath) {
+      var untrimBtn = document.createElement('button');
+      untrimBtn.type = 'button';
+      untrimBtn.textContent = '↺ Untrim';
+      untrimBtn.title = 'Restore the original (un-trimmed) audio';
+      untrimBtn.addEventListener('click', function() {
+        onUntrimAudio(state, r, untrimBtn);
+      });
+      actions.appendChild(untrimBtn);
+    }
 
     // Reprocess — re-runs PIPELINE_RULES on the stored `raw` so the
     // training-form text reflects current rule edits without waiting
@@ -3328,8 +3527,9 @@ _CAPTURES_HTML = r"""<!doctype html>
   }
 
   // Trim leading/trailing silence on a singleton via the per-capture
-  // /trim endpoint. On success, refetch the audio so the player picks
-  // up the trimmed companion file the server now prefers.
+  // /trim endpoint. On success, refresh the row entirely so the karaoke
+  // band picks up the shifted word timestamps the server now returns.
+  // (Audio reload alone isn't enough — word.start/end values changed.)
   async function onTrimAudio(state, r, btn) {
     var origLabel = btn.textContent;
     btn.disabled = true;
@@ -3339,25 +3539,7 @@ _CAPTURES_HTML = r"""<!doctype html>
         '/captures/api/' + encodeURIComponent(state.cid) + '/trim', {});
       if (j && j.trimmed) {
         toast('Trimmed silence.');
-        // Force audio reload so the player picks up the trimmed file.
-        if (state.audio) {
-          var tok = getToken();
-          try {
-            if (state.blobUrl) URL.revokeObjectURL(state.blobUrl);
-          } catch(_) {}
-          state.blobUrl = null;
-          fetch('/captures/api/' + encodeURIComponent(r.id) + '/audio', {
-            headers: tok ? { 'Authorization': 'Bearer ' + tok } : {},
-          }).then(function(resp) {
-            if (!resp.ok) throw new Error('HTTP ' + resp.status);
-            return resp.blob();
-          }).then(function(blob) {
-            state.blobUrl = URL.createObjectURL(blob);
-            state.audio.src = state.blobUrl;
-          }).catch(function(e) {
-            toast('Audio reload failed: ' + e.message, true);
-          });
-        }
+        _refreshRowAfterTrim(state.cid);
       } else {
         toast('Nothing to trim — already tight or silent.');
       }
@@ -3368,6 +3550,50 @@ _CAPTURES_HTML = r"""<!doctype html>
     } finally {
       btn.disabled = false;
       btn.textContent = origLabel;
+    }
+  }
+
+  // Restore the untrimmed audio: delete the trimmed companion file +
+  // clear the offsets so the audio GET serves audio_relpath again and
+  // the karaoke uses un-shifted word times.
+  async function onUntrimAudio(state, r, btn) {
+    var origLabel = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Restoring…';
+    try {
+      await api('POST',
+        '/captures/api/' + encodeURIComponent(state.cid) + '/untrim', {});
+      toast('Restored original audio.');
+      _refreshRowAfterTrim(state.cid);
+    } catch (e) {
+      if (e.message !== 'unauthorized') {
+        toast('Untrim failed: ' + e.message, true);
+      }
+    } finally {
+      btn.disabled = false;
+      btn.textContent = origLabel;
+    }
+  }
+
+  // Force-refresh a row by collapsing it, clearing the body-built flag
+  // (so the next expand re-fetches), and re-triggering toggleExpand to
+  // rebuild from fresh server data. Cleanest way to make trim/untrim
+  // changes (audio URL + shifted word times + effective duration)
+  // visible without rolling our own re-paint.
+  function _refreshRowAfterTrim(cid) {
+    var card = document.querySelector('.capture-card[data-id="' + cid + '"]');
+    if (!card) return;
+    var wasOpen = card.classList.contains('open');
+    var body = card.querySelector('.cc-body');
+    if (wasOpen) collapse(card, cid);
+    if (body) {
+      body.dataset.built = '';
+      body.innerHTML = '';
+    }
+    var r = _allCaptures.find(function(x) { return x.id === cid; });
+    if (!r) return;
+    if (wasOpen) {
+      setTimeout(function() { toggleExpand(card, r); }, 0);
     }
   }
 
@@ -4174,8 +4400,11 @@ _CAPTURES_HTML = r"""<!doctype html>
             line.style.cssText = 'font-size:var(--fs-sm);color:var(--dim);padding:0.2rem 0;';
             var base = m.text_for_training || m.final || m.raw || '';
             var memberText = _applyChipsToText(base, m.corrections || []);
+            var memDur = (m.effective_duration_seconds !== undefined
+              ? m.effective_duration_seconds
+              : (m.duration_seconds || 0));
             line.innerHTML = '[' + (m.group_order + 1) + '] '
-              + (m.duration_seconds || 0).toFixed(1) + 's · '
+              + memDur.toFixed(1) + 's · '
               + escapeHtml(memberText.slice(0, 120));
             membersDiv.appendChild(line);
           });
