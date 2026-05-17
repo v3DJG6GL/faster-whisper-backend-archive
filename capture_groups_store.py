@@ -37,12 +37,15 @@ _groups_audio_dir: str | None = None    # e.g. CAPTURES_DIR/groups
 #   1. _SCHEMA_CORE     — CREATE TABLE IF NOT EXISTS + indexes that only
 #                         reference columns present on the very first
 #                         shipped version of the table.
-#   2. _MIGRATIONS      — idempotent ALTER TABLE ADD COLUMN for every
-#                         column added after the first ship. Each ALTER
-#                         is run in its own try/except so a fresh DB
-#                         (where the CREATE TABLE already includes the
-#                         column) swallows "duplicate column …" and
-#                         keeps going.
+#   2. _MIGRATIONS      — idempotent stmts for upgrading older DBs:
+#                         ALTER ADD COLUMN for columns added after the
+#                         first ship, ALTER DROP COLUMN for the legacy
+#                         corrections_json / corrections_migrated_at
+#                         cache, plus a one-shot UPDATE that normalises
+#                         transcript_join_strategy='newline' rows to
+#                         'space'. Each stmt runs in its own try/except
+#                         so fresh DBs swallow "duplicate column …" /
+#                         "no such column …" and keep going.
 #   3. _SCHEMA_POST_MIGRATIONS — indexes that reference columns added
 #                         by phase 2. If we put `CREATE INDEX … ON
 #                         capture_groups(status)` in phase 1 alongside
