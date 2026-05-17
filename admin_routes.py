@@ -671,7 +671,7 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
   header button#discard-btn:not(:disabled):hover { background: #531f1f;
     border-color: #7d2d2d; }
   header button:disabled { opacity: 0.4; cursor: not-allowed; }
-  main { padding: 0.875rem; max-width: 1100px; margin: 0 auto;
+  main { padding: 0.875rem; max-width: 68.75rem; margin: 0 auto;
     container-type: inline-size; container-name: form; }
   section { background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
     padding: 0.625rem 0.875rem 0.75rem; margin-bottom: 0.875rem; }
