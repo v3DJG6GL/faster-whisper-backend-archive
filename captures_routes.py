@@ -1745,8 +1745,9 @@ def _build_export_stream(only_status: str | None, include_audio: bool):
     user_filter_scope: str | None = None  # admin-only path; no per-user scope
     for g in capture_groups_store.list_groups(user_id=user_filter_scope):
         # Status gate — groups have the same status field as captures.
-        # "all" means no filter; anything else must match exactly.
-        if only_status and only_status != "all":
+        # The caller has already mapped "all" → None upstream, so a
+        # truthy only_status here is a concrete status to match.
+        if only_status:
             if (g.get("status") or "new") != only_status:
                 continue
         # Hard filters (apply even on `only_status=all`). These rows are
@@ -3890,8 +3891,6 @@ _CAPTURES_HTML = r"""<!doctype html>
       api('POST', '/captures/api/groups', payload)
         .then(function() {
           modal.classList.remove('show');
-          _selection.clear();
-          _lastSelectId = null;
           toast('Group created');
           return load();
         })

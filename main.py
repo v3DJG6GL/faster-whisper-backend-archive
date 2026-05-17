@@ -1252,8 +1252,6 @@ def _bootstrap_admin_from_env(raw_key: str) -> None:
         uid = api_keys_store.create_user("bootstrap-admin", is_admin=True)
     # Insert the raw key (bypass generate path so we honour the env value).
     import sqlite3 as _sql
-    import time as _time
-    import uuid as _uuid
     kp, k4 = api_keys_store._split_display_parts(raw_key)
     try:
         with api_keys_store._lock:
@@ -1263,8 +1261,8 @@ def _bootstrap_admin_from_env(raw_key: str) -> None:
                 "  created_ts, revoked_ts, last_used_ts)"
                 " VALUES (?,?,?,?,?,?,?,NULL,NULL)",
                 (
-                    _uuid.uuid4().hex, uid, h, kp, k4,
-                    "bootstrap (env)", _time.time(),
+                    uuid.uuid4().hex, uid, h, kp, k4,
+                    "bootstrap (env)", time.time(),
                 ),
             )
             api_keys_store._rebuild_index_locked()
@@ -1692,10 +1690,6 @@ async def transcribe(
                             "end": word.end,
                         })
 
-            # Terminal trim — symmetric strip of spaces/tabs/CR on BOTH
-            # edges. Preserves a leading or trailing "\n" emitted by
-            # "neue Zeile" / "neuer Absatz" at the edges of the utterance,
-            # since the user explicitly asked for the line break.
             raw_full_text = "".join(raw_full_text_parts)
             trace: "list | None" = [] if cfg.TRACE_ENABLED else None
             full_text_str = _postprocess_text(raw_full_text, model_name=resolved_model, trace=trace)
@@ -1728,6 +1722,10 @@ async def transcribe(
                 if trace is not None and _wrap_before != full_text_str:
                     trace.append((f"{len(_COMPILED_RULES) + 1} output-wrapper",
                                   _wrap_before, full_text_str))
+            # Terminal trim — symmetric strip of spaces/tabs/CR on BOTH
+            # edges. Preserves a leading or trailing "\n" emitted by
+            # "neue Zeile" / "neuer Absatz" at the edges of the utterance,
+            # since the user explicitly asked for the line break.
             before_trim = full_text_str
             full_text_str = full_text_str.lstrip(" \t\r").rstrip(" \t\r")
             if trace is not None and before_trim != full_text_str:
@@ -1803,7 +1801,7 @@ async def transcribe(
                 seg_diag=seg_diag,
                 raw=raw_full_text,
                 final=full_text_str,
-                steps=trace if trace is not None else None,
+                steps=trace,
                 request_id=request_id,
                 captured_id=captured_id,
             ))

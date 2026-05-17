@@ -99,7 +99,7 @@ def merge_wavs(
 
     pieces: list[bytes] = []
     total_samples = 0
-    gap = silence_bytes(gap_ms) if gap_ms > 0 else b""
+    gap = silence_bytes(gap_ms)
     gap_samples = len(gap) // BYTES_PER_SAMPLE
 
     for i, sp in enumerate(src_paths):
