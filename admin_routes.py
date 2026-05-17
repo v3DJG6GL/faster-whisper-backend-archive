@@ -825,7 +825,7 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
   .regex-status.warn { color: var(--yellow); }
   .regex-status.empty { color: var(--dim); font-style: italic; }
   /* Advanced warning banner above the Step 3 fields */
-  .advanced-warn { background: #2d1f0a; color: #f2cc60; border-left: 3px solid #f2cc60;
+  .advanced-warn { background: #2d1f0a; color: var(--yellow); border-left: 3px solid var(--yellow);
     padding: 0.375rem 0.625rem; margin: 0.5rem 0; border-radius: 3px; font-size: var(--fs-sm); }
   /* Test panel */
   .regex-test-panel { background: #161b22; border: 1px solid var(--border);
@@ -842,7 +842,7 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
   .rule-row { background: #161b22; border: 1px solid var(--border); border-radius: 4px;
     padding: 0.375rem 0.625rem; transition: background-color 120ms ease;
     cursor: default; }
-  .rule-row.locked { border-left: 3px solid #f2cc60; }
+  .rule-row.locked { border-left: 3px solid var(--yellow); }
   .rule-row.terminal { border-left: 3px solid var(--dim); opacity: 0.85; }
   .rule-row:not(.terminal):hover { background: #1c2230; }
   .rule-row:not(.terminal):active { background: #232a36; }
@@ -904,13 +904,13 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
   .pipeline-test-table tr:nth-child(even) { background: #0d1117; }
   .pipeline-test-table .out { font-family: var(--font-mono);
     white-space: pre-wrap; word-break: break-word; }
-  .pipeline-test-table .out mark { background: #033a16; color: #7ee787; }
+  .pipeline-test-table .out mark { background: #033a16; color: var(--green); }
   .pipeline-test-table .nochange { color: var(--dim); font-style: italic; }
   .pipeline-test-table .tag { display: inline-block; padding: 0 0.375rem;
     border-radius: 3px; font-size: var(--fs-xs); }
-  .pipeline-test-table .tag.ok { background: #033a16; color: #7ee787; }
+  .pipeline-test-table .tag.ok { background: #033a16; color: var(--green); }
   .pipeline-test-table .tag.err { background: #3a0d0d; color: #ff7b72; }
-  .pipeline-test-table .tag.warn { background: #2d1f0a; color: #f2cc60; }
+  .pipeline-test-table .tag.warn { background: #2d1f0a; color: var(--yellow); }
   .pipeline-test-table .tag.empty { background: #21262d; color: var(--dim); font-style: italic; }
   .preset-select { margin-bottom: 0.375rem; }
   .preset-select select { font-family: var(--font-mono); font-size: var(--fs-sm); }
@@ -2297,7 +2297,7 @@ function modelMultiSelectEditor(name, v) {
       if (!allowed.includes(m)) {
         const warn = document.createElement('em');
         warn.textContent = '  (not in ALLOWED_MODELS)';
-        warn.style.color = '#f2cc60';
+        warn.style.color = 'var(--yellow)';
         warn.style.fontStyle = 'normal';
         txt.appendChild(warn);
       }
@@ -3018,7 +3018,7 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
     // Lightweight inline form, appended at the bottom of the rules list.
     const form = document.createElement('div');
     form.className = 'rule-row';
-    form.style.borderColor = '#7ee787';
+    form.style.borderColor = 'var(--green)';
     const head = document.createElement('div');
     head.className = 'row-header';
     head.innerHTML = '<strong>+ New custom rule</strong>';
