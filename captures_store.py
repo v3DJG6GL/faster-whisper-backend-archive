@@ -267,7 +267,9 @@ def _row_to_dict(row: sqlite3.Row, include_words: bool = True) -> dict[str, Any]
 
 def count() -> int:
     """Total row count (any status). Cheap; used by the transcribe handler
-    to short-circuit the capture decision when the store is at its cap."""
+    to short-circuit the capture decision when the store is at its cap,
+    and by /quick-config to decide whether to surface the reapply-rules
+    modal."""
     conn = _require_conn()
     row = conn.execute("SELECT COUNT(*) FROM captures").fetchone()
     return int(row[0]) if row else 0
@@ -450,8 +452,15 @@ def _evict_to_cap(conn: sqlite3.Connection) -> None:
 
 
 def _total_audio_bytes(conn: sqlite3.Connection) -> int:
+    # Restrict to non-group rows: _drop_oldest_by_bytes excludes group
+    # members from eviction (they are owned by capture_groups_store), so
+    # counting their bytes here would let the total cross the cap with
+    # nothing the evictor can drop, causing a full scan on every insert.
     total = 0
-    for row in conn.execute("SELECT audio_relpath FROM captures"):
+    rows = conn.execute(
+        "SELECT audio_relpath FROM captures WHERE group_id IS NULL"
+    )
+    for row in rows:
         try:
             total += os.path.getsize(abs_audio_path(row["audio_relpath"]))
         except (OSError, ValueError):
@@ -664,14 +673,6 @@ def prune_chips_for_request_id(
     return touched
 
 
-def total_count() -> int:
-    """Row count for the captures table — used by /quick-config to
-    decide whether to surface the reapply-rules modal."""
-    conn = _require_conn()
-    row = conn.execute("SELECT COUNT(*) AS n FROM captures").fetchone()
-    return int(row["n"]) if row else 0
-
-
 def counts_by_status() -> dict[str, int]:
     """Status breakdown for the page toolbar."""
     conn = _require_conn()
@@ -776,7 +777,7 @@ def delete_capture(cid: str) -> bool:
     except ValueError:
         pass
     # Also clean up the trimmed companion file if one was produced.
-    trimmed = row["audio_trimmed_relpath"] if "audio_trimmed_relpath" in row.keys() else None
+    trimmed = row["audio_trimmed_relpath"]
     if trimmed:
         try:
             _safe_unlink(abs_audio_path(trimmed))
@@ -876,7 +877,7 @@ def reconcile_on_startup() -> tuple[int, int]:
                     rows_marked += 1
             # Trimmed companion (if present) is also a known artifact;
             # without this it gets unlinked as "orphan" on every restart.
-            trimmed_rel = r["audio_trimmed_relpath"] if "audio_trimmed_relpath" in r.keys() else None
+            trimmed_rel = r["audio_trimmed_relpath"]
             if trimmed_rel:
                 try:
                     t_abs = abs_audio_path(trimmed_rel)

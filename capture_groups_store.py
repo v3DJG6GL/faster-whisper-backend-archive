@@ -392,10 +392,6 @@ def update_group(
     return get_group(gid)
 
 
-def mark_stale(gid: str, *, stale: bool = True) -> None:
-    update_group(gid, {"is_stale": 1 if stale else 0})
-
-
 def dissolve_group(gid: str) -> None:
     """Delete the row, unlink the merged WAV, NULL out members'
     (group_id, group_order)."""
@@ -515,10 +511,3 @@ def reconcile_on_startup() -> tuple[int, int, int]:
     return rows_missing, files_unlinked, orphan_fks_cleared
 
 
-def find_group_for_member(capture_id: str) -> str | None:
-    """Return the group_id that owns this capture, or None."""
-    conn = _require_conn()
-    row = conn.execute(
-        "SELECT group_id FROM captures WHERE id = ?", (capture_id,),
-    ).fetchone()
-    return row["group_id"] if row and row["group_id"] else None
