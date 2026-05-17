@@ -134,9 +134,9 @@ def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
 
 def _truncate_steps(steps: list) -> list:
     """Cap the steps list so its JSON serialization stays below
-    _CAP_STEPS_JSON. Drops from the tail (oldest pipeline stages first;
-    the user-visible final transformation is the last element). Returns
-    the original list if already small enough."""
+    _CAP_STEPS_JSON. Drops from the front (oldest pipeline stages first)
+    so the last entries — output-wrapper + terminal-trim, which are what
+    the admin actually wants to see — are preserved."""
     out: list = []
     for s in steps:
         if not isinstance(s, (list, tuple)) or len(s) < 3:
@@ -144,12 +144,9 @@ def _truncate_steps(steps: list) -> list:
         out.append([str(s[0])[:_CAP_CORRECTION_FIELD],
                     str(s[1])[:_CAP_RAW],
                     str(s[2])[:_CAP_RAW]])
-    # If the serialized blob is still too big, drop from the END (oldest
-    # stages stay; we keep the last few which include the actually-
-    # interesting output-wrapper / terminal-trim steps).
     blob = json.dumps(out, ensure_ascii=False)
     while len(blob) > _CAP_STEPS_JSON and out:
-        out.pop()
+        out.pop(0)
         blob = json.dumps(out, ensure_ascii=False)
     return out
 
