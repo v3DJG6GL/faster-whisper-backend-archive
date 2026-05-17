@@ -306,10 +306,10 @@ SCALE_PICKER_JS = """
 
 # Severity pill poller — placed at the end of <body> on every page that shows
 # the nav. Polls /sev every 5 s and writes the counts into the three pills.
-# Server-side severity_counts() is the authoritative source (true 60 s window
-# from real log-record timestamps). Pages with their own faster updates
-# (e.g. /stats SSE, /logs per-line bumps) overwrite the same pills more
-# often — the poller is a backstop that keeps every page consistent.
+# Server-side severity_counts() is the authoritative source (WARNING+ records
+# since process start, ring-bounded). The poller is the sole pill updater:
+# /stats SSE explicitly defers to it, and the /logs per-line bumps were
+# dropped — so every page just trusts the 5 s tick.
 #
 # Skips the work if no pills exist on the page (e.g. tests, future pages).
 # Open-mode warning banner — JS-injected at the top of <body> on every
@@ -721,10 +721,11 @@ def nav_html(current: str) -> str:
         )
     parts.append("</span>")
 
-    # Stable IDs let JS update just the .n inner span on each SSE tick without
-    # rebuilding the link (preserves focus/click state). The initial counts
-    # rendered here are a "best effort at page load" — the client takes over
-    # immediately, so they're correct for the first render and live thereafter.
+    # Stable IDs let the SEV_POLLER_JS /sev tick update just the .n inner span
+    # without rebuilding the link (preserves focus/click state). The initial
+    # counts rendered here are a "best effort at page load" — the client takes
+    # over immediately, so they're correct for the first render and live
+    # thereafter.
     for level, key in (("warn", "WARNING"), ("err", "ERROR"), ("crit", "CRITICAL")):
         n = counts[level]
         cls = f"sevpill admin-only {level} {'hot' if n else 'zero'}"
