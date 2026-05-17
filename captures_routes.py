@@ -706,9 +706,10 @@ def _shift_word_times(
 
 def _apply_trim_to_capture_row(row: dict[str, Any]) -> None:
     """In-place: if `row` carries trim offsets, shift its `words` and
-    `segments` onto the trimmed-audio timeline and add an
-    `effective_duration_seconds` field. No-op when the capture was
-    never trimmed (lead/trail = None or 0)."""
+    `segments` onto the trimmed-audio timeline. Always sets
+    `effective_duration_seconds` (= original `duration_seconds` when
+    lead/trail are None or 0) so consumers can read one field
+    uniformly without branching on trim presence."""
     if not row:
         return
     lead = row.get("audio_trim_lead_ms")
