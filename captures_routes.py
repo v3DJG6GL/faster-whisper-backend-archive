@@ -40,6 +40,7 @@ from fastapi.responses import (
 from pydantic import BaseModel, Field
 
 import api_keys_store
+import captures_merge_proposer
 import captures_store
 import config as cfg
 import text_corrections
@@ -170,6 +171,35 @@ async def list_captures_api(
         "total_count": captures_store.count(),
         "is_admin": bool(user.get("is_admin")),
         "user_id": user.get("user_id"),
+    })
+
+
+@router.get(
+    "/captures/api/propose-merges",
+    dependencies=[Depends(require_admin_host)],
+)
+async def propose_merges_api(
+    user_filter: str | None = Query(None, alias="user_id"),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> JSONResponse:
+    """Ranked auto-merge proposals for the /captures fine-tuning data UI.
+
+    Non-admin callers always see their own captures only; the `user_id`
+    query is ignored for them. Admin callers may pass `?user_id=...` to
+    scope, or omit for an all-users view. Results are cached per scope
+    with a TTL (cfg.CAPTURES_PROPOSER_CACHE_TTL_S), invalidated on any
+    capture/group write."""
+    is_admin = bool(user.get("is_admin"))
+    caller_uid = str(user.get("user_id") or "")
+    proposals, cached = captures_merge_proposer.propose_merges(
+        user_id_filter=user_filter if is_admin else None,
+        is_admin=is_admin,
+        caller_user_id=caller_uid,
+    )
+    return JSONResponse({
+        "proposals": proposals,
+        "generated_ts": time.time(),
+        "cached": cached,
     })
 
 
@@ -999,6 +1029,7 @@ def _insert_group_with_gid(
                     " WHERE id = ? AND group_id IS NULL",
                     (gid, order, mid),
                 )
+    captures_merge_proposer.invalidate(user_id)
     logger.info(
         "[groups] created gid=%s user=%s n=%d dur=%.1fs",
         gid[:8], (user_id or "?")[:8], len(member_ids), duration_ms / 1000.0,
@@ -2369,6 +2400,74 @@ _CAPTURES_HTML = r"""<!doctype html>
     font-size: var(--fs-xs); margin-right: 0.4rem;
   }
 
+  /* Auto-propose merges modal */
+  #propose-modal {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+    z-index: 1000; align-items: center; justify-content: center;
+    display: none;
+  }
+  #propose-modal.show { display: flex; }
+  #propose-modal .box {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 6px; padding: 1.25rem; width: 52rem; max-width: 95vw;
+    max-height: 88vh; overflow: auto;
+  }
+  #propose-modal h3 { margin: 0 0 0.25rem 0; color: var(--bold); }
+  #propose-modal .dim { color: var(--help); font-size: var(--fs-sm); margin: 0 0 0.75rem 0; }
+  #propose-modal .actions {
+    display: flex; gap: 0.5rem; align-items: center;
+    margin-top: 0.75rem;
+  }
+  #propose-modal .actions .spacer { flex: 1; }
+  #propose-modal .empty {
+    color: var(--dim); font-size: var(--fs-sm); padding: 1rem 0;
+  }
+  #propose-list .proposal {
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 0.6rem 0.75rem; margin-bottom: 0.5rem;
+    background: var(--input-bg);
+  }
+  #propose-list .proposal .row1 {
+    display: flex; gap: 0.6rem; align-items: center;
+    font-size: var(--fs-sm); margin-bottom: 0.25rem;
+  }
+  #propose-list .proposal .score {
+    display: inline-block; min-width: 2.5rem; text-align: center;
+    padding: 0.1rem 0.4rem; border-radius: 999px;
+    background: var(--green-bg, #1b3a1b); color: var(--green, #6acc6a);
+    font-family: var(--font-mono); font-weight: 700;
+  }
+  #propose-list .proposal .lang-pill {
+    display: inline-block; padding: 0.05rem 0.4rem; border-radius: 4px;
+    background: var(--border); color: var(--help);
+    font-size: var(--fs-xs); font-family: var(--font-mono);
+  }
+  #propose-list .proposal .reason { color: var(--dim); font-size: var(--fs-sm); }
+  #propose-list .proposal .members {
+    margin: 0.4rem 0;
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 4px; padding: 0.4rem 0.55rem;
+    max-height: 8rem; overflow: auto;
+    font-size: var(--fs-xs); color: var(--dim);
+  }
+  #propose-list .proposal .members .m {
+    display: flex; gap: 0.5rem; padding: 0.1rem 0;
+  }
+  #propose-list .proposal .members .m .ts {
+    color: var(--help); font-family: var(--font-mono); flex-shrink: 0;
+  }
+  #propose-list .proposal .members .m .dur {
+    color: var(--help); font-family: var(--font-mono); flex-shrink: 0;
+  }
+  #propose-list .proposal .meter-bar {
+    display: inline-block; width: 7rem; height: 0.4rem;
+    background: var(--border); border-radius: 2px; overflow: hidden;
+    vertical-align: middle;
+  }
+  #propose-list .proposal .meter-bar .fill {
+    display: block; height: 100%; background: var(--accent, #58a6ff);
+  }
+
   {{NAV_CSS}}
 </style>
 </head>
@@ -2407,6 +2506,7 @@ _CAPTURES_HTML = r"""<!doctype html>
     <span class="meter" id="ab-meter">Σ 0.00 s / 28.00 s</span>
     <span class="summary" id="ab-warn"></span>
     <span class="spacer"></span>
+    <button id="ab-propose">Auto-propose merges</button>
     <button id="ab-merge" class="primary" disabled>Merge into group</button>
     <button id="ab-clear">Clear selection</button>
   </div>
@@ -2447,6 +2547,22 @@ _CAPTURES_HTML = r"""<!doctype html>
     <div class="actions">
       <button id="merge-cancel">Cancel</button>
       <button id="merge-commit" class="primary">Commit merge</button>
+    </div>
+  </div>
+</div>
+
+<div id="propose-modal">
+  <div class="box">
+    <h3>Proposed merges</h3>
+    <p class="dim">Ranked by total duration (~26 s target), session
+       homogeneity, and member count. Near-duplicate clips are excluded
+       within each proposal. Click <em>Accept</em> to load a proposal
+       into the merge dialog for final review.</p>
+    <div id="propose-list"></div>
+    <div class="actions">
+      <button id="propose-refresh">Refresh</button>
+      <span class="spacer"></span>
+      <button id="propose-close">Close</button>
     </div>
   </div>
 </div>
@@ -3902,6 +4018,158 @@ _CAPTURES_HTML = r"""<!doctype html>
   }
 
   // -------------------------------------------------------------------
+  // Auto-propose merges — calls /captures/api/propose-merges, renders a
+  // ranked list of candidate groups. Accept hands off to the existing
+  // _openMergeModal flow (no silent merge).
+  // -------------------------------------------------------------------
+  function _renderProposals(proposals) {
+    var listEl = document.getElementById('propose-list');
+    listEl.innerHTML = '';
+    if (!proposals || !proposals.length) {
+      var empty = document.createElement('div');
+      empty.className = 'empty';
+      empty.textContent = 'No eligible captures for proposing right now. '
+        + 'Try again after recording a few more clips, or after dismissing '
+        + 'audio-missing rows.';
+      listEl.appendChild(empty);
+      return;
+    }
+    proposals.forEach(function(p, idx) {
+      var card = document.createElement('div');
+      card.className = 'proposal';
+
+      var row1 = document.createElement('div');
+      row1.className = 'row1';
+      var score = document.createElement('span');
+      score.className = 'score';
+      score.textContent = Math.round((p.composite_score || 0) * 100);
+      score.title = 'composite score: fill ' + (p.fill_score||0).toFixed(2)
+        + ' · density ' + (p.density_score||0).toFixed(2)
+        + ' · member ' + (p.member_score||0).toFixed(2)
+        + (p.reviewed_count ? ' · ' + p.reviewed_count + ' reviewed' : '');
+      row1.appendChild(score);
+
+      var meterWrap = document.createElement('span');
+      meterWrap.title = 'Total packed duration vs 28 s cap';
+      var meterBar = document.createElement('span');
+      meterBar.className = 'meter-bar';
+      var fill = document.createElement('span');
+      fill.className = 'fill';
+      var pct = Math.min(100, Math.round((p.total_duration_s / 28.0) * 100));
+      fill.style.width = pct + '%';
+      meterBar.appendChild(fill);
+      meterWrap.appendChild(meterBar);
+      var durLabel = document.createElement('span');
+      durLabel.style.cssText = 'font-family:var(--font-mono);color:var(--help);font-size:var(--fs-xs);margin-left:0.4rem;';
+      durLabel.textContent = (p.total_duration_s || 0).toFixed(1) + ' s';
+      meterWrap.appendChild(durLabel);
+      row1.appendChild(meterWrap);
+
+      var countLabel = document.createElement('span');
+      countLabel.style.cssText = 'color:var(--help);font-size:var(--fs-sm);';
+      countLabel.textContent = (p.member_count || 0) + ' clips';
+      row1.appendChild(countLabel);
+
+      var lang = document.createElement('span');
+      lang.className = 'lang-pill';
+      lang.textContent = p.language || '?';
+      row1.appendChild(lang);
+
+      var sp = document.createElement('span');
+      sp.style.flex = '1';
+      row1.appendChild(sp);
+
+      var accept = document.createElement('button');
+      accept.className = 'primary';
+      accept.type = 'button';
+      accept.textContent = 'Accept';
+      accept.addEventListener('click', function() { _acceptProposal(p); });
+      row1.appendChild(accept);
+      card.appendChild(row1);
+
+      var reason = document.createElement('div');
+      reason.className = 'reason';
+      reason.textContent = p.reason || '';
+      card.appendChild(reason);
+
+      var members = document.createElement('div');
+      members.className = 'members';
+      (p.member_previews || []).forEach(function(m) {
+        var line = document.createElement('div');
+        line.className = 'm';
+        var ts = document.createElement('span');
+        ts.className = 'ts';
+        ts.textContent = absTime(m.created_ts || 0);
+        var dur = document.createElement('span');
+        dur.className = 'dur';
+        dur.textContent = (m.duration_s || 0).toFixed(1) + 's';
+        var txt = document.createElement('span');
+        txt.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+        txt.title = m.preview || '';
+        txt.textContent = m.preview || '(no transcript)';
+        line.appendChild(ts);
+        line.appendChild(dur);
+        line.appendChild(txt);
+        members.appendChild(line);
+      });
+      card.appendChild(members);
+
+      listEl.appendChild(card);
+      // suppress unused-var warning
+      void idx;
+    });
+  }
+
+  async function _loadProposals() {
+    var listEl = document.getElementById('propose-list');
+    listEl.innerHTML = '<div class="empty">Loading proposals…</div>';
+    try {
+      var j = await api('GET', '/captures/api/propose-merges');
+      _renderProposals(j.proposals || []);
+    } catch (e) {
+      if (e && e.message !== 'unauthorized' && e.message !== 'not-admin') {
+        listEl.innerHTML = '';
+        var err = document.createElement('div');
+        err.className = 'empty';
+        err.style.color = 'var(--red, #f78585)';
+        err.textContent = 'Failed to load proposals: ' + (e.message || e);
+        listEl.appendChild(err);
+      }
+    }
+  }
+
+  function _acceptProposal(p) {
+    // Validate members are still present in current data; if any was
+    // grouped or deleted between proposal fetch and accept, skip those
+    // and warn rather than handing the merge endpoint a stale id list.
+    var byId = {};
+    _allCaptures.forEach(function(r) { byId[r.id] = r; });
+    var missing = (p.member_ids || []).filter(function(id) {
+      var r = byId[id];
+      return !r || r.group_id;
+    });
+    if (missing.length) {
+      toast(missing.length + ' member(s) no longer eligible — '
+            + 'try Refresh', true);
+      return;
+    }
+    _selection.clear();
+    (p.member_ids || []).forEach(function(id) { _selection.add(id); });
+    _updateActionBar();
+    // Re-render so the .selected class lights up on the cards.
+    applyFilters(_allCaptures);
+    document.getElementById('propose-modal').classList.remove('show');
+    // Hand off to the existing merge-modal preview/commit flow.
+    setTimeout(_openMergeModal, 0);
+  }
+
+  function _openProposeModal() {
+    var modal = document.getElementById('propose-modal');
+    modal.classList.add('show');
+    _loadProposals();
+  }
+
+  // -------------------------------------------------------------------
   // Group row rendering — packed-for-fine-tune training samples
   // -------------------------------------------------------------------
   function _renderGroupCard(g) {
@@ -4621,6 +4889,11 @@ _CAPTURES_HTML = r"""<!doctype html>
   document.getElementById('btn-reprocess-all').addEventListener('click', onReprocessAll);
   document.getElementById('ab-merge').addEventListener('click', _openMergeModal);
   document.getElementById('ab-clear').addEventListener('click', _clearSelection);
+  document.getElementById('ab-propose').addEventListener('click', _openProposeModal);
+  document.getElementById('propose-refresh').addEventListener('click', _loadProposals);
+  document.getElementById('propose-close').addEventListener('click', function() {
+    document.getElementById('propose-modal').classList.remove('show');
+  });
 
   // Revoke any open audio blob URLs on tab close — also handled per-row
   // on collapse, but this is the safety net.
