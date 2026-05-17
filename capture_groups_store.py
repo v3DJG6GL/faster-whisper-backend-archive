@@ -23,7 +23,6 @@ import logging
 import os
 import sqlite3
 import threading
-import time
 from typing import Any
 
 logger = logging.getLogger("whisper-api")
