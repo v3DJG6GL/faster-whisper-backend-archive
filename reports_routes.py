@@ -21,7 +21,6 @@ the resolved user_id from the API key.
 from __future__ import annotations
 
 import json
-import logging
 import time
 from datetime import datetime, timezone
 from typing import Any, Literal
@@ -36,8 +35,6 @@ import reports_store
 import web_common
 from admin_routes import require_admin_host
 from auth import get_current_user, require_admin
-
-logger = logging.getLogger("whisper-api")
 
 router = APIRouter()
 
