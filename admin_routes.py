@@ -3,10 +3,11 @@ Admin WebUI for faster-whisper-backend.
 
 Mounted at /config when WHISPER_ADMIN_UI=1. Endpoints:
 
-  GET  /config            HTML page (loopback / ADMIN_ALLOWED_HOSTS)
-  GET  /config/state      Resolved config + provenance + warm/cold tags
-  POST /config/state      Save overrides (validation errors -> 422)
-  POST /config/restart    Detach a self-restart helper (Windows only)
+  GET  /config               HTML page (loopback / ADMIN_ALLOWED_HOSTS)
+  GET  /config/state         Resolved config + provenance + hot/cold tags
+  POST /config/state         Save overrides (validation errors -> 422)
+  POST /config/test-pipeline Dry-run PIPELINE_RULES against a sample
+  POST /config/restart       Detach a self-restart helper (Windows only)
 
 Security model (layered):
   1. Allowlist gate:   require_admin_host rejects callers not in
