@@ -200,10 +200,11 @@ def upsert_report(
     `was_updated` flag is True when an existing row was merged; False
     when a fresh row was inserted.
 
-    On update: corrections merge by idx (newer wins), intended_text
-    and user_comment overwrite (latest submission supersedes), and
-    created_ts bumps to "now" so the row re-floats to the top of
-    /reports.
+    On update: corrections go through three_way_merge_corrections —
+    keyed on (idx, idx_end) for anchored chips and on (wrong, correct)
+    for anchorless ones — intended_text and user_comment overwrite
+    (latest submission supersedes), and created_ts bumps to "now" so
+    the row re-floats to the top of /reports.
     """
     existing = find_by_request_user(request_id, user_id)
     raw_t = (raw or "")[:_CAP_RAW]
