@@ -625,6 +625,18 @@ function renderTypeEditor(rule, commitData, opts) {
     return box;
   }
 
+  // Right-align the per-card Save button on rule types that don't have a
+  // sibling "+ add entry" bar (cb:map handles its own pairing below).
+  function _appendSaveRow(parent) {
+    if (!opts.makeSaveBtn) return;
+    const saveRow = document.createElement('div');
+    saveRow.style.cssText = 'display:flex;justify-content:flex-end;margin-top:0.6rem;';
+    const btn = opts.makeSaveBtn();
+    btn.style.minWidth = '6rem';
+    saveRow.appendChild(btn);
+    parent.appendChild(saveRow);
+  }
+
   if (rule.type === 'regex') {
     box.appendChild(_makeMonoLabeledInput('pattern', rule.pattern, (v) => {
       rule.pattern = v; commitData();
@@ -632,7 +644,7 @@ function renderTypeEditor(rule, commitData, opts) {
     box.appendChild(_makeMonoLabeledInput('replacement', rule.replacement, (v) => {
       rule.replacement = v; commitData();
     }, onEnter));
-    if (opts.makeSaveBtn) box.appendChild(opts.makeSaveBtn());
+    _appendSaveRow(box);
     return box;
   }
 
@@ -654,7 +666,7 @@ function renderTypeEditor(rule, commitData, opts) {
     // Intentionally NO Enter binding on the wordlist textarea — Enter must
     // insert a newline so users can edit multi-line lists.
     box.appendChild(ta);
-    if (opts.makeSaveBtn) box.appendChild(opts.makeSaveBtn());
+    _appendSaveRow(box);
     return box;
   }
 
@@ -698,11 +710,16 @@ function renderTypeEditor(rule, commitData, opts) {
       }
     });
     // Pair addBtn + saveBtn in a flex row so they sit side-by-side near
-    // the bottom of the map table.
+    // the bottom of the map table. addBtn fills available width; saveBtn
+    // sits on the right with a min-width so its label reads comfortably.
     const btnRow = document.createElement('div');
-    btnRow.style.cssText = 'display:flex;gap:0.5rem;align-items:center;margin-top:0.4rem;';
+    btnRow.style.cssText = 'display:flex;gap:0.5rem;align-items:stretch;margin-top:0.6rem;';
     btnRow.appendChild(addBtn);
-    if (opts.makeSaveBtn) btnRow.appendChild(opts.makeSaveBtn());
+    if (opts.makeSaveBtn) {
+      const saveBtn = opts.makeSaveBtn();
+      saveBtn.style.minWidth = '6rem';
+      btnRow.appendChild(saveBtn);
+    }
     box.appendChild(btnRow);
     return box;
   }
@@ -717,7 +734,7 @@ function renderTypeEditor(rule, commitData, opts) {
       ? 'Callback: collapse each match — last non-comma wins; pure-comma run → single comma.'
       : 'Callback: uppercase group(2) (or whole match if pattern has fewer than 2 groups).';
     box.appendChild(note);
-    if (opts.makeSaveBtn) box.appendChild(opts.makeSaveBtn());
+    _appendSaveRow(box);
     return box;
   }
 

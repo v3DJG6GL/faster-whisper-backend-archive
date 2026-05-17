@@ -495,8 +495,16 @@ _QUICK_CONFIG_HTML = r"""<!doctype html>
   .card .rule-editor .map-table input { width: 100%; }
   .card .rule-editor button { background: var(--panel);
     border: 1px solid var(--border); color: var(--fg);
-    padding: 0.125rem 0.5rem; border-radius: 3px; cursor: pointer;
-    font: inherit; font-size: var(--fs-sm); }
+    padding: 0.4rem 0.9rem; border-radius: 3px; cursor: pointer;
+    font: inherit; font-size: var(--fs-md); line-height: 1.4; }
+  .card .rule-editor button:hover:not(:disabled) {
+    background: #21262d; color: var(--bold); }
+  .card .rule-editor button:disabled {
+    opacity: 0.4; cursor: not-allowed; }
+  .card .rule-editor button.primary:not(:disabled) {
+    color: var(--green); border-color: var(--green); }
+  .card .rule-editor button.primary:hover:not(:disabled) {
+    background: rgba(46, 160, 67, 0.12); }
   .empty-state { text-align: center; color: var(--dim);
     padding: 4rem 1rem; font-size: var(--fs-md); }
   .empty-state h2 { color: var(--fg); font-size: var(--fs-lg);
