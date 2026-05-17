@@ -1141,7 +1141,6 @@ def _enrich_group(g: dict[str, Any]) -> dict[str, Any]:
     g["merged_words"] = _build_merged_words(
         members, int(g["inter_segment_silence_ms"]),
         merged_lead_trim_ms=int(g.get("merged_lead_trim_ms") or 0),
-        merged_trail_trim_ms=int(g.get("merged_trail_trim_ms") or 0),
         merged_duration_ms=int(g.get("merged_duration_ms") or 0),
     )
     # Effective duration mirrors the singleton field: equals
@@ -1329,7 +1328,6 @@ def _build_merged_words(
     silence_ms: int,
     *,
     merged_lead_trim_ms: int = 0,
-    merged_trail_trim_ms: int = 0,
     merged_duration_ms: int | None = None,
 ) -> list[dict[str, Any]]:
     """Project each member's per-word timestamps onto the merged-audio
@@ -1339,13 +1337,12 @@ def _build_merged_words(
     and the single-capture karaoke band's expectation).
 
     When the merged WAV was VAD-trimmed at merge time, `merged_lead_trim_ms`
-    + `merged_trail_trim_ms` shift the produced times so the karaoke
-    aligns with the trimmed audio:
+    shifts produced times so the karaoke aligns with the trimmed audio
+    (trail trimming is captured via `merged_duration_ms` clamping):
       - Subtract `merged_lead_trim_ms / 1000` from every word's start/end.
       - Drop words whose interval falls entirely outside the trimmed
         clip's [0, effective_duration_s] range; clamp partial overlaps.
-    Un-trimmed groups (lead = trail = 0) take the no-op path and
-    behaviour matches the pre-trim implementation.
+    Un-trimmed groups (lead = 0, duration = full) take the no-op path.
 
     `get_members` strips heavy fields for the list view, so we re-fetch
     each capture to get `words`. Each member's words are run through
@@ -1389,7 +1386,6 @@ def _build_merged_words(
                 "start":      s_clamped,
                 "end":        max(s_clamped, e_clamped),
                 "member_idx": i,
-                "member_id":  m["id"],
             }
             if w.get("raw_word"):
                 entry["raw_word"] = w["raw_word"]
@@ -2924,6 +2920,14 @@ _CAPTURES_HTML = r"""<!doctype html>
 
   function buildBody(body, r) {
     body.innerHTML = '';
+    // Release prior state's blob URL + audio if buildBody runs again for
+    // a row whose card was rebuilt by render() while open (the new card's
+    // dataset.built is '0', so toggleExpand re-runs buildBody).
+    var prior = _openRows[r.id];
+    if (prior) {
+      if (prior.blobUrl) { try { URL.revokeObjectURL(prior.blobUrl); } catch(_) {} }
+      if (prior.audio) { try { prior.audio.pause(); } catch(_) {} }
+    }
     var state = {
       cid: r.id,
       audio: null,
@@ -4128,10 +4132,8 @@ _CAPTURES_HTML = r"""<!doctype html>
             settingsHint.textContent =
               'changes pending — Save or Regenerate to rebuild audio';
             settingsHint.style.color = 'var(--cyan)';
-            if (regenBtn) regenBtn.classList.add('cta');
           } else {
             settingsHint.textContent = '';
-            if (regenBtn) regenBtn.classList.remove('cta');
           }
         }
         joinSel.addEventListener('change', refreshSettingsHint);
