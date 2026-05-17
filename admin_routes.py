@@ -3335,12 +3335,12 @@ function render() {
     const h = document.createElement('h2');
     h.textContent = g.title;
     sec.appendChild(h);
-    // Each group now has subgroups; iterate them. A subgroup with title===null
-    // emits no subheader (back-compat with old single-list layout). A subgroup
-    // WITH a title is wrapped in <details>/<summary> so the admin can collapse
-    // long-tail "Advanced —" sections; open/closed state persists in
-    // localStorage keyed by `adv.global.{group}.{sub}`.
-    for (const sub of (g.subgroups || [{ title: null, fields: g.fields || [] }])) {
+    // Each group has subgroups; iterate them. A subgroup with title===null
+    // emits no subheader. A subgroup WITH a title is wrapped in
+    // <details>/<summary> so the admin can collapse long-tail "Advanced —"
+    // sections; open/closed state persists in localStorage keyed by
+    // `adv.global.{group}.{sub}`.
+    for (const sub of g.subgroups) {
       const fieldsWrap = document.createElement('div');
       fieldsWrap.className = 'group-fields';
       for (const fname of sub.fields) {
