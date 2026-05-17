@@ -15,6 +15,13 @@ Conventions:
 import os
 
 
+# Directory holding this config file — used to anchor default paths for the
+# log file and the per-feature SQLite stores. Hoisted because the literal
+# `os.path.dirname(os.path.abspath(__file__))` recurred at 5 sites below.
+# Underscore-prefixed so it's excluded from _BASELINE / the admin UI.
+_REPO_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
 # =============================================================================
 # Models
 # =============================================================================
@@ -367,7 +374,7 @@ PIPELINE_RULES: list[dict] = [
 
 # Default log file path lives next to this file in logs/. Changing it doesn't
 # require the directory to exist; main.py creates it at startup.
-LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "whisper.log")
+LOG_FILE = os.path.join(_REPO_DIR, "logs", "whisper.log")
 
 # Rotation: 10 MB per file, keep 10 historical files (~100 MB max).
 LOG_MAX_BYTES = 10 * 1024 * 1024
@@ -608,9 +615,7 @@ STATS_ALLOWED_HOSTS: "list[str]" = ["127.0.0.1", "::1"]
 
 # DB file path. Default sits next to config.local.json. SQLite uses three
 # files at runtime (.sqlite3, -wal, -shm); .gitignore matches all three.
-REPORTS_DB = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "reports.local.sqlite3"
-)
+REPORTS_DB = os.path.join(_REPO_DIR, "reports.local.sqlite3")
 
 # Soft cap. On overflow upsert_report() evicts oldest closed reports first
 # (resolved/dismissed), then oldest open. Tune lower for memory-tight LAN
@@ -644,9 +649,7 @@ REPORTS_ALLOW_USER_SUBMIT = True
 # operator can paste it into Vowen / curl immediately. The variable is read
 # once and never persisted in plaintext; only the SHA-256 hash hits disk.
 
-API_KEYS_DB = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "api_keys.local.sqlite3"
-)
+API_KEYS_DB = os.path.join(_REPO_DIR, "api_keys.local.sqlite3")
 
 # If set, on startup we insert (or no-op) a user named `bootstrap-admin`
 # with this exact raw key. NEVER stored in config.local.json. Operator
@@ -676,12 +679,8 @@ BOOTSTRAP_ADMIN_KEY: "str | None" = None
 # (existing rows visible).
 CAPTURE_RECORDINGS_ENABLED = False
 
-CAPTURES_DB = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "captures.local.sqlite3"
-)
-CAPTURES_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "captures"
-)
+CAPTURES_DB = os.path.join(_REPO_DIR, "captures.local.sqlite3")
+CAPTURES_DIR = os.path.join(_REPO_DIR, "captures")
 
 # Soft caps. On overflow, _evict_to_cap drops rows in priority order:
 # dismissed → audio_missing → reviewed → new → ready. Training-quality
@@ -756,11 +755,17 @@ CAPTURES_VAD_TRIM_MARGIN_MS = 300
 
 # Snapshot the in-file defaults BEFORE config.local.json + env overrides apply.
 # Used by main.py's request log block to mark non-default scalar values with
-# `*` so the operator can see at a glance which knobs are overridden.
-_BASELINE: "dict[str, object]" = {
+# `*` so the operator can see at a glance which knobs are overridden — and
+# by the admin UI's "↺ Reset" button to recover the in-repo default. Deep-copy
+# because the env-override block below mutates MODEL_OVERRIDES IN PLACE via
+# setdefault(); a shallow snapshot would keep the same dict reference and the
+# "default" handed to the WebUI would silently carry env-injected overrides.
+import copy as _copy
+_BASELINE: "dict[str, object]" = _copy.deepcopy({
     k: v for k, v in globals().items()
     if k.isupper() and not k.startswith("_")
-}
+})
+del _copy
 
 
 # =============================================================================
@@ -1107,7 +1112,7 @@ def _coerce_override_value(field: str, raw: str) -> object:
         "REPETITION_PENALTY", "PROMPT_RESET_ON_TEMPERATURE",
         "LANGUAGE_DETECTION_THRESHOLD", "HALLUCINATION_SILENCE_THRESHOLD",
     }
-    list_fields = {"PIPELINE_RULES_EXCLUDE", "CAPTURES_PIPELINE_RULES_EXCLUDE"}
+    list_fields = {"PIPELINE_RULES_EXCLUDE"}
     if field in bool_fields:
         return raw == "1"
     if field in int_fields:
