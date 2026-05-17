@@ -502,14 +502,6 @@ def _F(name: str, **kwargs: Any) -> Any:
 _MODEL_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.\-]*(/[A-Za-z0-9_.\-]+)?$"
 ModelId = Annotated[str, Field(min_length=1, max_length=96, pattern=_MODEL_ID_PATTERN)]
 
-# Loose pattern for dictation-map keys: letters, digits, spaces, basic
-# punctuation, and German diacritics. Capped length keeps the regex small.
-# Note: main.py calls re.escape() on every key before regex compile, so the
-# pattern here is for hygiene (catching typos) rather than injection defense.
-_DICTATION_KEY_PATTERN = r"^[\w \-.,!?ßẞÄÖÜäöü]{1,64}$"
-DictKey = Annotated[str, Field(min_length=1, max_length=64, pattern=_DICTATION_KEY_PATTERN)]
-DictVal = Annotated[str, Field(max_length=64)]
-
 LogLevel = Literal["debug", "info", "warning", "error", "critical"]
 DeviceLit = Literal["cuda", "cpu"]
 ComputeLit = Literal["float16", "int8_float16", "int8", "float32", "bfloat16"]
@@ -993,21 +985,6 @@ class AdminConfig(BaseModel):
                         f"Valid: {sorted(canonical)}."
                     )
         return self
-
-    @field_validator("MODEL_OVERRIDES")
-    @classmethod
-    def _validate_overrides_keys(
-        cls, v: dict[str, Any] | None
-    ) -> dict[str, Any] | None:
-        """Reject empty keys / null values; the per-key ModelId pattern is
-        already enforced by the dict-key Annotated type. Empty override
-        bundles (no fields set) are allowed — they're ignored at runtime."""
-        if v is None:
-            return v
-        for k in v:
-            if not k or not k.strip():
-                raise ValueError("MODEL_OVERRIDES keys must be non-empty model ids")
-        return v
 
     @field_validator("CONVERT_QUANTIZATION")
     @classmethod
