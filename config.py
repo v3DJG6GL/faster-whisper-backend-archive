@@ -841,7 +841,7 @@ def _env_csv_list(name: str, current: list[str]) -> list[str]:
         return current
     return [s.strip() for s in raw.split(",") if s.strip()]
 
-DEFAULT_MODEL = os.environ.get("WHISPER_DEFAULT_MODEL", DEFAULT_MODEL)
+DEFAULT_MODEL = _env_str_passthrough("WHISPER_DEFAULT_MODEL", DEFAULT_MODEL)
 
 _env_allowed = os.environ.get("WHISPER_ALLOWED_MODELS")
 if _env_allowed is not None:
@@ -854,12 +854,11 @@ PRELOAD_MODELS = _env_csv_list("WHISPER_PRELOAD_MODELS", PRELOAD_MODELS)
 
 DEFAULT_PROMPT = _env_str_or_none("WHISPER_DEFAULT_PROMPT", DEFAULT_PROMPT)
 
-TRACE_ENABLED = os.environ.get("WHISPER_TRACE", "1" if TRACE_ENABLED else "0") == "1"
+TRACE_ENABLED = _env_bool("WHISPER_TRACE", TRACE_ENABLED)
 
-LOG_FILE = os.environ.get("WHISPER_LOG_FILE", LOG_FILE)
+LOG_FILE = _env_str_passthrough("WHISPER_LOG_FILE", LOG_FILE)
 
-# WHISPER_ADMIN_UI: "1" to enable, anything else (or unset) to disable.
-ADMIN_UI_ENABLED = os.environ.get("WHISPER_ADMIN_UI", "1" if ADMIN_UI_ENABLED else "0") == "1"
+ADMIN_UI_ENABLED = _env_bool("WHISPER_ADMIN_UI", ADMIN_UI_ENABLED)
 
 # --- API key auth -----------------------------------------------------------
 API_KEYS_DB = _env_str("WHISPER_API_KEYS_DB", API_KEYS_DB)
