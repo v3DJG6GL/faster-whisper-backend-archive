@@ -348,7 +348,7 @@ def _postprocess_text(text: str, model_name: "str | None" = None,
             if isinstance(inc, list):
                 include = set(inc)
     if extra_excludes:
-        exclude = exclude | set(extra_excludes)
+        exclude = exclude | extra_excludes
     for ordinal, rule in enumerate(_COMPILED_RULES, start=1):
         # Force-EXCLUDE wins outright — admin explicitly turned this off.
         if rule.name in exclude:
