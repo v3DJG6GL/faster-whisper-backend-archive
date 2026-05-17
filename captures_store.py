@@ -617,9 +617,7 @@ def iter_captures_for_export(
 ):
     """Generator yielding capture rows (full payload incl. words) in
     deterministic order. Used by the export endpoint to stream a tarball
-    without holding the whole result set in memory. Each iteration takes
-    a short lock for the SELECT, then releases it; subsequent rows are
-    fetched lazily via the cursor."""
+    without holding the whole result set in memory."""
     conn = _require_conn()
     where = ""
     params: list[Any] = []
