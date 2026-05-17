@@ -764,7 +764,7 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
   /* Generic dark button styling for unclassed <button> elements (Add /
      Cancel in custom-rule dialog, "+ Add custom rule", etc.). Scoped to
      not override existing classed buttons (.reset-link, .delete-btn,
-     .expand-btn, .add-row button, header button, .modal button, etc.). */
+     .expand-btn, header button, .modal button, etc.). */
   main button:not([class]) {
     background: #21262d; color: var(--fg);
     border: 1px solid var(--border); border-radius: 4px;
@@ -784,11 +784,6 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
   .cb-list { display: flex; flex-direction: column; gap: 0.4rem; }
   .cb-row  { display: flex; gap: 0.5rem; align-items: center; cursor: pointer; }
   .err { color: var(--red); font-size: var(--fs-xs); margin-top: 0.1875rem; }
-  /* Field row dimming when a parent toggle makes this row irrelevant.
-     pointer-events stays alive so the user can still see the contents and
-     edit if they want — we just signal "this is currently unused". */
-  .field.dep-irrelevant { opacity: 0.45; }
-  .field.dep-irrelevant .input-col { filter: grayscale(0.6); }
   /* Collapsible subgroup heading: smaller than h2, lighter weight, with
      a small dividing line so it's visibly distinct from the section
      header. Native disclosure-triangle is suppressed — list-style: none
@@ -818,7 +813,6 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
     font-style: italic; text-decoration: underline; text-underline-offset: 2px; }
   .reset-link:hover { color: var(--bold); }
   /* Regex editor + status badge */
-  .regex-wrap { display: flex; flex-direction: column; gap: 0.25rem; }
   .regex-status { font-size: var(--fs-xs); font-family: var(--font-mono); }
   .regex-status.ok { color: var(--green); }
   .regex-status.err { color: var(--red); }
@@ -832,8 +826,6 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
     border-radius: 4px; padding: 0.625rem 0.75rem; margin: 0.5rem 0 0.875rem 0; }
   .regex-test-panel textarea { resize: vertical; max-width: 100%; }
   .regex-test-out { margin-top: 0.625rem; }
-  .field .dep-note { color: var(--dim); font-size: var(--fs-xs); margin-top: 0.1875rem;
-    font-style: italic; }
   /* Pipeline rules editor */
   .pipeline-rules-wrap { display: flex; flex-direction: column; gap: 0.375rem; }
   .rule-list { display: flex; flex-direction: column; gap: 0.25rem; }
@@ -917,19 +909,6 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
   /* Nullable-number editor in its disabled (null) state — greyed input,
      enable/disable button labelled accordingly. */
   .nullable-wrap input:disabled { opacity: 0.4; cursor: not-allowed; }
-  table.dict { width: 100%; border-collapse: collapse; }
-  table.dict th, table.dict td { border: 1px solid var(--border); padding: 0.25rem 0.5rem;
-    text-align: left; }
-  table.dict th { background: #1c2129; color: var(--dim); font-weight: 500; font-size: var(--fs-xs); }
-  table.dict td input { width: 100%; box-sizing: border-box; background: transparent;
-    color: var(--fg); border: none; padding: 0;
-    font-size: inherit; line-height: inherit; }
-  table.dict td input:focus { outline: 1px solid var(--cyan); outline-offset: -1px; }
-  table.dict button.del { background: transparent; border: 1px solid var(--border);
-    color: var(--red); padding: 0.125rem 0.375rem; border-radius: 3px; cursor: pointer; font-size: var(--fs-xs); }
-  .add-row { margin-top: 0.375rem; }
-  .add-row button { background: #21262d; border: 1px solid var(--border); color: var(--fg);
-    padding: 0.1875rem 0.625rem; border-radius: 4px; cursor: pointer; font: inherit; }
   .modal { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: none;
     align-items: center; justify-content: center; z-index: 100; }
   .modal.show { display: flex; }
@@ -995,8 +974,6 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
   .mo-sidebar-toggle input[type="checkbox"] { flex-shrink: 0; }
   .mo-sidebar-toggle .mo-toggle-label { color: var(--bold);
     font-size: var(--fs-sm); flex: 1; min-width: 0; }
-  .mo-sidebar-toggle .mo-toggle-hint { color: var(--dim);
-    font-size: var(--fs-xs); font-style: italic; }
   .mo-list-add { margin-top: 0.4rem; padding-top: 0.4rem;
     border-top: 1px solid var(--border); }
   .mo-list-add select { width: 100%; box-sizing: border-box;
@@ -1061,8 +1038,7 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
     box-sizing: border-box; }
   .mo-inherits { color: var(--dim); font-style: italic;
     font-size: var(--fs-sm); }
-  /* Diff-to-global mode: dim rows whose value matches the resolved global.
-     Reuses the same opacity/grayscale recipe as .field.dep-irrelevant. */
+  /* Diff-to-global mode: dim rows whose value matches the resolved global. */
   .mo-mainpane.diff-mode .mo-row[data-matches-global="true"] {
     opacity: 0.45; filter: grayscale(0.6); }
   /* Pipeline rules (scoping only) inherit the same diff-mode treatment as
@@ -1664,7 +1640,6 @@ function modelOverridesEditor(name, v) {
       const globalVal = globalValue(f);
       const matches = !isOverridden ||
         JSON.stringify(overrideVal) === JSON.stringify(globalVal);
-      row.dataset.overridden = isOverridden ? 'true' : 'false';
       row.dataset.matchesGlobal = matches ? 'true' : 'false';
       const dot = row.querySelector('.mo-dot');
       if (dot) {
@@ -1917,7 +1892,6 @@ function modelOverridesEditor(name, v) {
     // editor uses data-field on its rows; we use data-mo-field to keep the
     // jump-link selectors unambiguous.
     row.dataset.moField = field;
-    row.dataset.overridden = isOverridden ? 'true' : 'false';
     // matches-global: not overridden, OR overridden but the value happens to
     // equal the global. The latter is degenerate but cheap to detect, and
     // useful — the row is functionally inherited.
