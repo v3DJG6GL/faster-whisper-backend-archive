@@ -1,9 +1,12 @@
 """Background job: re-run the current PIPELINE_RULES over every
-existing capture's `raw` text and update `final`.
+existing capture's `raw` text and update `final` + `text_for_training`.
 
 Scope:
-  - Touches `final` only. `corrected_text` (admin free-form ground
-    truth) and `corrections_json` (chip corrections, index-based and
+  - Touches `final` and `text_for_training` (the latter is rebuilt
+    with the captures-specific `CAPTURES_PIPELINE_RULES_EXCLUDE` set,
+    or copied from `final` when no excludes are configured).
+    `corrected_text` (admin free-form ground truth) and
+    `corrections_json` (chip corrections, index-based and
     rule-independent) stay untouched.
   - For each affected member that belongs to an unlocked group,
     rebuild the group's snapshot `transcript` from the current member
