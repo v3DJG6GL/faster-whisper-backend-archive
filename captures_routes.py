@@ -960,11 +960,9 @@ def _insert_group_with_gid(
     row — every read re-projects from members — so no chip plumbing
     appears here."""
     import capture_groups_store
-    import json as _json
-    import time as _time
 
     relpath = capture_groups_store._relpath_for(gid)
-    now = _time.time()
+    now = time.time()
     conn = capture_groups_store._require_conn()
     with capture_groups_store._lock:
         with conn:
@@ -979,7 +977,7 @@ def _insert_group_with_gid(
                 (
                     gid, user_id, now, relpath, int(duration_ms),
                     transcript, join_strategy,
-                    _json.dumps(member_hash_map, sort_keys=True),
+                    json.dumps(member_hash_map, sort_keys=True),
                     int(silence_ms),
                     language or None,
                     int(lead_trim_ms or 0),
@@ -1468,8 +1466,7 @@ async def patch_group_api(
             member_ids=[m["id"] for m in members],
             silence_ms=int(patch["inter_segment_silence_ms"]),
         )
-        import json as _json
-        patch["member_hashes_json"] = _json.dumps(hashes, sort_keys=True)
+        patch["member_hashes_json"] = json.dumps(hashes, sort_keys=True)
         patch["merged_duration_ms"] = duration_ms
         patch["merged_lead_trim_ms"] = int(lead_trim_ms or 0)
         patch["merged_trail_trim_ms"] = int(trail_trim_ms or 0)
@@ -1507,7 +1504,6 @@ async def regenerate_group_api(
     """Rebuild the merged WAV from current member content, refresh
     hashes, clear `is_stale`. Transcript is preserved (admin's edits stay)."""
     import capture_groups_store
-    import json as _json
     g = capture_groups_store.get_group(gid)
     if g is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "group not found")
@@ -1522,7 +1518,7 @@ async def regenerate_group_api(
     updated = capture_groups_store.update_group(gid, {
         "is_stale": 0,
         "merged_duration_ms": duration_ms,
-        "member_hashes_json": _json.dumps(hashes, sort_keys=True),
+        "member_hashes_json": json.dumps(hashes, sort_keys=True),
         "merged_lead_trim_ms": int(lead_trim_ms or 0),
         "merged_trail_trim_ms": int(trail_trim_ms or 0),
     })
@@ -2868,7 +2864,8 @@ _CAPTURES_HTML = r"""<!doctype html>
     preview.style.overflow = 'hidden';
     preview.style.textOverflow = 'ellipsis';
     preview.textContent =
-      _applyChipsToText(r.final || r.raw || '', r.corrections || [])
+      _applyChipsToText(
+        r.text_for_training || r.final || r.raw || '', r.corrections || [])
       || r.raw
       || '(empty)';
     card.appendChild(preview);
@@ -4506,8 +4503,6 @@ _CAPTURES_HTML = r"""<!doctype html>
     list.innerHTML = '';
     // Build a merged timeline: ungrouped captures + group cards (members
     // are nested inside group cards, so we exclude them from the flat list).
-    var groupsById = {};
-    _allGroups.forEach(function(g) { groupsById[g.id] = g; });
     var ungrouped = rows.filter(function(r) { return !r.group_id; });
     // Apply the same status filter to groups. `audio_missing` is a
     // captures-only system status — groups don't have it, so the
