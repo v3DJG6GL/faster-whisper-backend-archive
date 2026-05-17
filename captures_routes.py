@@ -155,12 +155,10 @@ async def list_captures_api(
         status=status_filter, limit=limit, before_ts=before_ts,
         user_id=effective_user,
     )
+    # Per-row pipeline self-heal happens in get_capture_api (expand) only.
+    # Running it here would be 2 _postprocess_text calls × `limit` rows per
+    # list render, which dominates response time on /captures with limit=500.
     for r in rows:
-        _refresh_final_if_stale(r)
-        # Expose effective_duration_seconds so the duration pill on the
-        # list view matches what the audio player actually plays for
-        # trimmed captures. Words/segments aren't included in this
-        # endpoint (list view drops them), so this is a no-op for those.
         _apply_trim_to_capture_row(r)
         r["username"] = api_keys_store.get_username(r.get("user_id"))
     return JSONResponse({
@@ -252,6 +250,7 @@ async def list_groups_api(
         # expanded card + export). Members fetched once per group; no
         # merged_words on the list path — that's expand-only.
         members = capture_groups_store.get_members(g["id"])
+        _hydrate_members(members)
         g["transcript"] = _build_default_transcript(
             members, g.get("transcript_join_strategy") or "space",
         )
@@ -385,7 +384,6 @@ async def patch_capture_api(cid: str, payload: PatchCaptureIn) -> JSONResponse:
             # Three-way merge: apply the user's deltas to the current
             # DB state, not just replace. Protects against concurrent
             # report cascades and cross-tab admin saves.
-            import text_corrections
             cap_now = captures_store.get_capture(cid) or {}
             current = cap_now.get("corrections") or []
             baseline = [c.model_dump() for c in payload.baseline_corrections]
@@ -595,10 +593,8 @@ async def reprocess_capture_api(cid: str) -> JSONResponse:
         patch["final"] = new_final
     if new_training != (row.get("text_for_training") or ""):
         patch["text_for_training"] = new_training
-    if patch:
-        captures_store.update_capture(cid, patch)
-    updated = captures_store.get_capture(cid) or row
-    return JSONResponse({"capture": updated, "changed": list(patch.keys())})
+    updated = captures_store.update_capture(cid, patch) if patch else row
+    return JSONResponse({"capture": updated or row, "changed": list(patch.keys())})
 
 
 @router.post(
@@ -1010,6 +1006,20 @@ async def get_group_api(
     return JSONResponse({"group": _enrich_group(g)})
 
 
+def _hydrate_members(members: list[dict[str, Any]]) -> None:
+    """Populate `words` (decoded) and `model` on each member dict in
+    place by fetching the full capture row once. `capture_groups_store.
+    get_members` drops words_json/model to keep the projection light;
+    the chip/karaoke helpers below need both. Idempotent — skips members
+    that already carry the fields."""
+    for m in members:
+        if "words" in m and "model" in m:
+            continue
+        cap = captures_store.get_capture(m["id"]) or {}
+        m["words"] = cap.get("words") or []
+        m["model"] = cap.get("model")
+
+
 def _project_member_corrections(
     members: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -1020,15 +1030,13 @@ def _project_member_corrections(
     member m is Σ_{j<m} len(words_j) — silence gaps contribute no
     words, so they don't shift the index.
 
-    The chip schema stays {wrong, correct, idx, idx_end} — identical to
-    today's group corrections, so the existing renderer + edit flow
-    handle the migrated chips with no changes."""
+    Callers must run `_hydrate_members(members)` first so each member
+    carries `words`."""
     out: list[dict[str, Any]] = []
     offset = 0
     for m in members:
-        cap = captures_store.get_capture(m["id"]) or {}
-        words = cap.get("words") or []
-        for c in (cap.get("corrections") or []):
+        words = m.get("words") or []
+        for c in (m.get("corrections") or []):
             try:
                 idx = int(c["idx"]) + offset
             except (TypeError, ValueError, KeyError):
@@ -1062,8 +1070,7 @@ def _split_corrections_to_members(
     last word."""
     word_counts: list[int] = []
     for m in members:
-        cap = captures_store.get_capture(m["id"]) or {}
-        word_counts.append(len(cap.get("words") or []))
+        word_counts.append(len(m.get("words") or []))
     offsets = [0]
     for n in word_counts[:-1]:
         offsets.append(offsets[-1] + n)
@@ -1111,6 +1118,7 @@ def _enrich_group(g: dict[str, Any]) -> dict[str, Any]:
     in-DB chip storage needed at the group level."""
     import capture_groups_store
     members = capture_groups_store.get_members(g["id"])
+    _hydrate_members(members)
     for m in members:
         _refresh_final_if_stale(m)
         m["username"] = api_keys_store.get_username(m.get("user_id"))
@@ -1232,13 +1240,21 @@ def _align_words_to_final(
     except Exception:
         return [_clone_word(w) for w in src]
 
+    # Memo: many captures repeat the same raw token (filler words, punctuation
+    # carriers). Without the cache, _postprocess_text runs O(N) times per
+    # caller and dominates karaoke-band assembly when /captures expands a
+    # group with hundreds of words.
+    post_cache: dict[str, str] = {}
     raw_keys: list[str] = []
     for w in src:
         raw_w = w.get("word") or ""
-        try:
-            post_w = main._postprocess_text(raw_w, model_name=model_name)
-        except Exception:
-            post_w = raw_w
+        post_w = post_cache.get(raw_w)
+        if post_w is None:
+            try:
+                post_w = main._postprocess_text(raw_w, model_name=model_name)
+            except Exception:
+                post_w = raw_w
+            post_cache[raw_w] = post_w
         raw_keys.append(_align_key(post_w) or _align_key(raw_w))
 
     fin_tokens = (final or "").split()
@@ -1332,11 +1348,10 @@ def _build_merged_words(
     cum = 0.0
     for i, m in enumerate(members):
         offset = cum + i * silence_s - lead_s
-        cap = captures_store.get_capture(m["id"]) or {}
         ws = _align_words_to_final(
-            cap.get("words") or [],
-            cap.get("final") or "",
-            model_name=cap.get("model"),
+            m.get("words") or [],
+            m.get("final") or "",
+            model_name=m.get("model"),
         )
         for w in ws:
             start = w.get("start")
@@ -1416,9 +1431,9 @@ async def patch_group_api(
         # clobbered by the user's payload, and the user's deltas
         # (additions, removals, edits) are applied on top.
         members_now = capture_groups_store.get_members(gid)
+        _hydrate_members(members_now)
         edited = [c.model_dump() for c in payload.corrections]
         if payload.baseline_corrections is not None:
-            import text_corrections
             baseline = [c.model_dump() for c in payload.baseline_corrections]
             current = _project_member_corrections(members_now)
             edited = text_corrections.three_way_merge_corrections(
@@ -1431,7 +1446,7 @@ async def patch_group_api(
     if rebuild_audio:
         # Re-run the merge with the new silence. Member set is unchanged.
         members = capture_groups_store.get_members(gid)
-        duration_ms, hashes = _build_merged_wav(
+        duration_ms, hashes, lead_trim_ms, trail_trim_ms = _build_merged_wav(
             gid=gid,
             member_ids=[m["id"] for m in members],
             silence_ms=int(patch["inter_segment_silence_ms"]),
@@ -1439,6 +1454,8 @@ async def patch_group_api(
         import json as _json
         patch["member_hashes_json"] = _json.dumps(hashes, sort_keys=True)
         patch["merged_duration_ms"] = duration_ms
+        patch["merged_lead_trim_ms"] = int(lead_trim_ms or 0)
+        patch["merged_trail_trim_ms"] = int(trail_trim_ms or 0)
         patch["is_stale"] = 0
 
     # Always derive `transcript` from current members + chips. The UI
@@ -3691,10 +3708,6 @@ _CAPTURES_HTML = r"""<!doctype html>
 
   function onExport() {
     var tok = getToken();
-    if (!tok && hasAdminToken) {
-      showTokenModal(function() { onExport(); });
-      return;
-    }
     fetch('/captures/api/export?only_status=ready&include_audio=1', {
       headers: tok ? { 'Authorization': 'Bearer ' + tok } : {},
     }).then(function(resp) {
@@ -3774,8 +3787,6 @@ _CAPTURES_HTML = r"""<!doctype html>
   // -------------------------------------------------------------------
   // Load
   // -------------------------------------------------------------------
-  var hasAdminToken = false;
-
   async function load() {
     try {
       var j = await api('GET', '/captures/api/list?status=all&limit=500');
@@ -3813,7 +3824,6 @@ _CAPTURES_HTML = r"""<!doctype html>
   // Merge modal
   // -------------------------------------------------------------------
   var JOIN_STR = { space: ' ', period_space: '. ' };
-  function _seamMarker() { return '¶'; }   // ¶
 
   function _applyChipsToText(text, corrections) {
     // Mirror of Python _apply_chips_to_text — walk chips in idx order
@@ -4514,7 +4524,6 @@ _CAPTURES_HTML = r"""<!doctype html>
   }
 
   // Override render() to also draw group cards interleaved by created_ts.
-  var _originalRender = render;
   render = function() {
     var rows = applyFilters(_allCaptures);
     var list = document.getElementById('list');
