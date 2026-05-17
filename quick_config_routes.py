@@ -1008,8 +1008,7 @@ function renderTrace(entry) {
 
   // Action row: "Report" button + (conditional) "✓ reported" badge.
   // The inline form is lazy — built on first click, kept in DOM after
-  // submit so subsequent visits see the badge. The `open` class on the
-  // form is what gates the pushTrace re-render guard.
+  // submit so subsequent visits see the badge.
   const actions = document.createElement('div');
   actions.className = 'trace-actions';
   const reportBtn = document.createElement('button');
