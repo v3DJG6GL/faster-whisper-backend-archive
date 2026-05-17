@@ -1472,8 +1472,8 @@ async def transcribe(
         try:
             audio_content = await file.read()
             with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file.filename or "")[1]) as tmp_file:
-                tmp_file.write(audio_content)
                 tmp_path = tmp_file.name
+                tmp_file.write(audio_content)
 
             # word_timestamps: AND of the (per-model-overrideable) global
             # config knob and the per-request ask. Disabled (False) bypasses
