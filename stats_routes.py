@@ -5,7 +5,7 @@ Routes (all gated by web_common.require_allowed_host(cfg.STATS_ALLOWED_HOSTS)):
 
   GET /stats           HTML page (single-file inline-HTML+CSS+JS, mirrors /logs)
   GET /stats/snapshot  one-shot JSON: metrics_snapshot() + system_snapshot()
-  GET /stats/stream    SSE: same JSON, ~1 Hz, with periodic ': keepalive\\n\\n'
+  GET /stats/stream    SSE: same JSON, ~1 Hz (1 s data cadence defeats idle-proxy timeouts; no separate keepalive frame)
 
 Access control: loopback always allowed; cfg.STATS_ALLOWED_HOSTS adds
 extra IPs/CIDRs. The dependency reads cfg at request time so the admin

@@ -215,7 +215,6 @@ header > .header-inner { display: flex; gap: 0.75rem; align-items: center;
   padding: 0.5rem 0.875rem; box-sizing: border-box; }
 header .title { font-weight: 600; color: var(--bold);
   white-space: nowrap; flex-shrink: 0; }
-header .spacer { flex: 1; }
 
 header { container-type: inline-size; container-name: hdr; }
 header > .header-inner { flex-wrap: wrap; row-gap: 0.4rem; }

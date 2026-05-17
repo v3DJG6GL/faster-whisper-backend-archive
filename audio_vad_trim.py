@@ -143,7 +143,7 @@ def trim_wav(
     try:
         with wave.open(tmp_path, "wb") as w:
             w.setnchannels(1)
-            w.setsampwidth(audio_merge.BYTES_PER_SAMPLE)
+            w.setsampwidth(audio_merge._REQ_SAMPWIDTH_BYTES)
             w.setframerate(_REQ_RATE)
             w.writeframes(out_bytes)
         try:

@@ -9,10 +9,7 @@ mean a dead Play button on the /captures page.
 """
 from __future__ import annotations
 
-import logging
 import os
-
-logger = logging.getLogger("whisper-api")
 
 _OUT_RATE = 16000
 _OUT_LAYOUT = "mono"
