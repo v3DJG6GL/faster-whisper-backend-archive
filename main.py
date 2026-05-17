@@ -2112,13 +2112,11 @@ _LOG_VIEWER_HTML = """<!doctype html>
       el.classList.remove('hidden');
     }
   }
-  // The server emits `__LIVE_TAIL__` between the initial 500-line backlog
-  // and the live poll loop. We render the backlog but skip it for severity
-  // accounting — pill counts are driven by the shared SEV_POLLER_JS hitting
-  // /sev every 5 s (server-side severity_counts() is the source of truth).
-  let liveTail = false;
   function append(line) {
-    if (line === '__LIVE_TAIL__') { liveTail = true; return; }
+    // __LIVE_TAIL__ sentinel marks the boundary between backlog and the
+    // live poll loop; client-side severity counting was removed when
+    // pill counts moved to SEV_POLLER_JS / server-side severity_counts.
+    if (line === '__LIVE_TAIL__') return;
     const el = document.createElement('span');
     const cls = classify(line);
     el.className = 'line ' + cls;
