@@ -361,9 +361,9 @@ def recent_reports_for_user(
     the user previously submitted, even after a hard reload.
 
     Filtered by user_id so other users' reports never leak into a
-    different user's /quick-config view. status='open' matches the
-    badge-id query above (resolved/dismissed reports don't trigger the
-    '✓ reported' badge either)."""
+    different user's /quick-config view. status='open' is what the
+    /quick-config UI treats as "still reported" (resolved/dismissed
+    reports don't trigger the '✓ reported' badge either)."""
     if not user_id:
         return []
     conn = _require_conn()
