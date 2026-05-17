@@ -165,7 +165,6 @@ NAV_CSS = """
   --help: #8b949e;
 }
 html { font-size: var(--fs-base); color-scheme: dark; }
-header .spacer { flex: 1; }
 header .navrow { display: flex; gap: 0.25rem; }
 header .navlink { padding: 0.1875rem 0.625rem; border-radius: 4px; color: var(--dim);
   text-decoration: none; font-size: var(--fs-sm); border: 1px solid transparent;

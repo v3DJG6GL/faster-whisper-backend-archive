@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import time
 from typing import Any
 
@@ -30,8 +29,6 @@ import config as cfg
 import metrics
 import system_stats
 import web_common
-
-logger = logging.getLogger("whisper-api")
 
 router = APIRouter()
 
@@ -787,10 +784,14 @@ function openStream() {
 }
 
 // Visibility handler: closes the SSE on hidden tabs to defeat the browser's
-// 6-connection-per-origin cap. Reopens on visible.
+// 6-connection-per-origin cap. Reopens on visible. Also cancels any in-flight
+// recovery poll — otherwise a poll that succeeds in the background would
+// openStream() concurrently with the visibility re-open, racing two
+// EventSources for the same gid until one was orphaned.
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') {
     if (es) { try { es.close(); } catch {} es = null; }
+    if (recoveryTimer) { clearInterval(recoveryTimer); recoveryTimer = null; }
     setStatus('paused (hidden)', 'paused');
   } else {
     openStream();
