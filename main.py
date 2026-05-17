@@ -2020,7 +2020,7 @@ _LOG_VIEWER_HTML = """<!doctype html>
      No max-width: log content uses the full viewport so long lines (HF
      URLs, model paths) sit on a single line on wide monitors instead of
      wrapping into the empty side-bands. The header bar stays centered at
-     1100px (its own .header-inner cap) so controls remain in a predictable
+     68.75rem (its own .header-inner cap) so controls remain in a predictable
      spot. pre-wrap still wraps lines that genuinely exceed the viewport.
      font-size = global rem * --log-zoom is the multiplicative log-only
      zoom; bumping the global picker grows logs and chrome together, and
