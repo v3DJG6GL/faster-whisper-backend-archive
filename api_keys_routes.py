@@ -111,13 +111,13 @@ async def revoke_user_api(uid: str) -> JSONResponse:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "user not found")
     if user["revoked_ts"] is not None:
         return JSONResponse({"ok": True, "already_revoked": True})
-    # Last-admin guard: refuse if this would zero out active admins.
-    if user["is_admin"] and api_keys_store.count_active_admins() <= 1:
+    try:
+        api_keys_store.revoke_user(uid)
+    except api_keys_store.LastAdminError as e:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            "refusing to revoke the last admin user — create another admin first",
+            f"{e} — create another admin first",
         )
-    api_keys_store.revoke_user(uid)
     return JSONResponse({"ok": True})
 
 
@@ -155,16 +155,13 @@ async def revoke_key_api(uid: str, kid: str) -> JSONResponse:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "key not found")
     if key["revoked_ts"] is not None:
         return JSONResponse({"ok": True, "already_revoked": True})
-    user = api_keys_store.get_user(uid)
-    # Last-admin-key guard.
-    if user and user["is_admin"] and \
-            api_keys_store.count_active_admin_keys() <= 1:
+    try:
+        api_keys_store.revoke_key(kid)
+    except api_keys_store.LastAdminError as e:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            "refusing to revoke the last active admin key — generate another"
-            " admin key first",
+            f"{e} — generate another admin key first",
         )
-    api_keys_store.revoke_key(kid)
     return JSONResponse({"ok": True})
 
 

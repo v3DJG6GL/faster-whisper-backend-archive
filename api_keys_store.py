@@ -37,6 +37,14 @@ from typing import Any
 
 logger = logging.getLogger("whisper-api")
 
+
+class LastAdminError(Exception):
+    """Raised when revoke_user / revoke_key would leave zero active
+    admins (or active admin keys). The guard is enforced atomically
+    under _lock so two concurrent revokes can't both pass a count==2
+    check and double-revoke into a lockout."""
+
+
 _lock = threading.Lock()
 _conn: sqlite3.Connection | None = None
 _db_path: str | None = None
@@ -279,12 +287,27 @@ def get_usernames(user_ids: "list[str | None]") -> "dict[str, str | None]":
 
 
 def revoke_user(user_id: str) -> None:
-    """Soft-delete a user and revoke all their keys. Last-admin guard
-    must be checked by the caller — this function unconditionally
-    revokes."""
+    """Soft-delete a user and revoke all their keys. Raises
+    LastAdminError if the target is an active admin and revoking would
+    leave zero active admins — checked atomically under _lock so a
+    concurrent second revoke can't slip through."""
     now = time.time()
     conn = _require_conn()
     with _lock:
+        row = conn.execute(
+            "SELECT is_admin FROM users WHERE id = ? AND revoked_ts IS NULL",
+            (user_id,),
+        ).fetchone()
+        if row and int(row["is_admin"]) == 1:
+            row2 = conn.execute(
+                "SELECT COUNT(*) FROM users"
+                " WHERE id != ? AND is_admin = 1 AND revoked_ts IS NULL",
+                (user_id,),
+            ).fetchone()
+            if int(row2[0]) == 0:
+                raise LastAdminError(
+                    "refusing to revoke the last admin user"
+                )
         conn.execute(
             "UPDATE users SET revoked_ts = ? WHERE id = ? AND revoked_ts IS NULL",
             (now, user_id),
@@ -296,26 +319,6 @@ def revoke_user(user_id: str) -> None:
         )
         _rebuild_index_locked()
     logger.info("[auth] user revoked id=%s", user_id[:8])
-
-
-def count_active_admins() -> int:
-    """Return the number of users with is_admin=1 AND revoked_ts IS NULL."""
-    conn = _require_conn()
-    row = conn.execute(
-        "SELECT COUNT(*) FROM users WHERE is_admin = 1 AND revoked_ts IS NULL"
-    ).fetchone()
-    return int(row[0]) if row else 0
-
-
-def count_active_admin_keys() -> int:
-    """Active admin keys = keys whose user is_admin AND both rows are active.
-    Used by the last-admin-key guard on revoke."""
-    conn = _require_conn()
-    row = conn.execute(
-        "SELECT COUNT(*) FROM api_keys k JOIN users u ON u.id = k.user_id"
-        " WHERE k.revoked_ts IS NULL AND u.revoked_ts IS NULL AND u.is_admin = 1"
-    ).fetchone()
-    return int(row[0]) if row else 0
 
 
 # ---------------------------------------------------------------------
@@ -394,10 +397,28 @@ def get_key(key_id: str) -> dict[str, Any] | None:
 
 
 def revoke_key(key_id: str) -> None:
-    """Soft-revoke. Last-admin-key guard is the caller's responsibility."""
+    """Soft-revoke a key. Raises LastAdminError if this is the last
+    active admin key — checked atomically under _lock so two concurrent
+    revokes of admin keys can't both pass a count==2 check."""
     now = time.time()
     conn = _require_conn()
     with _lock:
+        row = conn.execute(
+            "SELECT u.is_admin FROM api_keys k JOIN users u ON u.id = k.user_id"
+            " WHERE k.id = ? AND k.revoked_ts IS NULL AND u.revoked_ts IS NULL",
+            (key_id,),
+        ).fetchone()
+        if row and int(row["is_admin"]) == 1:
+            row2 = conn.execute(
+                "SELECT COUNT(*) FROM api_keys k JOIN users u ON u.id = k.user_id"
+                " WHERE k.id != ? AND k.revoked_ts IS NULL"
+                " AND u.revoked_ts IS NULL AND u.is_admin = 1",
+                (key_id,),
+            ).fetchone()
+            if int(row2[0]) == 0:
+                raise LastAdminError(
+                    "refusing to revoke the last active admin key"
+                )
         conn.execute(
             "UPDATE api_keys SET revoked_ts = ?"
             " WHERE id = ? AND revoked_ts IS NULL",
