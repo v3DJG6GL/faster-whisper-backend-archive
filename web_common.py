@@ -510,7 +510,26 @@ const _PIPELINE_TYPES = [
 ];
 const _typePill = (t) => (_PIPELINE_TYPES.find(x => x.type === t) || {}).pill || t;
 
-function _makeMonoLabeledInput(label, val, onInput) {
+// Bind Enter-to-commit on a text input. When `onEnter` is provided and the
+// user presses Enter, defer one tick before firing — if the input's value
+// changed during that tick, the user picked a datalist suggestion (native
+// behavior); skip the commit and let the next Enter fire it. Otherwise
+// invoke onEnter. Browsers update <input list> values synchronously when a
+// suggestion is selected, so a one-tick defer is enough to distinguish.
+function _bindEnterCommit(inp, onEnter) {
+  if (!onEnter) return;
+  inp.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    const before = inp.value;
+    setTimeout(() => {
+      if (inp.value !== before) return;  // datalist pick — defer
+      onEnter();
+    }, 0);
+  });
+}
+
+function _makeMonoLabeledInput(label, val, onInput, onEnter) {
   const lbl = document.createElement('div');
   lbl.className = 'help';
   lbl.textContent = label + ':';
@@ -520,12 +539,13 @@ function _makeMonoLabeledInput(label, val, onInput) {
   inp.autocomplete = 'off';
   inp.value = val == null ? '' : val;
   inp.addEventListener('input', () => onInput(inp.value));
+  _bindEnterCommit(inp, onEnter);
   const wrap = document.createElement('div');
   wrap.appendChild(lbl); wrap.appendChild(inp);
   return wrap;
 }
 
-function _makeMapRow(rule, key, val, commitData, datalistId) {
+function _makeMapRow(rule, key, val, commitData, datalistId, onEnter) {
   const tr = document.createElement('tr');
   const td1 = document.createElement('td');
   const td2 = document.createElement('td');
@@ -559,6 +579,8 @@ function _makeMapRow(rule, key, val, commitData, datalistId) {
   }
   ki.addEventListener('input', rebuild);
   vi.addEventListener('input', rebuild);
+  _bindEnterCommit(ki, onEnter);
+  _bindEnterCommit(vi, onEnter);
   const del = document.createElement('button');
   del.type = 'button'; del.textContent = '×';
   del.addEventListener('click', () => {
@@ -575,9 +597,21 @@ function _makeMapRow(rule, key, val, commitData, datalistId) {
 }
 
 function renderTypeEditor(rule, commitData, opts) {
-  // opts (optional): { datalistId } — passed through to _makeMapRow for
-  // cb:map autocomplete on /quick-config. Other rule types ignore opts.
+  // opts (optional):
+  //   datalistId      — passed through to _makeMapRow for cb:map autocomplete
+  //                     on /quick-config. Other rule types ignore.
+  //   makeSaveBtn     — `() => HTMLButtonElement` factory. When provided, the
+  //                     editor appends a per-rule Save button. /quick-config
+  //                     passes a factory closed over the global dirty Set;
+  //                     /config (admin) omits this opt → no per-card Save.
+  //   commitOnEnter   — `() => void` callback. When provided, pressing Enter
+  //                     inside any text input in this editor fires it (after
+  //                     a one-tick guard for native datalist picks). Skipped
+  //                     for the cb:wordlist textarea (Enter inserts newline)
+  //                     and the terminal type (no inputs). /quick-config
+  //                     passes `doSave`; admin /config omits → Enter inert.
   opts = opts || {};
+  const onEnter = opts.commitOnEnter;
   const box = document.createElement('div');
   box.className = 'rule-editor';
 
@@ -594,17 +628,18 @@ function renderTypeEditor(rule, commitData, opts) {
   if (rule.type === 'regex') {
     box.appendChild(_makeMonoLabeledInput('pattern', rule.pattern, (v) => {
       rule.pattern = v; commitData();
-    }));
+    }, onEnter));
     box.appendChild(_makeMonoLabeledInput('replacement', rule.replacement, (v) => {
       rule.replacement = v; commitData();
-    }));
+    }, onEnter));
+    if (opts.makeSaveBtn) box.appendChild(opts.makeSaveBtn());
     return box;
   }
 
   if (rule.type === 'callback:lowercase-wordlist') {
     box.appendChild(_makeMonoLabeledInput('pattern', rule.pattern, (v) => {
       rule.pattern = v; commitData();
-    }));
+    }, onEnter));
     const wlLbl = document.createElement('div');
     wlLbl.className = 'help';
     wlLbl.textContent = 'Wordlist (one entry per line, case-insensitive):';
@@ -616,7 +651,10 @@ function renderTypeEditor(rule, commitData, opts) {
       rule.wordlist = ta.value.split('\n').map(s => s.trim()).filter(Boolean);
       commitData();
     });
+    // Intentionally NO Enter binding on the wordlist textarea — Enter must
+    // insert a newline so users can edit multi-line lists.
     box.appendChild(ta);
+    if (opts.makeSaveBtn) box.appendChild(opts.makeSaveBtn());
     return box;
   }
 
@@ -630,12 +668,12 @@ function renderTypeEditor(rule, commitData, opts) {
     tbl.className = 'map-table';
     tbl.style.width = '100%';
     const rows = Object.entries(rule.map || {});
-    rows.forEach(([k, v]) => tbl.appendChild(_makeMapRow(rule, k, v, commitData, opts.datalistId)));
+    rows.forEach(([k, v]) => tbl.appendChild(_makeMapRow(rule, k, v, commitData, opts.datalistId, onEnter)));
     box.appendChild(tbl);
     const addBtn = document.createElement('button');
     addBtn.type = 'button';
     addBtn.textContent = '+ add entry';
-    addBtn.style.marginTop = '0.4rem';
+    addBtn.style.flex = '1';
     addBtn.addEventListener('click', () => {
       // Append a new <tr> directly so the surrounding row body stays
       // expanded and other expanded rows keep their input state.
@@ -646,7 +684,7 @@ function renderTypeEditor(rule, commitData, opts) {
       // input's rebuild listener (an empty row contributes nothing
       // to the saved dict).
       if (!rule.map) rule.map = {};
-      const newTr = _makeMapRow(rule, '', '', commitData, opts.datalistId);
+      const newTr = _makeMapRow(rule, '', '', commitData, opts.datalistId, onEnter);
       tbl.appendChild(newTr);
       // Focus + open the autocomplete dropdown immediately so the user
       // sees recent-transcription candidates without a second click.
@@ -659,20 +697,27 @@ function renderTypeEditor(rule, commitData, opts) {
         try { ki.showPicker(); } catch (_) { /* unsupported */ }
       }
     });
-    box.appendChild(addBtn);
+    // Pair addBtn + saveBtn in a flex row so they sit side-by-side near
+    // the bottom of the map table.
+    const btnRow = document.createElement('div');
+    btnRow.style.cssText = 'display:flex;gap:0.5rem;align-items:center;margin-top:0.4rem;';
+    btnRow.appendChild(addBtn);
+    if (opts.makeSaveBtn) btnRow.appendChild(opts.makeSaveBtn());
+    box.appendChild(btnRow);
     return box;
   }
 
   if (rule.type === 'callback:dedup' || rule.type === 'callback:upper') {
     box.appendChild(_makeMonoLabeledInput('pattern', rule.pattern, (v) => {
       rule.pattern = v; commitData();
-    }));
+    }, onEnter));
     const note = document.createElement('div');
     note.className = 'help';
     note.textContent = rule.type === 'callback:dedup'
       ? 'Callback: collapse each match — last non-comma wins; pure-comma run → single comma.'
       : 'Callback: uppercase group(2) (or whole match if pattern has fewer than 2 groups).';
     box.appendChild(note);
+    if (opts.makeSaveBtn) box.appendChild(opts.makeSaveBtn());
     return box;
   }
 

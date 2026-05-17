@@ -176,13 +176,6 @@ def record_trace(
     _broadcast({"event": "trace", "data": entry})
 
 
-def clear() -> None:
-    """Wipe the ring buffer and broadcast a clear event so all open
-    /quick-config tabs flush their UI."""
-    recent_traces.clear()
-    _broadcast({"event": "clear", "data": {}})
-
-
 def subscribe() -> asyncio.Queue:
     """Register a new SSE subscriber. Caller MUST call unsubscribe()
     in a finally block when the connection ends."""

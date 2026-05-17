@@ -10,7 +10,6 @@ Mounted at /quick-config. Endpoints:
   GET  /quick-config/reapply-rules/status Poll bulk-reapply job state
   GET  /quick-config/recent               Snapshot of the recent-traces ring buffer
   GET  /quick-config/stream               SSE stream of recent traces (live updates)
-  POST /quick-config/recent/clear         Wipe the recent-traces buffer
 
 Security model:
   1. IP gate:           require_admin_host (loopback always permitted)
@@ -412,9 +411,8 @@ async def stream_recent(request: Request) -> StreamingResponse:
 
     On connect, replays the current buffer (`event: trace` for each entry,
     oldest first). After the replay, pushes any new transcription as
-    another `event: trace`. Sends an empty `event: clear` when the admin
-    wipes the buffer. Sends a `: keepalive` SSE comment line every 15 s
-    so reverse proxies don't kill an idle connection."""
+    another `event: trace`. Sends a `: keepalive` SSE comment line every
+    15 s so reverse proxies don't kill an idle connection."""
     async def gen():
         q = quick_config_state.subscribe()
         try:
@@ -434,23 +432,6 @@ async def stream_recent(request: Request) -> StreamingResponse:
             quick_config_state.unsubscribe(q)
 
     return StreamingResponse(gen(), media_type="text/event-stream")
-
-
-@router.post(
-    "/recent/clear",
-    dependencies=[Depends(require_admin_host)],
-)
-async def clear_recent(
-    user: dict[str, Any] = Depends(get_current_user),
-) -> JSONResponse:
-    """Manual kill-switch for the recent-traces buffer. Broadcasts a
-    `clear` event so all open /quick-config tabs flush their UI."""
-    quick_config_state.clear()
-    logger.info(
-        "[quick-config] recent-traces buffer cleared by user=%s",
-        user.get("username"),
-    )
-    return JSONResponse({"ok": True})
 
 
 _QUICK_CONFIG_HTML = r"""<!doctype html>
@@ -747,9 +728,7 @@ _QUICK_CONFIG_HTML = r"""<!doctype html>
   <section id="recent-panel">
     <div class="recent-header">
       <h2>Recent transcriptions</h2>
-      <span class="recent-label" title="Held in server memory, capped at 20. Wiped on service restart or by the 'clear recent' button. Survives page reloads.">in-memory only, max 20, cleared on service restart</span>
-      <span class="spacer"></span>
-      <button id="clear-recent">clear recent</button>
+      <span class="recent-label" title="Held in server memory, capped at 20. Wiped on service restart. Survives page reloads.">in-memory only, max 20, cleared on service restart</span>
     </div>
     <div id="recent-list">
       <div class="empty-recent">No transcriptions yet — they'll appear here as you dictate.</div>
@@ -857,17 +836,34 @@ function commitData(slug) {
   dirty.add(slug);
   updateButtons();
 }
+// Per-card Save buttons, keyed by rule slug. Rebuilt on every renderCards()
+// so an entry only ever refers to a button currently in the DOM.
+let _perCardSaveBtns = new Map();
+function _buildPerCardSaveBtn(slug) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'primary';
+  btn.textContent = 'save';
+  btn.disabled = !dirty.has(slug);
+  btn.addEventListener('click', doSave);
+  _perCardSaveBtns.set(slug, btn);
+  return btn;
+}
 function updateButtons() {
   const has = dirty.size > 0;
   document.getElementById('save-btn').disabled = !has;
   document.getElementById('discard-btn').disabled = !has;
   setStatus(has ? (dirty.size + ' rule' + (dirty.size === 1 ? '' : 's') + ' modified')
                 : (initialRules.length + ' rule' + (initialRules.length === 1 ? '' : 's') + ' loaded'));
+  for (const [slug, btn] of _perCardSaveBtns) {
+    btn.disabled = !dirty.has(slug);
+  }
 }
 
 function renderCards() {
   const root = document.getElementById('cards');
   root.innerHTML = '';
+  _perCardSaveBtns = new Map();  // detach stale refs; GC takes the old DOM
   if (!liveRules.length) {
     const empty = document.createElement('div');
     empty.className = 'empty-state';
@@ -901,8 +897,12 @@ function renderCards() {
     enRow.appendChild(document.createTextNode(' enabled'));
     card.appendChild(enRow);
 
-    const editor = renderTypeEditor(rule, () => commitData(rule.name),
-                                    { datalistId: 'recent-words' });
+    const slug = rule.name;
+    const editor = renderTypeEditor(rule, () => commitData(slug), {
+      datalistId: 'recent-words',
+      makeSaveBtn: () => _buildPerCardSaveBtn(slug),
+      commitOnEnter: doSave,
+    });
     card.appendChild(editor);
 
     root.appendChild(card);
@@ -912,9 +912,9 @@ function renderCards() {
 // ---------- Recent transcriptions panel + autocomplete -------------------
 //
 // SSE-driven. /quick-config/stream replays the buffer on connect (oldest
-// first) then pushes new traces as `event: trace`. A `clear` event wipes
-// the panel + datalist. EventSource auto-reconnects with a 3 s backoff
-// per the WHATWG spec — no custom retry logic needed.
+// first) then pushes new traces as `event: trace`. EventSource auto-
+// reconnects with a 3 s backoff per the WHATWG spec — no custom retry
+// logic needed.
 const _BUFFER_MAX = 20;
 const _MAX_DATALIST = 200;
 let _es = null;
@@ -1567,18 +1567,6 @@ function pushTrace(entry) {
   rebuildDatalist();
 }
 
-function showEmptyRecent() {
-  const list = document.getElementById('recent-list');
-  if (!list) return;
-  list.innerHTML = '<div class="empty-recent">No transcriptions yet '
-    + "&mdash; they'll appear here as you dictate.</div>";
-}
-
-function clearTraces() {
-  showEmptyRecent();
-  rebuildDatalist();
-}
-
 function rebuildDatalist() {
   const dl = document.getElementById('recent-words');
   if (!dl) return;
@@ -1618,28 +1606,12 @@ function startStream() {
   _es.addEventListener('trace', (e) => {
     try { pushTrace(JSON.parse(e.data)); } catch (_) {}
   });
-  _es.addEventListener('clear', () => clearTraces());
   _es.onerror = () => {
     // EventSource auto-reconnects; nothing to do here. If the token is
     // truly bad the server will keep returning 401 and EventSource will
     // give up after a few retries — at which point the page is stale
     // until the user reloads. Acceptable.
   };
-}
-
-async function doClearRecent() {
-  if (!confirm('Clear all recent transcriptions from memory?')) return;
-  try {
-    const r = await api('POST', '/quick-config/recent/clear', {});
-    if (!r.ok) {
-      showToast('clear failed (' + r.status + ')', 'err');
-      return;
-    }
-    // Server broadcasts a 'clear' SSE event; our own listener flushes
-    // the panel. Don't double-clear locally — that'd race the broadcast.
-  } catch (e) {
-    showToast('clear failed: ' + e, 'err');
-  }
 }
 
 // --- Field-level diff helpers (used for both build-patch and conflict re-merge) ---
@@ -1972,7 +1944,6 @@ function doDiscard() {
 
 document.getElementById('save-btn').addEventListener('click', doSave);
 document.getElementById('discard-btn').addEventListener('click', doDiscard);
-document.getElementById('clear-recent').addEventListener('click', doClearRecent);
 
 load().then(() => {
   // Only open the SSE stream after the rules state has loaded — avoids
