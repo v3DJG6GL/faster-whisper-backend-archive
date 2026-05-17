@@ -1415,6 +1415,16 @@ async def patch_group_api(
 
     patch: dict[str, Any] = {}
     rebuild_audio = False
+    # Lazily-fetched hydrated members; up to three branches below need
+    # this list and used to issue independent get_members calls each.
+    _members_cache: list[dict[str, Any]] | None = None
+    def _members() -> list[dict[str, Any]]:
+        nonlocal _members_cache
+        if _members_cache is None:
+            _members_cache = capture_groups_store.get_members(gid)
+            _hydrate_members(_members_cache)
+        return _members_cache
+
     if payload.join_strategy is not None and \
             payload.join_strategy != g["transcript_join_strategy"]:
         patch["transcript_join_strategy"] = payload.join_strategy
@@ -1440,8 +1450,7 @@ async def patch_group_api(
         # concurrent report cascade or cross-tab admin save isn't
         # clobbered by the user's payload, and the user's deltas
         # (additions, removals, edits) are applied on top.
-        members_now = capture_groups_store.get_members(gid)
-        _hydrate_members(members_now)
+        members_now = _members()
         edited = [c.model_dump() for c in payload.corrections]
         if payload.baseline_corrections is not None:
             baseline = [c.model_dump() for c in payload.baseline_corrections]
@@ -1450,12 +1459,19 @@ async def patch_group_api(
                 baseline, edited, current,
             )
         by_member = _split_corrections_to_members(edited, members_now)
+        # Skip members whose chip set didn't change — a 30-member group
+        # with one edited chip otherwise fires 30 UPDATEs where 29 are
+        # idempotent rewrites of the same JSON column.
+        current_by_id = {m["id"]: (m.get("corrections") or []) for m in members_now}
         for member_id, chips in by_member.items():
+            if json.dumps(current_by_id.get(member_id) or [], sort_keys=True) == \
+                    json.dumps(chips, sort_keys=True):
+                continue
             captures_store.update_capture(member_id, {"corrections": chips})
 
     if rebuild_audio:
         # Re-run the merge with the new silence. Member set is unchanged.
-        members = capture_groups_store.get_members(gid)
+        members = _members()
         duration_ms, hashes, lead_trim_ms, trail_trim_ms = _build_merged_wav(
             gid=gid,
             member_ids=[m["id"] for m in members],
@@ -1481,8 +1497,7 @@ async def patch_group_api(
         join_for_derive = patch.get(
             "transcript_join_strategy", g["transcript_join_strategy"] or "space",
         )
-        members_now = capture_groups_store.get_members(gid)
-        patch["transcript"] = _build_default_transcript(members_now, join_for_derive)
+        patch["transcript"] = _build_default_transcript(_members(), join_for_derive)
 
     updated = capture_groups_store.update_group(gid, patch)
     return JSONResponse({"group": _enrich_group(updated)})
@@ -2963,8 +2978,13 @@ _CAPTURES_HTML = r"""<!doctype html>
       if (!resp.ok) throw new Error('HTTP ' + resp.status);
       return resp.blob();
     }).then(function(blob) {
-      state.blobUrl = URL.createObjectURL(blob);
-      audio.src = state.blobUrl;
+      var url = URL.createObjectURL(blob);
+      // If the row was collapsed mid-fetch, `state` is no longer in
+      // _openRows — assigning blobUrl to it would orphan the URL
+      // (no later cleanup sees it). Revoke immediately in that case.
+      if (_openRows[r.id] !== state) { URL.revokeObjectURL(url); return; }
+      state.blobUrl = url;
+      audio.src = url;
     }).catch(function(e) {
       if (e && e.message !== 'unauthorized') {
         toast('Audio load failed: ' + e.message, true);
@@ -3677,12 +3697,20 @@ _CAPTURES_HTML = r"""<!doctype html>
         var j = await api('POST', '/captures/api/clear', { confirm: 'CAPTURES' });
         toast('Cleared ' + j.deleted + ' capture' +
           (j.deleted === 1 ? '' : 's') + '.');
-        // Drop any open blob URLs first
+        // Drop any open blob URLs first — both per-row audio blobs AND
+        // group-card audio (their <audio>.src is also a blob: URL).
         Object.keys(_openRows).forEach(function(cid) {
           var st = _openRows[cid];
           if (st && st.blobUrl) URL.revokeObjectURL(st.blobUrl);
         });
         _openRows = {};
+        Object.keys(_openGroups).forEach(function(gid) {
+          var st = _openGroups[gid];
+          if (st && st.audio && st.audio.src && st.audio.src.indexOf('blob:') === 0) {
+            try { URL.revokeObjectURL(st.audio.src); } catch(_) {}
+          }
+        });
+        _openGroups = {};
         await load();
       } catch (e) {
         if (e.message !== 'unauthorized') toast('Failed: ' + e.message, true);
@@ -3945,6 +3973,12 @@ _CAPTURES_HTML = r"""<!doctype html>
     card.classList.add('open');
     var body = card.querySelector('.cc-body');
     if (body.dataset.built === '1') return;
+    // Guard against concurrent expands on the same group (collapse →
+    // re-expand while the first GET is still in flight) — a second build
+    // would append a second <audio> element whose blob URL the existing
+    // _openGroups tracking can't reach, leaking on render() wipe.
+    if (body.dataset.fetching === '1') return;
+    body.dataset.fetching = '1';
     api('GET', '/captures/api/groups/' + encodeURIComponent(g.id))
       .then(function(j) {
         var detail = j.group || g;
@@ -4152,14 +4186,16 @@ _CAPTURES_HTML = r"""<!doctype html>
               // Narrow PATCH — status only. Concurrent transcript or
               // chip edits in this view stay dirty and persist only on
               // Save click; the three-way-merge path isn't engaged.
-              var j = await api('PATCH',
+              await api('PATCH',
                 '/captures/api/groups/' + encodeURIComponent(g.id),
                 { status: v });
-              // applyServerGroup would overwrite corrections / adminNotes /
-              // notesArea / joinSel / silSel and clearDirty — discarding
-              // the user's unsaved edits. Skip the wholesale resync when
-              // dirty; the local newStatus was already set above.
-              if (j && j.group && !groupState.dirty) applyServerGroup(j.group);
+              // Sync the collapsed-list header so the next render() /
+              // status-filter sees the new status without a full reload.
+              // Status-only PATCH doesn't need (and must not run) the
+              // full applyServerGroup — it would rebuild word strip,
+              // chips, audio, etc. for a single-pill change.
+              var idx = _allGroups.findIndex(function(x) { return x.id === g.id; });
+              if (idx >= 0) _allGroups[idx].status = v;
               reloadCounts();
               toast('Status: ' + v);
             } catch (e) {
@@ -4462,6 +4498,10 @@ _CAPTURES_HTML = r"""<!doctype html>
                 var isLocked = !!d.is_locked;
                 lockBtn.textContent = isLocked ? 'Unlock' : 'Lock';
                 dissolveBtn.style.display = isLocked ? 'none' : '';
+                // Sync the collapsed-list header so the lock-pill in
+                // _renderGroupCard reflects the new state on next render().
+                var idx = _allGroups.findIndex(function(x) { return x.id === g.id; });
+                if (idx >= 0) _allGroups[idx].is_locked = d.is_locked;
               }
               toast('Updated');
             })
@@ -4484,9 +4524,11 @@ _CAPTURES_HTML = r"""<!doctype html>
         // Initial fill.
         applyServerGroup(detail);
         body.dataset.built = '1';
+        body.dataset.fetching = '';
         _openGroups[g.id] = { audio: audio };
       })
       .catch(function(e) {
+        body.dataset.fetching = '';
         card.classList.remove('open');
         if (e && e.message !== 'unauthorized') toast(e.message, true);
       });
@@ -4569,7 +4611,15 @@ _CAPTURES_HTML = r"""<!doctype html>
     document.getElementById('filt-status-wrap').appendChild(grp.root);
   })();
   document.getElementById('filt-model').addEventListener('change', render);
-  document.getElementById('filt-search').addEventListener('input', render);
+  // Debounce search input: render() does a full list rebuild AND each
+  // previously-open row re-runs toggleExpand → triggers a fresh
+  // /captures/api/{cid} GET. Per-keystroke firing storms the server
+  // when the user is typing.
+  var _searchTimer = null;
+  document.getElementById('filt-search').addEventListener('input', function() {
+    if (_searchTimer) clearTimeout(_searchTimer);
+    _searchTimer = setTimeout(function() { _searchTimer = null; render(); }, 150);
+  });
   document.getElementById('btn-refresh').addEventListener('click', load);
   document.getElementById('btn-export').addEventListener('click', onExport);
   document.getElementById('btn-clear').addEventListener('click', onClearAll);
