@@ -2227,10 +2227,11 @@ async def whoami(
 async def severity_snapshot():
     """Tiny JSON endpoint polled by every page's nav-row pill poller.
 
-    Returns the same `severity_counts()` 60-s window the server uses
-    everywhere else (nav HTML render, /stats payload). Wide-open like /logs
-    — three integers, no PII. The poller in web_common.SEV_POLLER_JS hits
-    this every 5 s on /logs, /stats, and /config so all three pages stay
+    Returns the same `severity_counts()` the server uses everywhere else
+    (nav HTML render, /stats payload) — WARNING+ records since process
+    start, bounded by the 2000-entry ring. Wide-open like /logs — three
+    integers, no PII. The poller in web_common.SEV_POLLER_JS hits this
+    every 5 s on /logs, /stats, and /config so all three pages stay
     synced to the server-side truth."""
     import web_common
     return web_common.severity_counts()
