@@ -1051,8 +1051,6 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
   .mo-row .mo-value-cell input[type="number"] { -moz-appearance: textfield; }
   .mo-row .mo-row-ctrl { display: flex; gap: 0.4rem; align-items: center;
     flex-shrink: 0; }
-  .mo-row.mo-row-ref .mo-value-cell { font-family: var(--font-mono);
-    color: var(--fg); font-size: var(--fs-sm); }
   /* Inherit/override dot indicator. Filled cyan = override active, dim
      outline = inherits global. */
   .mo-dot { width: 0.5rem; height: 0.5rem; border-radius: 50%;
@@ -1913,7 +1911,7 @@ function modelOverridesEditor(name, v) {
     const globalVal = globalValue(field);
 
     const row = document.createElement('div');
-    row.className = 'mo-row mo-row-edit';
+    row.className = 'mo-row';
     // Use a distinct attribute (not data-field) so the diff dim selector
     // doesn't collide with the global fieldRow's data-field. The global
     // editor uses data-field on its rows; we use data-mo-field to keep the
