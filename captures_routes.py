@@ -1149,11 +1149,10 @@ def _enrich_group(g: dict[str, Any]) -> dict[str, Any]:
     return g
 
 
-def _refresh_final_if_stale(row: dict[str, Any]) -> str:
+def _refresh_final_if_stale(row: dict[str, Any]) -> None:
     """Recompute `final` AND `text_for_training` from `raw` via the
     current pipeline. If either differs from what's stored, write it
-    back and update the row in place. Returns the (possibly refreshed)
-    final text.
+    back and update the row in place.
 
     This is the per-row self-heal that keeps fetched captures
     rule-current without requiring the user to click "Re-apply rules"
@@ -1165,15 +1164,15 @@ def _refresh_final_if_stale(row: dict[str, Any]) -> str:
     excludes) so reviewers see what the export will emit and chips
     apply against the same text the trainer will consume."""
     raw = row.get("raw") or ""
-    stored_final = row.get("final") or ""
     stored_training = row.get("text_for_training") or ""
     if not raw:
-        return stored_final
+        return
+    stored_final = row.get("final") or ""
     try:
         import main
         fresh_final = main._postprocess_text(raw, model_name=row.get("model"))
     except Exception:
-        return stored_final
+        return
     patch: dict[str, Any] = {}
     if fresh_final != stored_final:
         patch["final"] = fresh_final
@@ -1208,7 +1207,6 @@ def _refresh_final_if_stale(row: dict[str, Any]) -> str:
                 "[captures] self-heal write-back failed for %s: %s",
                 str(row.get("id"))[:8], e,
             )
-    return row.get("final") or stored_final
 
 
 def _align_key(s: str) -> str:
@@ -2912,6 +2910,11 @@ _CAPTURES_HTML = r"""<!doctype html>
       }
     }
     delete _openRows[cid];
+    // Reset body so the next toggleExpand re-fetches and re-binds —
+    // otherwise the audio element keeps its now-revoked blob URL and
+    // the player is dead on second open.
+    var body = card.querySelector('.cc-body');
+    if (body) { body.dataset.built = '0'; body.innerHTML = ''; }
   }
 
   function buildBody(body, r) {
