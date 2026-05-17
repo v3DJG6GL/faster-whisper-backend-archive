@@ -42,7 +42,6 @@ logger = logging.getLogger("whisper-api")
 
 _lock = threading.Lock()
 _conn: sqlite3.Connection | None = None
-_db_path: str | None = None
 _audio_dir: str | None = None
 
 # Field caps.
@@ -149,8 +148,7 @@ CREATE INDEX IF NOT EXISTS idx_captures_group ON captures(group_id, group_order)
 def init(db_path: str, audio_dir: str) -> None:
     """Open the SQLite DB (WAL) and ensure the audio dir exists. Idempotent:
     safe to call on every startup. Call once before any other function."""
-    global _conn, _db_path, _audio_dir
-    _db_path = db_path
+    global _conn, _audio_dir
     _audio_dir = audio_dir
     db_dir = os.path.dirname(os.path.abspath(db_path)) or "."
     os.makedirs(db_dir, exist_ok=True)

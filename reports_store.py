@@ -32,7 +32,6 @@ logger = logging.getLogger("whisper-api")
 
 _lock = threading.Lock()
 _conn: sqlite3.Connection | None = None
-_db_path: str | None = None
 
 # Field caps — applied server-side before insert. raw/final get the
 # generous cap because they're audio-driven and can legitimately be long
@@ -77,8 +76,7 @@ def init_db(path: str) -> None:
     """Open (or create) the report DB at `path` in WAL mode. Idempotent:
     safe to call on every startup; the schema-CREATE statements use
     IF NOT EXISTS. Call before any other function in this module."""
-    global _conn, _db_path
-    _db_path = path
+    global _conn
     dst_dir = os.path.dirname(os.path.abspath(path)) or "."
     os.makedirs(dst_dir, exist_ok=True)
     # isolation_level=None puts pysqlite in autocommit mode; we issue
