@@ -631,7 +631,6 @@ async def reprocess_all_captures_api() -> JSONResponse:
 class CreateGroupIn(BaseModel):
     model_config = {"extra": "forbid"}
     member_ids: list[str] = Field(min_length=2, max_length=30)
-    transcript: str = Field(default="", max_length=20_000)
     join_strategy: Literal["space", "period_space"] = "space"
     silence_ms: int = Field(default=300, ge=0, le=2000)
 
@@ -905,10 +904,7 @@ async def create_group_api(
             f"({(total_audio_ms + total_gap_ms) / 1000:.2f}s)",
         )
 
-    # Synthesize a transcript if the client didn't send one.
-    transcript = payload.transcript.strip() or _build_default_transcript(
-        captures, payload.join_strategy,
-    )
+    transcript = _build_default_transcript(captures, payload.join_strategy)
     duration_ms, hashes, lead_trim_ms, trail_trim_ms = _build_merged_wav(
         gid=gid,
         member_ids=member_ids,
@@ -3882,10 +3878,9 @@ _CAPTURES_HTML = r"""<!doctype html>
     };
     document.getElementById('merge-commit').onclick = function() {
       // Server derives the transcript from members + chips on create
-      // (mirrors the locked preview); we don't send a client-side string.
+      // (mirrors the locked preview).
       var payload = {
         member_ids: rows.map(function(r) { return r.id; }),
-        transcript: '',
         join_strategy: joinSel.value,
         silence_ms: parseInt(silSel.value, 10) || 300,
       };
