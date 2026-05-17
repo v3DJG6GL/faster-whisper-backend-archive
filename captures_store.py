@@ -539,6 +539,10 @@ def _drop_oldest_by_bytes(
             try:
                 abs_t = abs_audio_path(trimmed)
                 drop_paths.append(abs_t)
+                try:
+                    sz += os.path.getsize(abs_t)
+                except OSError:
+                    pass
             except ValueError:
                 pass
         freed += sz
