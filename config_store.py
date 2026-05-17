@@ -373,7 +373,6 @@ FIELD_DESCRIPTIONS: dict[str, str] = {
         "Emit a multi-line trace block per transcription request. Disable "
         "on busy servers to control log volume.",
 
-    # --- Logging ---
     "LOG_FILE":
         "Path to the rotating log file. Parent directory is auto-created "
         "at startup if missing.",

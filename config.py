@@ -975,8 +975,8 @@ if _env_prompt_reset_t is not None:
 # --- Language detection -----------------------------------------------------
 
 _env_multilingual = os.environ.get("WHISPER_MULTILINGUAL")
-if _env_multilingual is not None:
-    MULTILINGUAL = _env_multilingual == "1"
+if _env_multilingual is not None and _env_multilingual.strip():
+    MULTILINGUAL = _truthy(_env_multilingual)
 
 _env_lang_thresh = os.environ.get("WHISPER_LANGUAGE_DETECTION_THRESHOLD")
 if _env_lang_thresh is not None:
@@ -1003,8 +1003,8 @@ if _env_hallu_silence is not None and _env_hallu_silence.strip():
         pass
 
 _env_supp_blank = os.environ.get("WHISPER_SUPPRESS_BLANK")
-if _env_supp_blank is not None:
-    SUPPRESS_BLANK = _env_supp_blank == "1"
+if _env_supp_blank is not None and _env_supp_blank.strip():
+    SUPPRESS_BLANK = _truthy(_env_supp_blank)
 
 _env_supp_tokens = os.environ.get("WHISPER_SUPPRESS_TOKENS")
 if _env_supp_tokens is not None:
@@ -1041,16 +1041,16 @@ if _env_download_root is not None:
     DOWNLOAD_ROOT = _env_download_root or None
 
 _env_local_files_only = os.environ.get("WHISPER_LOCAL_FILES_ONLY")
-if _env_local_files_only is not None:
-    LOCAL_FILES_ONLY = _env_local_files_only == "1"
+if _env_local_files_only is not None and _env_local_files_only.strip():
+    LOCAL_FILES_ONLY = _truthy(_env_local_files_only)
 
 _env_use_auth_token = os.environ.get("WHISPER_USE_AUTH_TOKEN")
 if _env_use_auth_token is not None:
     USE_AUTH_TOKEN = _env_use_auth_token or None
 
 _env_auto_convert = os.environ.get("WHISPER_AUTO_CONVERT_HF_MODELS")
-if _env_auto_convert is not None:
-    AUTO_CONVERT_HF_MODELS = _env_auto_convert == "1"
+if _env_auto_convert is not None and _env_auto_convert.strip():
+    AUTO_CONVERT_HF_MODELS = _truthy(_env_auto_convert)
 
 _env_convert_quant = os.environ.get("WHISPER_CONVERT_QUANTIZATION")
 if _env_convert_quant is not None:
@@ -1091,39 +1091,46 @@ def _decode_model_id(s: str) -> str:
     return s.replace("__SLASH__", "/").replace("__DOT__", ".")
 
 
+# Module-level field-type lookup for _coerce_override_value. Names track
+# ModelOverride (config_store.py) — fields not in this class are pure
+# string passthroughs (TEMPERATURE) or rejected by pydantic at save time.
+_OVERRIDE_BOOL_FIELDS = frozenset({
+    "CONDITION_ON_PREVIOUS_TEXT", "WORD_TIMESTAMPS_ENABLED",
+    "VAD_FILTER", "MULTILINGUAL", "SUPPRESS_BLANK",
+})
+_OVERRIDE_INT_FIELDS = frozenset({
+    "BEAM_SIZE", "BEST_OF", "VAD_MIN_SILENCE_MS", "VAD_SPEECH_PAD_MS",
+    "NO_REPEAT_NGRAM_SIZE", "LANGUAGE_DETECTION_SEGMENTS",
+    "NUM_WORKERS", "DEVICE_INDEX",
+})
+_OVERRIDE_FLOAT_FIELDS = frozenset({
+    "VAD_THRESHOLD", "NO_SPEECH_THRESHOLD", "LOG_PROB_THRESHOLD",
+    "COMPRESSION_RATIO_THRESHOLD", "PATIENCE", "LENGTH_PENALTY",
+    "REPETITION_PENALTY", "PROMPT_RESET_ON_TEMPERATURE",
+    "LANGUAGE_DETECTION_THRESHOLD", "HALLUCINATION_SILENCE_THRESHOLD",
+})
+_OVERRIDE_LIST_FIELDS = frozenset({
+    "PIPELINE_RULES_EXCLUDE", "PIPELINE_RULES_INCLUDE",
+})
+
+
 def _coerce_override_value(field: str, raw: str) -> object:
     """Coerce a raw env-var string to the right type for a ModelOverride field.
     Falls back to the raw string for fields we can't easily classify (the
     pydantic validator will catch type mismatches at save-merge time)."""
-    bool_fields = {
-        "CONDITION_ON_PREVIOUS_TEXT", "WORD_TIMESTAMPS_ENABLED",
-        "VAD_FILTER", "MULTILINGUAL", "SUPPRESS_BLANK", "LOCAL_FILES_ONLY",
-    }
-    int_fields = {
-        "BEAM_SIZE", "BEST_OF", "VAD_MIN_SILENCE_MS", "VAD_SPEECH_PAD_MS",
-        "NO_REPEAT_NGRAM_SIZE", "LANGUAGE_DETECTION_SEGMENTS",
-        "NUM_WORKERS", "DEVICE_INDEX", "CPU_THREADS",
-    }
-    float_fields = {
-        "VAD_THRESHOLD", "NO_SPEECH_THRESHOLD", "LOG_PROB_THRESHOLD",
-        "COMPRESSION_RATIO_THRESHOLD", "PATIENCE", "LENGTH_PENALTY",
-        "REPETITION_PENALTY", "PROMPT_RESET_ON_TEMPERATURE",
-        "LANGUAGE_DETECTION_THRESHOLD", "HALLUCINATION_SILENCE_THRESHOLD",
-    }
-    list_fields = {"PIPELINE_RULES_EXCLUDE"}
-    if field in bool_fields:
-        return raw == "1"
-    if field in int_fields:
+    if field in _OVERRIDE_BOOL_FIELDS:
+        return _truthy(raw)
+    if field in _OVERRIDE_INT_FIELDS:
         try:
             return int(raw)
         except ValueError:
             return raw
-    if field in float_fields:
+    if field in _OVERRIDE_FLOAT_FIELDS:
         try:
             return float(raw)
         except ValueError:
             return raw
-    if field in list_fields:
+    if field in _OVERRIDE_LIST_FIELDS:
         return [s.strip() for s in raw.split(",") if s.strip()]
     return raw
 
