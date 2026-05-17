@@ -180,24 +180,37 @@ def find_by_request_user(
 
 
 def _merge_corrections(existing: list, incoming: list) -> list:
-    """Merge two cleaned corrections lists, keyed on idx (the word
-    position). Newer (incoming) entries override older ones with the
-    same idx; unique-idx entries from both lists survive."""
-    by_idx: dict[Any, dict[str, Any]] = {}
-    for c in (existing or []):
-        if isinstance(c, dict):
-            by_idx[c.get("idx")] = c
-    for c in (incoming or []):
-        if isinstance(c, dict):
-            by_idx[c.get("idx")] = c
-    # Preserve idx ordering (numeric first, None last).
+    """Merge two cleaned corrections lists. Anchored chips key on
+    `(idx, idx_end)` so multi-word chips at the same start idx but
+    with different spans don't collide. Anchorless chips (no integer
+    idx) dedupe on `(wrong, correct)` so multiple free-form chips don't
+    collapse onto a single (None, None) key. Incoming wins on key match."""
+    anchored: dict[tuple[int, int], dict[str, Any]] = {}
+    anchorless: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def _ingest(items):
+        for c in (items or []):
+            if not isinstance(c, dict):
+                continue
+            i = c.get("idx")
+            if isinstance(i, int):
+                e = c.get("idx_end")
+                anchored[(i, e if isinstance(e, int) else i)] = c
+            else:
+                anchorless[(str(c.get("wrong") or ""), str(c.get("correct") or ""))] = c
+
+    _ingest(existing)
+    _ingest(incoming)
+
     def _sort_key(c):
         i = c.get("idx")
         try:
             return (0, int(i))
         except (TypeError, ValueError):
             return (1, 0)
-    return sorted(by_idx.values(), key=_sort_key)
+    return sorted(anchored.values(), key=_sort_key) + sorted(
+        anchorless.values(), key=_sort_key,
+    )
 
 
 def upsert_report(

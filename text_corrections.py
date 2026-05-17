@@ -84,36 +84,50 @@ def three_way_merge_corrections(
           keep whatever `current` has at that key (which may itself be
           a concurrent edit).
 
-    Merge key is `(idx, idx_end)` with idx_end defaulting to idx, so
-    single-word chips key as (idx, idx) and multi-word chips at the
-    same start idx but with different spans stay separate.
-
-    Tie-breaker note: when the user removes V and a concurrent write
-    inserted a different chip at the same (idx, idx_end), the user's
-    remove wins. Collisions on identical span are rare and the user's
-    explicit save is the stronger signal.
-
-    Returns a sorted list (numeric idx ascending, None-idx last) so the
-    output is deterministic — same convention as
-    reports_store._merge_corrections."""
-    def key(c: dict[str, Any]) -> tuple[Any, Any]:
+    Merge key is `(idx, idx_end)` with idx_end defaulting to idx for
+    anchored chips. Anchorless chips (no integer `idx`) bypass the
+    three-way delta — they have no positional identity, so attempting
+    to match baseline-edit pairs collapses every (None, None) entry into
+    one and silently drops chips. Instead, the result keeps every
+    anchorless chip from `current` plus every anchorless chip from
+    `edited` (deduplicated by `(wrong, correct)`)."""
+    def key(c: dict[str, Any]) -> "tuple[int, int] | None":
         i = c.get("idx")
-        e = c.get("idx_end") if c.get("idx_end") is not None else i
-        return (i, e)
+        if not isinstance(i, int):
+            return None
+        e = c.get("idx_end")
+        return (i, e if isinstance(e, int) else i)
 
-    base_map = {key(c): c for c in (baseline or []) if isinstance(c, dict)}
-    edit_map = {key(c): c for c in (edited or []) if isinstance(c, dict)}
-    out = {key(c): c for c in (current or []) if isinstance(c, dict)}
+    def _anchorless_id(c: dict[str, Any]) -> tuple[str, str]:
+        return (str(c.get("wrong") or ""), str(c.get("correct") or ""))
 
-    for k in set(base_map) | set(edit_map):
-        in_b = k in base_map
-        in_e = k in edit_map
+    def _split(items):
+        anchored: dict[tuple[int, int], dict[str, Any]] = {}
+        anchorless: dict[tuple[str, str], dict[str, Any]] = {}
+        for c in (items or []):
+            if not isinstance(c, dict):
+                continue
+            k = key(c)
+            if k is None:
+                anchorless[_anchorless_id(c)] = c
+            else:
+                anchored[k] = c
+        return anchored, anchorless
+
+    base_anc, _ = _split(baseline)
+    edit_anc, edit_free = _split(edited)
+    cur_anc, cur_free = _split(current)
+
+    out = dict(cur_anc)
+    for k in set(base_anc) | set(edit_anc):
+        in_b = k in base_anc
+        in_e = k in edit_anc
         if in_b and not in_e:
             out.pop(k, None)
         elif in_e and not in_b:
-            out[k] = edit_map[k]
-        elif base_map[k] != edit_map[k]:
-            out[k] = edit_map[k]
+            out[k] = edit_anc[k]
+        elif base_anc[k] != edit_anc[k]:
+            out[k] = edit_anc[k]
         # else: chip key in both with equal payload — user untouched it;
         # keep whatever `current` has so concurrent edits at that key
         # survive.
@@ -124,4 +138,10 @@ def three_way_merge_corrections(
             return (0, int(i))
         except (TypeError, ValueError):
             return (1, 0)
-    return sorted(out.values(), key=_sort_key)
+
+    # Anchorless chips: union current + edited, deduped by (wrong, correct).
+    # Edited entries win on collision (latest user submission overwrites).
+    merged_free = {**cur_free, **edit_free}
+    return sorted(out.values(), key=_sort_key) + sorted(
+        merged_free.values(), key=_sort_key,
+    )
