@@ -1187,7 +1187,7 @@ def save_overrides(payload: dict[str, Any], path: str = OVERRIDES_PATH) -> dict[
 
     merged = _strip_deprecated(merged)
     validated = AdminConfig.model_validate(merged)
-    to_write = validated.model_dump(exclude_none=True, mode="json")  # JSON-friendly tuples
+    to_write = validated.model_dump(exclude_none=True, mode="json")
 
     dst_dir = os.path.dirname(os.path.abspath(path)) or "."
     os.makedirs(dst_dir, exist_ok=True)

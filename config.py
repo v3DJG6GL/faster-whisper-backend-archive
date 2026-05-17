@@ -835,7 +835,9 @@ def _env_str_passthrough(name: str, current: str) -> str:
     return raw if raw is not None else current
 
 def _env_csv_list(name: str, current: list[str]) -> list[str]:
-    """Comma-separated list parse — empty / unset → keep current."""
+    """Comma-separated list parse — unset → keep current; explicitly-empty
+    env (e.g. WHISPER_PRELOAD_MODELS="") → empty list. Callers that need
+    "empty → keep current" wrap the result with `or current`."""
     raw = os.environ.get(name)
     if raw is None:
         return current
