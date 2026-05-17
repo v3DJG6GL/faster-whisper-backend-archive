@@ -209,7 +209,7 @@ header .scale-picker {
 header { position: sticky; top: 0; background: var(--panel);
   border-bottom: 1px solid var(--border); z-index: 10; padding: 0; }
 header > .header-inner { display: flex; gap: 0.75rem; align-items: center;
-  max-width: 1100px; margin: 0 auto; width: 100%;
+  max-width: 68.75rem; margin: 0 auto; width: 100%;
   padding: 0.5rem 0.875rem; box-sizing: border-box; }
 header .title { font-weight: 600; color: var(--bold);
   white-space: nowrap; flex-shrink: 0; }
