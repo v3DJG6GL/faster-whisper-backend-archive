@@ -16,7 +16,8 @@ Two surfaces:
   Mutating routes use Depends(require_admin) — admin-only API keys.
 
 Per-user rate limit on submission: in-memory fixed-window counter
-keyed on the resolved user_id from the API key.
+keyed on the resolved user_id from the API key, falling back to
+request.client.host when no user_id is present.
 """
 from __future__ import annotations
 
@@ -306,8 +307,11 @@ async def delete_my_report_api(
     capture sharing the request_id (filtered against surviving reports
     from other users, so we don't strip chips someone else still
     claims)."""
-    # find_by_request_user returns None for falsy user_id (open-mode), so
-    # the 404 path is the same — no sentinel string needed.
+    # find_by_request_user returns None when user_id is falsy (e.g. an
+    # unauthenticated caller); the 404 path below covers both that and
+    # an authenticated caller whose user_id has no matching report row.
+    # In open mode user_id is the literal "(open-mode)" sentinel — a
+    # real value — so the query runs and matches the admin's own row.
     existing = reports_store.find_by_request_user(
         request_id, user.get("user_id"),
     )
