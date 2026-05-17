@@ -700,14 +700,14 @@ def _format_request_block(
 #
 # Set WHISPER_ALLOWED_MODELS to restrict which model names are accepted (a
 # comma-separated allowlist; empty = anything goes, useful on a private LAN).
-import asyncio as _asyncio_for_models
+import asyncio
 from collections import OrderedDict
 
 # Source: cfg.DEFAULT_MODEL / cfg.ALLOWED_MODELS / cfg.MAX_LOADED_MODELS.
 
 # Insertion order = LRU order (oldest at front). move_to_end on hit.
 _loaded_models: "OrderedDict[str, WhisperModel]" = OrderedDict()
-_model_load_lock = _asyncio_for_models.Lock()
+_model_load_lock = asyncio.Lock()
 
 
 # =============================================================================
@@ -845,8 +845,8 @@ _CT2_QUANTIZATIONS = {
 }
 
 # Per-model asyncio locks for conversion. Lazy-populated.
-_convert_locks: "dict[str, _asyncio_for_models.Lock]" = {}
-_convert_locks_meta = _asyncio_for_models.Lock()
+_convert_locks: "dict[str, asyncio.Lock]" = {}
+_convert_locks_meta = asyncio.Lock()
 
 
 def _converted_root() -> str:
@@ -968,7 +968,7 @@ async def _ensure_ct2_model(name: str) -> str:
     # a given model proceeds within this worker, without serialising loads
     # of OTHER models behind a global lock.
     async with _convert_locks_meta:
-        lk = _convert_locks.setdefault(name, _asyncio_for_models.Lock())
+        lk = _convert_locks.setdefault(name, asyncio.Lock())
     async with lk:
         # Re-check inside the lock — another coroutine may have just finished.
         if os.path.isfile(os.path.join(output_dir, "model.bin")):
@@ -982,7 +982,7 @@ async def _ensure_ct2_model(name: str) -> str:
                 # Re-check after winning the cross-process race.
                 if os.path.isfile(os.path.join(output_dir, "model.bin")):
                     return output_dir
-                loop = _asyncio_for_models.get_running_loop()
+                loop = asyncio.get_running_loop()
                 await loop.run_in_executor(
                     None, _convert_blocking, name, output_dir, quantization,
                 )
@@ -1039,7 +1039,7 @@ async def _get_or_load_model(name: str) -> WhisperModel:
             _drop_loaded_model(evicted_name)
 
         logger.info("Loading model: %s", name)
-        loop = _asyncio_for_models.get_running_loop()
+        loop = asyncio.get_running_loop()
         # NVML delta sampling: compare GPU memory before/after construction
         # to estimate this model's VRAM footprint. Done under
         # _model_load_lock so concurrent loads can't pollute the delta.
@@ -1170,7 +1170,7 @@ async def _idle_evictor() -> None:
     import gc
     try:
         while True:
-            await _asyncio_for_models.sleep(30)
+            await asyncio.sleep(30)
             timeout = getattr(cfg, "MODEL_IDLE_TIMEOUT_S", 0) or 0
             if timeout <= 0 or not _loaded_models:
                 continue
@@ -1198,7 +1198,7 @@ async def _idle_evictor() -> None:
                     torch.cuda.empty_cache()
             except Exception:
                 pass
-    except _asyncio_for_models.CancelledError:
+    except asyncio.CancelledError:
         return
 
 
@@ -1210,9 +1210,9 @@ async def _reports_retention_loop() -> None:
     import reports_store
     while True:
         try:
-            await _asyncio_for_models.sleep(3600)
+            await asyncio.sleep(3600)
             reports_store.sweep_retention()
-        except _asyncio_for_models.CancelledError:
+        except asyncio.CancelledError:
             raise
         except Exception as _re:
             logger.error("[reports] retention loop error: %s", _re)
@@ -1224,9 +1224,9 @@ async def _captures_retention_loop() -> None:
     import captures_store
     while True:
         try:
-            await _asyncio_for_models.sleep(3600)
+            await asyncio.sleep(3600)
             captures_store.sweep_retention()
-        except _asyncio_for_models.CancelledError:
+        except asyncio.CancelledError:
             raise
         except Exception as _ce:
             logger.error("[captures] retention loop error: %s", _ce)
@@ -1308,7 +1308,7 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error("Failed to preload model '%s': %s", name, e)
 
-    evictor_task = _asyncio_for_models.create_task(_idle_evictor())
+    evictor_task = asyncio.create_task(_idle_evictor())
 
     # Open the API-keys SQLite store and start the open-mode warning loop.
     # In OPEN mode (no admin key exists yet) the loop nags every 60 s; this
@@ -1328,7 +1328,7 @@ async def lifespan(app: FastAPI):
             "API keys store initialized at %s (locked_down=%s)",
             cfg.API_KEYS_DB, api_keys_store.is_locked_down(),
         )
-        open_mode_task = _asyncio_for_models.create_task(
+        open_mode_task = asyncio.create_task(
             _auth.open_mode_warning_loop()
         )
     except Exception as _ae:
@@ -1344,7 +1344,7 @@ async def lifespan(app: FastAPI):
         reports_store.init_db(cfg.REPORTS_DB)
         reports_store.sweep_retention()
         logger.info("Reports store initialized at %s", cfg.REPORTS_DB)
-        reports_sweep_task = _asyncio_for_models.create_task(
+        reports_sweep_task = asyncio.create_task(
             _reports_retention_loop()
         )
     except Exception as _re:
@@ -1370,7 +1370,7 @@ async def lifespan(app: FastAPI):
         import capture_groups_store
         capture_groups_store.init(captures_store._require_conn(), cfg.CAPTURES_DIR)
         capture_groups_store.reconcile_on_startup()
-        captures_sweep_task = _asyncio_for_models.create_task(
+        captures_sweep_task = asyncio.create_task(
             _captures_retention_loop()
         )
     except Exception as _ce:
@@ -1384,7 +1384,7 @@ async def lifespan(app: FastAPI):
         task.cancel()
         try:
             await task
-        except (_asyncio_for_models.CancelledError, Exception):
+        except (asyncio.CancelledError, Exception):
             pass
 
     await _cancel(evictor_task)
@@ -1633,7 +1633,7 @@ async def transcribe(
                                _kw=transcribe_kwargs):
                 _segs, _info = _model.transcribe(_path, **_kw)
                 return list(_segs), _info
-            loop = _asyncio_for_models.get_running_loop()
+            loop = asyncio.get_running_loop()
             segments_iter, info = await loop.run_in_executor(None, _do_transcribe)
 
             all_words = []
@@ -1918,7 +1918,6 @@ async def list_models():
 # A self-contained dark-theme log tailer. Loads recent context from the log
 # file, then streams new lines via Server-Sent Events. Color is reapplied
 # client-side based on content (since we strip ANSI before writing the file).
-import asyncio
 import io
 from fastapi.responses import HTMLResponse, StreamingResponse
 
