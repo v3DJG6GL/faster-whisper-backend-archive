@@ -559,20 +559,6 @@ function setBar(barEl, pct) {
   barEl.classList.toggle('warn', pct >= 75 && pct < 90);
   barEl.classList.toggle('crit', pct >= 90);
 }
-// Update one of the nav-row severity pills. Keeps the link, only edits the
-// inner number span; flashes red on count increase. See web_common.py for
-// the server-rendered HTML structure these IDs target.
-function setPill(id, n) {
-  const el = document.getElementById(id); if (!el) return;
-  const numEl = el.querySelector('.n');
-  const prev = +numEl.textContent;
-  numEl.textContent = n;
-  el.classList.toggle('hot', n > 0);
-  el.classList.toggle('zero', n === 0);
-  if (n > prev) {
-    el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash');
-  }
-}
 
 // --- Render ----------------------------------------------------------------
 function render(snap) {
@@ -730,13 +716,8 @@ function render(snap) {
     </tr>`).join('');
   }
 
-  // --- Severity pills (in nav row) ---
-  // Server already computed the 60-s window in snap.severity; just push.
-  if (snap.severity) {
-    setPill('sev-warn', snap.severity.warn || 0);
-    setPill('sev-err',  snap.severity.err  || 0);
-    setPill('sev-crit', snap.severity.crit || 0);
-  }
+  // Severity pills are driven by SEV_POLLER_JS injected at body-end
+  // (5-s poll of /sev), so no per-tick update needed here.
 }
 
 // --- SSE consumer ----------------------------------------------------------

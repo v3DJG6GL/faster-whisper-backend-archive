@@ -77,9 +77,11 @@ def record_model_load(model: str, load_seconds: float) -> None:
     """Called once per WhisperModel(...) construction in _get_or_load_model."""
     bucket = model_loads.setdefault(model, [])
     bucket.append(load_seconds)
-    # Keep tail; we only show first + last-N-avg in the UI.
+    # Preserve bucket[0] as the canonical first cold-load forever; trim
+    # the middle so the bucket fits in _MODEL_LOAD_KEEP. The UI shows
+    # first + last-N-avg, both of which depend on bucket[0] surviving.
     if len(bucket) > _MODEL_LOAD_KEEP:
-        del bucket[: len(bucket) - _MODEL_LOAD_KEEP]
+        del bucket[1 : len(bucket) - _MODEL_LOAD_KEEP + 1]
 
 
 def _quantile(sorted_vals: list[float], q: float) -> float:

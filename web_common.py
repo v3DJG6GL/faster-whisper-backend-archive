@@ -510,10 +510,7 @@ const _PIPELINE_TYPES = [
 ];
 const _typePill = (t) => (_PIPELINE_TYPES.find(x => x.type === t) || {}).pill || t;
 
-function _makeMonoLabeledInput(label, val, onInput, kind) {
-  // kind === 'escape' → display \n/\r/\t/\\ as literal 2-char escapes,
-  // decode on input. Required for fields like regex `replacement` that
-  // can hold real newlines (single-line <input> strips them otherwise).
+function _makeMonoLabeledInput(label, val, onInput) {
   const lbl = document.createElement('div');
   lbl.className = 'help';
   lbl.textContent = label + ':';
@@ -521,11 +518,8 @@ function _makeMonoLabeledInput(label, val, onInput, kind) {
   inp.type = 'text';
   inp.spellcheck = false;
   inp.autocomplete = 'off';
-  const raw = val == null ? '' : val;
-  inp.value = (kind === 'escape') ? _esc(raw) : raw;
-  inp.addEventListener('input', () => onInput(
-    kind === 'escape' ? _unesc(inp.value) : inp.value
-  ));
+  inp.value = val == null ? '' : val;
+  inp.addEventListener('input', () => onInput(inp.value));
   const wrap = document.createElement('div');
   wrap.appendChild(lbl); wrap.appendChild(inp);
   return wrap;
