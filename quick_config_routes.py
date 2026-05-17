@@ -68,8 +68,7 @@ _PATCH_ALLOWED_FIELDS: dict[str, frozenset[str]] = {
 
 # SSE endpoint compatibility: EventSource has no way to attach an
 # Authorization header, so the /stream endpoint accepts ?key=<raw_key>
-# as a fallback. The query-string path is otherwise unused and logged
-# with a WARNING when hit (a leak vector for keys via URL access logs).
+# as a fallback.
 
 def require_user_or_admin_sse(request: Request) -> dict[str, Any]:
     """SSE-aware variant of get_current_user. Honors ?key= as a fallback
