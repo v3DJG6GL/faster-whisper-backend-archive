@@ -1416,14 +1416,22 @@ import metrics
 
 @app.middleware("http")
 async def _metrics_mw(request: Request, call_next):
-    path = request.url.path
     start = time.perf_counter()
     status = 500
+    response = None
     try:
         response = await call_next(request)
         status = response.status_code
         return response
     finally:
+        # Prefer the route's templated path (e.g. /captures/api/{cid}) so
+        # per-ID URLs collapse to a single counter entry; unbounded raw-path
+        # keys would otherwise grow the dict forever and turn the /stats
+        # endpoint-counters panel into noise. Starlette stores the matched
+        # route in the scope after routing — fall back to the raw URL path
+        # for 404s and pre-routing failures.
+        route = request.scope.get("route") if response is not None else None
+        path = route.path if route is not None else request.url.path
         metrics.record_request(path, status,
                                (time.perf_counter() - start) * 1000.0)
 

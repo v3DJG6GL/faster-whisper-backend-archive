@@ -70,18 +70,14 @@ async def stats_snapshot() -> dict[str, Any]:
 
 @router.get("/stats/stream", dependencies=[Depends(_require_stats_host)])
 async def stats_stream() -> StreamingResponse:
-    """1 Hz SSE stream of the snapshot payload. Sends ': keepalive\\n\\n'
-    every 15 s to defeat idle-proxy timeouts."""
+    """1 Hz SSE stream of the snapshot payload. The 1-second data cadence
+    already counts as traffic for idle-proxy timeout purposes — no separate
+    keepalive frame needed."""
     async def gen():
-        last_keepalive = time.time()
         while True:
             payload = _build_payload()
             yield f"data: {json.dumps(payload)}\n\n"
             await asyncio.sleep(1.0)
-            now = time.time()
-            if now - last_keepalive > 15.0:
-                yield ": keepalive\n\n"
-                last_keepalive = now
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 

@@ -126,19 +126,10 @@ def loaded_models_snapshot() -> list[dict[str, Any]]:
                 "device": info["device"],
                 "compute_type": info["compute_type"],
                 "vram_mb": round(mb, 1) if mb is not None else None,
-                "loaded_at": info["loaded_at"],
-                "last_used": info["last_used"],
                 "age_sec": round(now - info["loaded_at"], 1),
                 "idle_sec": round(now - info["last_used"], 1),
             })
         return out
-
-
-# --- Snapshot cache ----------------------------------------------------------
-# 500 ms TTL — multiple browser tabs share one snapshot, NVML calls don't
-# pile up if the user reload-spams the page.
-_SNAPSHOT_TTL_SEC = 0.5
-_cached_snapshot: tuple[float, dict[str, Any]] | None = None
 
 
 def _build_gpu() -> dict[str, Any] | None:
@@ -155,8 +146,6 @@ def _build_gpu() -> dict[str, Any] | None:
         f"{cuda_int // 1000}.{(cuda_int % 1000) // 10}"
         if isinstance(cuda_int, int) else None
     )
-    procs = _safe(lambda: pynvml.nvmlDeviceGetComputeRunningProcesses_v3(h), default=[])
-    pids = [int(p.pid) for p in procs] if procs else []
     p_state = _safe(lambda: pynvml.nvmlDeviceGetPerformanceState(h))
     return {
         "name": name,
@@ -165,7 +154,6 @@ def _build_gpu() -> dict[str, Any] | None:
         "mem_used_mb": round(mem.used / (1024 * 1024), 1) if mem else None,
         "mem_total_mb": round(mem.total / (1024 * 1024), 1) if mem else None,
         "util_pct": util.gpu if util else None,
-        "mem_util_pct": util.memory if util else None,
         "temp_c": _safe(lambda: pynvml.nvmlDeviceGetTemperature(h, pynvml.NVML_TEMPERATURE_GPU)),
         "power_w": _safe(lambda: round(pynvml.nvmlDeviceGetPowerUsage(h) / 1000.0, 1)),
         "power_limit_w": _safe(
@@ -175,7 +163,6 @@ def _build_gpu() -> dict[str, Any] | None:
             lambda: pynvml.nvmlDeviceGetClockInfo(h, pynvml.NVML_CLOCK_SM)
         ),
         "p_state": f"P{p_state}" if isinstance(p_state, int) else None,
-        "running_pids": pids,
     }
 
 
@@ -214,22 +201,19 @@ def _build_process() -> dict[str, Any]:
 
 
 def system_snapshot() -> dict[str, Any]:
-    """Build (or return cached) snapshot of GPU + host + process + loaded models."""
-    global _cached_snapshot
-    now = time.time()
-    if _cached_snapshot is not None:
-        ts, payload = _cached_snapshot
-        if now - ts < _SNAPSHOT_TTL_SEC:
-            return payload
-    payload = {
+    """Build a snapshot of GPU + host + process + loaded models.
+
+    No TTL cache: the dominant consumer is the /stats/stream SSE generator
+    which rebuilds every second (longer than any sub-second cache could
+    survive), so a shared cache only helped the rare multi-tab snapshot
+    burst, at the cost of an unsafe RMW on a module global."""
+    return {
         "gpu": _build_gpu(),
         "gpu_error": NVML_ERR if not NVML_OK else None,
         "host": _build_host(),
         "process": _build_process(),
         "models": loaded_models_snapshot(),
     }
-    _cached_snapshot = (now, payload)
-    return payload
 
 
 def shutdown() -> None:
