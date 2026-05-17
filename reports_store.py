@@ -79,9 +79,11 @@ def init_db(path: str) -> None:
     global _conn
     dst_dir = os.path.dirname(os.path.abspath(path)) or "."
     os.makedirs(dst_dir, exist_ok=True)
-    # isolation_level=None puts pysqlite in autocommit mode; we issue
-    # explicit BEGIN/COMMIT only inside the write helpers. WAL gives us
-    # crash-safety; synchronous=NORMAL is the standard WAL recommendation
+    # isolation_level=None puts pysqlite in autocommit mode; every
+    # statement commits independently. _lock serialises writers (so the
+    # COUNT inside _evict_to_cap sees a stable total) but does not make
+    # the INSERT + DELETEs atomic vs crash. WAL gives crash-safety per
+    # statement; synchronous=NORMAL is the standard WAL recommendation
     # (full durability against power loss is FULL, but NORMAL is fine
     # against process crash and ~10× faster on small writes).
     _conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
@@ -269,10 +271,13 @@ def upsert_report(
 
 def _evict_to_cap(conn: sqlite3.Connection) -> None:
     """Enforce REPORTS_MAX: when total > cap, delete oldest closed first,
-    then oldest open. Single transaction; logs only the count.
+    then oldest open. Two autocommit DELETEs (connection is in
+    autocommit mode); logs only the count.
 
     Lazy-imports config so test harnesses that monkey-patch cfg pick up
-    the current value. _lock is already held by the caller."""
+    the current value. _lock is already held by the caller, so the COUNT
+    sees a stable total even though the DELETEs are not transactionally
+    atomic with the caller's INSERT."""
     try:
         import config as cfg
         cap = int(getattr(cfg, "REPORTS_MAX", 1000))
