@@ -15,8 +15,8 @@ Two surfaces:
     GET   /reports/api/export       full JSON dump (envelope-wrapped)
   Mutating routes use Depends(require_admin) — admin-only API keys.
 
-Per-user rate limit on submission: in-memory sliding window keyed on
-the resolved user_id from the API key.
+Per-user rate limit on submission: in-memory fixed-window counter
+keyed on the resolved user_id from the API key.
 """
 from __future__ import annotations
 
