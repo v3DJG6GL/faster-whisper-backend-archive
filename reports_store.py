@@ -161,8 +161,9 @@ def find_by_request_user(
     request_id: "str | None", user_id: "str | None",
 ) -> "dict[str, Any] | None":
     """Return the most recent report row keyed on (user_id, request_id),
-    or None. Used by upsert_report so re-reporting the same trace
-    updates the existing row instead of stacking duplicates."""
+    or None. Used by upsert_report (so re-reporting the same trace
+    updates the existing row instead of stacking duplicates) and by
+    reports_routes.delete_my_report_api to target the caller's own row."""
     if not request_id or not user_id:
         return None
     conn = _require_conn()
