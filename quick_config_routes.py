@@ -214,9 +214,12 @@ async def post_state(
     rules_patch = payload.rules_patch or {}
     fingerprints = payload.fingerprints or {}
     if not rules_patch:
-        return JSONResponse(
-            {"saved": [], "conflicts": [], "requires_restart": False}
-        )
+        return JSONResponse({
+            "saved": [], "conflicts": [],
+            "hot_applied": [], "cold_pending": [],
+            "env_pinned_ignored": [], "evicted": [],
+            "requires_restart": False,
+        })
 
     # Snapshot the current PIPELINE_RULES as plain dicts so we can overlay
     # patches deterministically. Keep order; the merged list will replace
