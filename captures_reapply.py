@@ -132,6 +132,12 @@ def _run() -> None:
                 new_training = new_final
             if new_training is not None and new_training != (r["text_for_training"] or ""):
                 patch["text_for_training"] = new_training
+                # _build_default_transcript reads text_for_training before
+                # falling back to final/raw, so a training-form change must
+                # also trigger a group rebuild — final may be unchanged when
+                # captures_excludes drops a rule from the training pipeline.
+                if r["group_id"]:
+                    affected_group_ids.add(r["group_id"])
             if patch:
                 captures_store.update_capture(cid, patch)
                 with _state_lock:
