@@ -171,7 +171,7 @@ def _resolved_value(field: str) -> Any:
 # when the rule contents match. Without this, _BASELINE keeps source
 # order from config.py while the resolved value (after a local.json
 # overlay) carries Pydantic's parent-first MRO order, and the WebUI's
-# _isRuleDirty() always reports dirty on first paint.
+# _isRuleDirtyAgainst() always reports dirty on first paint.
 def _canon_rules(rules: Any) -> Any:
     if not isinstance(rules, list):
         return rules
@@ -190,7 +190,7 @@ def _canon_rules(rules: Any) -> Any:
 # overlay) and the baseline `default_value` (from cfg._BASELINE) can carry
 # different insertion orders even when contents are equal — which makes
 # JSON.stringify(value) !== JSON.stringify(default_value) and the WebUI's
-# _isRuleDirty() falsely reports dirty on first paint, AND clicking reset
+# _isRuleDirtyAgainst() falsely reports dirty on first paint, AND clicking reset
 # visibly re-sorts the rows. Recursively sorting nested dict keys (applied
 # identically to value AND default_value) makes the equality check reliable.
 # Forced alphabetical is the right canonical order for `cb:map` rules: the
@@ -2488,14 +2488,9 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
 
   // --- baseline / dirtiness helpers (drive reset-button visibility) ----
   function _baselineList() { return fieldDef(name).default_value || []; }
-  function _baselineByName() {
-    const m = new Map();
-    _baselineList().forEach(b => m.set(b.name, b));
-    return m;
-  }
-  function _isRuleDirty(rule) {
+  function _isRuleDirtyAgainst(rule, baselineMap) {
     if (!rule || !rule.seeded) return false;
-    const baseline = _baselineByName().get(rule.name);
+    const baseline = baselineMap.get(rule.name);
     if (!baseline) return false;
     return JSON.stringify(rule) !== JSON.stringify(baseline);
   }
@@ -2504,25 +2499,32 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
     const curSeeded = rules.filter(r => r.seeded).map(r => r.name);
     return JSON.stringify(curSeeded) !== JSON.stringify(baseSeeded);
   }
-  function _anyRuleDirty() { return rules.some(r => _isRuleDirty(r)); }
 
   function refreshControlsVisibility() {
     if (isChecklist) return;   // checklist rows have no reset/dirty controls
+    // Build the baseline Map once per call — _isRuleDirtyAgainst is invoked
+    // per .rule-row PLUS once in the anyDirty rollup, so each commitData()
+    // keystroke would otherwise rebuild the same Map N+1 times.
+    const baselineMap = new Map();
+    _baselineList().forEach(b => baselineMap.set(b.name, b));
     // Per-row reset buttons: hide when rule matches its baseline.
+    let anyDirty = false;
     list.querySelectorAll('.rule-row').forEach(r => {
       const idx = parseInt(r.dataset.idx, 10);
       const rule = rules[idx];
       if (!rule) return;
+      const dirty = _isRuleDirtyAgainst(rule, baselineMap);
+      if (dirty) anyDirty = true;
       const btn = r.querySelector(':scope > .row-header > .reset-link');
-      if (btn) btn.style.display = _isRuleDirty(rule) ? '' : 'none';
+      if (btn) btn.style.display = dirty ? '' : 'none';
     });
     // List-wide controls: hide when nothing to reset.
+    const orderDirty = _seededOrderDirty();
     if (resetOrderBtn) {
-      resetOrderBtn.style.display = _seededOrderDirty() ? '' : 'none';
+      resetOrderBtn.style.display = orderDirty ? '' : 'none';
     }
     if (resetAllBtn) {
-      resetAllBtn.style.display = (_anyRuleDirty() || _seededOrderDirty())
-        ? '' : 'none';
+      resetAllBtn.style.display = (anyDirty || orderDirty) ? '' : 'none';
     }
   }
 
@@ -2814,7 +2816,7 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
       reset.textContent = '↺ reset';
       reset.title = 'Restore this rule to its in-repo default';
       reset.addEventListener('click', () => {
-        const baseline = _baselineByName().get(rule.name);
+        const baseline = _baselineList().find(b => b.name === rule.name);
         if (!baseline) return;
         rules[idx] = JSON.parse(JSON.stringify(baseline));
         commitFull();
