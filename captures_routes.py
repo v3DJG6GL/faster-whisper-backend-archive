@@ -1478,12 +1478,15 @@ async def patch_group_api(
 
     if rebuild_audio:
         # Re-run the merge with the new silence. Member set is unchanged.
+        # Hold the per-gid lock so a double-Save (or concurrent admins on
+        # the same group) can't fire two merges writing to the same dst.
         members = _members()
-        duration_ms, hashes, lead_trim_ms, trail_trim_ms = _build_merged_wav(
-            gid=gid,
-            member_ids=[m["id"] for m in members],
-            silence_ms=int(patch["inter_segment_silence_ms"]),
-        )
+        with _get_rebuild_lock(gid):
+            duration_ms, hashes, lead_trim_ms, trail_trim_ms = _build_merged_wav(
+                gid=gid,
+                member_ids=[m["id"] for m in members],
+                silence_ms=int(patch["inter_segment_silence_ms"]),
+            )
         patch.update(_merged_wav_patch(duration_ms, hashes, lead_trim_ms, trail_trim_ms))
 
     # Re-derive `transcript` from current members + chips ONLY when the
@@ -1523,14 +1526,15 @@ async def regenerate_group_api(
     if not user.get("is_admin") and g["user_id"] != user.get("user_id"):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "not your group")
     members = capture_groups_store.get_members(gid)
-    duration_ms, hashes, lead_trim_ms, trail_trim_ms = _build_merged_wav(
-        gid=gid,
-        member_ids=[m["id"] for m in members],
-        silence_ms=g["inter_segment_silence_ms"],
-    )
-    updated = capture_groups_store.update_group(
-        gid, _merged_wav_patch(duration_ms, hashes, lead_trim_ms, trail_trim_ms),
-    )
+    with _get_rebuild_lock(gid):
+        duration_ms, hashes, lead_trim_ms, trail_trim_ms = _build_merged_wav(
+            gid=gid,
+            member_ids=[m["id"] for m in members],
+            silence_ms=g["inter_segment_silence_ms"],
+        )
+        updated = capture_groups_store.update_group(
+            gid, _merged_wav_patch(duration_ms, hashes, lead_trim_ms, trail_trim_ms),
+        )
     return JSONResponse({"group": _enrich_group(updated)})
 
 
