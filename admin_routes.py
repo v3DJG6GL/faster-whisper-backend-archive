@@ -3386,21 +3386,25 @@ function render() {
 
 async function save() {
   if (Object.keys(dirty).length === 0) return;
+  // Disable BEFORE the await so rapid double-clicks can't fire two
+  // POSTs with the same dirty payload. setDirty() re-enables on edit.
+  $('save-btn').disabled = true;
   const r = await api('POST', '/config/state', dirty);
   if (r.status === 422) {
     const j = await r.json();
     const msg = (j.errors || [])
       .map(e => e.loc + ': ' + e.msg).join('  /  ');
     toast('validation: ' + msg, true);
+    $('save-btn').disabled = false;
     return;
   }
   if (!r.ok) {
     toast('save failed: ' + r.status, true);
+    $('save-btn').disabled = false;
     return;
   }
   const result = await r.json();
   dirty = {};
-  $('save-btn').disabled = true;
   $('discard-btn').disabled = true;
 
   if (result.requires_restart && result.cold_pending.length > 0) {
