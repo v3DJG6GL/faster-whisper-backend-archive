@@ -821,6 +821,20 @@ def _build_merged_wav(
     return duration_ms, hashes, lead_trim_ms, trail_trim_ms
 
 
+def _merged_wav_patch(
+    duration_ms: int, hashes: dict[str, str],
+    lead_trim_ms: int, trail_trim_ms: int,
+) -> dict[str, Any]:
+    """Build the capture_groups patch fields from _build_merged_wav outputs."""
+    return {
+        "merged_duration_ms":   int(duration_ms),
+        "member_hashes_json":   json.dumps(hashes, sort_keys=True),
+        "merged_lead_trim_ms":  int(lead_trim_ms or 0),
+        "merged_trail_trim_ms": int(trail_trim_ms or 0),
+        "is_stale":             0,
+    }
+
+
 @router.post(
     "/captures/api/groups",
     dependencies=[Depends(require_admin_host)],
@@ -1474,11 +1488,7 @@ async def patch_group_api(
             member_ids=[m["id"] for m in members],
             silence_ms=int(patch["inter_segment_silence_ms"]),
         )
-        patch["member_hashes_json"] = json.dumps(hashes, sort_keys=True)
-        patch["merged_duration_ms"] = duration_ms
-        patch["merged_lead_trim_ms"] = int(lead_trim_ms or 0)
-        patch["merged_trail_trim_ms"] = int(trail_trim_ms or 0)
-        patch["is_stale"] = 0
+        patch.update(_merged_wav_patch(duration_ms, hashes, lead_trim_ms, trail_trim_ms))
 
     # Re-derive `transcript` from current members + chips ONLY when the
     # inputs that feed the derivation actually changed (corrections,
@@ -1522,13 +1532,9 @@ async def regenerate_group_api(
         member_ids=[m["id"] for m in members],
         silence_ms=g["inter_segment_silence_ms"],
     )
-    updated = capture_groups_store.update_group(gid, {
-        "is_stale": 0,
-        "merged_duration_ms": duration_ms,
-        "member_hashes_json": json.dumps(hashes, sort_keys=True),
-        "merged_lead_trim_ms": int(lead_trim_ms or 0),
-        "merged_trail_trim_ms": int(trail_trim_ms or 0),
-    })
+    updated = capture_groups_store.update_group(
+        gid, _merged_wav_patch(duration_ms, hashes, lead_trim_ms, trail_trim_ms),
+    )
     return JSONResponse({"group": _enrich_group(updated)})
 
 
@@ -1625,13 +1631,9 @@ def _ensure_group_wav(g: dict[str, Any]) -> str:
             member_ids=member_ids,
             silence_ms=int(g["inter_segment_silence_ms"]),
         )
-        capture_groups_store.update_group(g["id"], {
-            "merged_duration_ms": int(duration_ms),
-            "member_hashes_json": json.dumps(hashes, sort_keys=True),
-            "is_stale":           0,
-            "merged_lead_trim_ms":  int(lead_trim_ms or 0),
-            "merged_trail_trim_ms": int(trail_trim_ms or 0),
-        })
+        capture_groups_store.update_group(
+            g["id"], _merged_wav_patch(duration_ms, hashes, lead_trim_ms, trail_trim_ms),
+        )
     return abs_p
 
 
