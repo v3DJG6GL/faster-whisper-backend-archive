@@ -513,7 +513,6 @@ _API_KEYS_HTML = r"""<!doctype html>
   }
 
   function renderUser(u) {
-    // list_users filters revoked, so u.revoked_ts is always nullish.
     var card = document.createElement('div');
     card.className = 'card';
     var h = document.createElement('h3');
