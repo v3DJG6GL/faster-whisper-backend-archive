@@ -1876,8 +1876,8 @@ def _build_export_stream(only_status: str | None, include_audio: bool):
 # Single-page admin: list view + per-row expand. The expanded row plays
 # the audio karaoke-style (active word highlights with playback), lets
 # the admin shift-click to mark wrong words, and edits the ground-truth
-# `corrected_text` (free-form textarea). Status flow: new → reviewed →
-# ready (export-eligible) | dismissed (omitted).
+# via per-span correction chips. Status flow: new → reviewed → ready
+# (export-eligible) | dismissed (omitted).
 #
 # IMPORTANT (CLAUDE memory note): never place a `{{...}}` placeholder
 # inside a /* */, //, or <!-- --> comment — render_page() does a literal
