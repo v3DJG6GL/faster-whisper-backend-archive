@@ -437,13 +437,15 @@ def _evict_to_cap(conn: sqlite3.Connection) -> None:
         byte_cap = mb_cap * 1024 * 1024
         total_bytes = _total_audio_bytes(conn)
         if total_bytes > byte_cap:
+            before = total_bytes
             for status in _EVICTION_ORDER:
                 if total_bytes <= byte_cap:
                     break
                 total_bytes -= _drop_oldest_by_bytes(
                     conn, status, total_bytes - byte_cap,
                 )
-            evicted += 1  # log marker; precise count is in the helper
+            if total_bytes < before:
+                evicted += 1  # log marker; precise count is in the helper
 
     if evicted:
         logger.info(
@@ -721,7 +723,7 @@ def update_capture(cid: str, patch: dict[str, Any]) -> dict[str, Any] | None:
         params.append(notes)
     if "final" in patch:
         sets.append("final = ?")
-        params.append(str(patch["final"] or ""))
+        params.append(str(patch["final"] or "")[:_CAP_FINAL])
     if "text_for_training" in patch:
         sets.append("text_for_training = ?")
         val = patch["text_for_training"]
