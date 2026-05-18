@@ -2685,52 +2685,66 @@ _CAPTURES_HTML = r"""<!doctype html>
     padding: 0.6rem 0.75rem; margin-bottom: 0.5rem;
     background: var(--input-bg);
   }
-  #propose-list .proposal .row1 {
+  /* Inner-content styles for .proposal are selector-unscoped so they
+     apply both inside #propose-list AND inside #propose-batch's
+     batch-card. Only the OUTER container (border / padding / bg) stays
+     scoped to #propose-list since batch-card owns its own outer frame. */
+  .proposal .row1 {
     display: flex; gap: 0.6rem; align-items: center;
-    font-size: var(--fs-sm); margin-bottom: 0.25rem;
+    font-size: var(--fs-sm); margin-bottom: 0.4rem;
+    flex-wrap: wrap;
   }
-  #propose-list .proposal .score {
+  .proposal .score {
     display: inline-block; min-width: 4rem; text-align: center;
     padding: 0.1rem 0.5rem; border-radius: 999px;
     font-family: var(--font-mono); font-weight: 700;
     font-size: var(--fs-xs); letter-spacing: 0.02em;
   }
-  #propose-list .proposal .score.tier-good {
-    background: #1b3a1b; color: #6acc6a; border: 1px solid #2e5d2e;
-  }
-  #propose-list .proposal .score.tier-ok {
-    background: #3a321b; color: #d4a14c; border: 1px solid #5d4e2e;
-  }
-  #propose-list .proposal .score.tier-low {
-    background: #3a1f1f; color: #d46c6c; border: 1px solid #5d2e2e;
-  }
-  #propose-list .proposal .lang-pill,
-  #propose-list .proposal .speaker-pill {
+  .proposal .score.tier-good { background: #1b3a1b; color: #6acc6a; border: 1px solid #2e5d2e; }
+  .proposal .score.tier-ok   { background: #3a321b; color: #d4a14c; border: 1px solid #5d4e2e; }
+  .proposal .score.tier-low  { background: #3a1f1f; color: #d46c6c; border: 1px solid #5d2e2e; }
+  .proposal .lang-pill,
+  .proposal .speaker-pill {
     display: inline-block; padding: 0.05rem 0.4rem; border-radius: 4px;
     background: var(--border); color: var(--help);
     font-size: var(--fs-xs); font-family: var(--font-mono);
   }
-  #propose-list .proposal .speaker-pill {
+  .proposal .speaker-pill {
     background: #1b2a3a; color: #8aaad0; border: 1px solid #2e4566;
   }
-  #propose-list .proposal .reason { color: var(--dim); font-size: var(--fs-sm); }
-  #propose-list .proposal .members {
+  .proposal .reason {
+    color: var(--dim); font-size: var(--fs-sm); margin: 0.3rem 0;
+  }
+  .proposal .members {
     margin: 0.4rem 0;
     background: var(--bg); border: 1px solid var(--border);
     border-radius: 4px; padding: 0.4rem 0.55rem;
     max-height: 8rem; overflow: auto;
     font-size: var(--fs-xs); color: var(--dim);
   }
-  #propose-list .proposal .members .m {
-    display: flex; gap: 0.5rem; padding: 0.1rem 0;
+  .proposal .members .m {
+    display: flex; gap: 0.5rem; padding: 0.15rem 0;
+    align-items: baseline;
   }
-  #propose-list .proposal .members .m .ts,
-  #propose-list .proposal .members .m .dur,
-  #propose-list .proposal .members .m .m-spk {
+  .proposal .members .m .ts,
+  .proposal .members .m .dur,
+  .proposal .members .m .m-spk {
     color: var(--help); font-family: var(--font-mono); flex-shrink: 0;
+    white-space: nowrap;
   }
-  #propose-list .proposal .members .m .m-spk {
-    color: #8aaad0;
+  .proposal .members .m .m-spk { color: #8aaad0; }
+  .proposal .members .m .m-text {
+    flex: 1 1 auto; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    color: var(--fg); font-family: var(--font-sans);
+  }
+  .proposal .meter-bar {
+    display: inline-block; width: 7rem; height: 0.4rem;
+    background: var(--border); border-radius: 2px; overflow: hidden;
+    vertical-align: middle;
+  }
+  .proposal .meter-bar .fill {
+    display: block; height: 100%; background: var(--accent, #58a6ff);
   }
 
   /* Shared merge-preview play button (used in propose-modal and merge-modal) */
@@ -2911,14 +2925,6 @@ _CAPTURES_HTML = r"""<!doctype html>
   }
   #propose-batch-top.active {
     background: var(--accent, #58a6ff); color: var(--bg); border-color: var(--accent, #58a6ff);
-  }
-  #propose-list .proposal .meter-bar {
-    display: inline-block; width: 7rem; height: 0.4rem;
-    background: var(--border); border-radius: 2px; overflow: hidden;
-    vertical-align: middle;
-  }
-  #propose-list .proposal .meter-bar .fill {
-    display: block; height: 100%; background: var(--accent, #58a6ff);
   }
 
   {{NAV_CSS}}
@@ -5113,7 +5119,7 @@ _CAPTURES_HTML = r"""<!doctype html>
         line.appendChild(spk);
       }
       var txt = document.createElement('span');
-      txt.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+      txt.className = 'm-text';
       txt.title = m.preview || '';
       txt.textContent = m.preview || '(no transcript)';
       line.appendChild(txt);
