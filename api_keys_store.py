@@ -607,11 +607,10 @@ def set_user_permissions(user_id: str, perms: dict[str, Any]) -> dict[str, Any]:
     Returns the (validated + canonical) dict that landed in the DB so
     the caller can echo it back to the UI.
 
-    Merge semantics: incoming `perms["pages"]` is merged with whatever
-    is currently stored; pages absent from the payload retain their
-    existing scope. The matrix UI sends the full set on each Save, but
-    partial PATCH calls (CLI, future bulk-edit) only need to send the
-    cells they want to change.
+    Merge semantics: incoming fields are merged with whatever is stored;
+    fields absent from the payload retain their existing value. The
+    matrix UI sends the full set on each Save, but partial PATCH calls
+    (CLI, future bulk-edit) only need to send what they want to change.
 
     Validation rules:
       - `perms["pages"]` must be a dict (other top-level keys ignored).
@@ -621,6 +620,10 @@ def set_user_permissions(user_id: str, perms: dict[str, Any]) -> dict[str, Any]:
       - Pages missing from BOTH incoming and stored shapes default to
         "none" — the persisted JSON is always canonical (all PAGES keys
         present), which keeps the matrix UI simple.
+      - `perms["quick_config_tags"]`, if present, must be a list of
+        strings matching TAG_RE. Normalised (lowercased / trimmed /
+        deduped / sorted) via config_store.normalize_tags. None / absent
+        means "don't touch the stored value".
 
     Raises ValueError on any invalid input. Rebuilds the in-memory index
     so live key holders see the new scope on their next request (no
@@ -639,17 +642,36 @@ def set_user_permissions(user_id: str, perms: dict[str, Any]) -> dict[str, Any]:
                 f"invalid scope {scope!r} for {page!r}"
                 f" (allowed: {', '.join(allowed)})"
             )
+
+    # Tags: present → validate + normalise; absent → preserve stored.
+    incoming_tags = perms.get("quick_config_tags")
+    if incoming_tags is not None:
+        # Reuse the config_store validator so rule tags and user tags
+        # share the same regex / normalisation.
+        import config_store
+        clean_tags = config_store.normalize_tags(incoming_tags)
+    else:
+        clean_tags = None
+
     # Merge: incoming wins, otherwise keep what's stored, otherwise "none".
-    existing = get_user_permissions(user_id).get("pages") or {}
+    existing_perms = get_user_permissions(user_id)
+    existing_pages = existing_perms.get("pages") or {}
     merged_pages: dict[str, str] = {}
     for page in PAGES:
         if page in incoming_pages:
             merged_pages[page] = incoming_pages[page]
-        elif page in existing and existing[page] in _ALLOWED_SCOPES[page]:
-            merged_pages[page] = existing[page]
+        elif page in existing_pages and existing_pages[page] in _ALLOWED_SCOPES[page]:
+            merged_pages[page] = existing_pages[page]
         else:
             merged_pages[page] = "none"
-    clean = {"pages": merged_pages}
+
+    if clean_tags is not None:
+        merged_tags = clean_tags
+    else:
+        existing_tags = existing_perms.get("quick_config_tags") or []
+        merged_tags = list(existing_tags) if isinstance(existing_tags, list) else []
+
+    clean = {"pages": merged_pages, "quick_config_tags": merged_tags}
     conn = _require_conn()
     with _lock:
         cur = conn.execute(
@@ -660,8 +682,8 @@ def set_user_permissions(user_id: str, perms: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("user not found or revoked")
         _rebuild_index_locked()
     logger.info(
-        "[auth] permissions updated user=%s pages=%s",
-        user_id[:8], merged_pages,
+        "[auth] permissions updated user=%s pages=%s tags=%s",
+        user_id[:8], merged_pages, merged_tags,
     )
     return clean
 

@@ -55,24 +55,34 @@ _FORBIDDEN = HTTPException(
 class Permissions:
     """Read-side wrapper around a user's stored permissions JSON.
 
-    Built once per request by `get_current_user`. Routes ask three
+    Built once per request by `get_current_user`. Routes ask four
     questions:
       - `can(page)`        — page-access gate (admin bypass).
       - `scope(page)`      — "own" or "all" for visible pages.
       - `effective_user_id_for(page, uid)` — store-layer filter contract:
                               None  → no filter
                               str   → WHERE user_id = ?
+      - `can_see_rule(rule)` — visibility for a single PIPELINE_RULES row
+                               via the user's quick_config_tags.
     Plus `assert_can_read_row(row, page, uid)` for detail-by-id endpoints
     — returns 404 (not 403) on scope miss to avoid leaking existence
     (OWASP IDOR Prevention Cheat Sheet guidance).
     """
 
-    __slots__ = ("_pages", "_is_admin")
+    __slots__ = ("_pages", "_is_admin", "_tags")
 
     def __init__(self, raw: dict[str, Any] | None, is_admin: bool) -> None:
         pages = (raw or {}).get("pages", {})
         self._pages: dict[str, str] = pages if isinstance(pages, dict) else {}
         self._is_admin = bool(is_admin)
+        # Per-user quick-config tags. Asymmetric semantics: an empty
+        # list means the user sees ONLY untagged rules (prevents quiet
+        # widening when a new user is added without tags). Admin
+        # bypasses this entirely via can_see_rule.
+        raw_tags = (raw or {}).get("quick_config_tags") or []
+        self._tags: list[str] = (
+            list(raw_tags) if isinstance(raw_tags, list) else []
+        )
 
     def can(self, page: str) -> bool:
         if self._is_admin:
@@ -104,9 +114,36 @@ class Permissions:
                 status.HTTP_404_NOT_FOUND, "not found",
             )
 
+    def quick_config_tags(self) -> list[str]:
+        """The caller's per-user tag list. Admins return the empty list
+        here (they bypass tag filtering — see can_see_rule); the UI
+        should special-case admins separately rather than treating an
+        empty tag list as a permission signal."""
+        return list(self._tags)
+
+    def can_see_rule(self, rule: dict[str, Any]) -> bool:
+        """Visibility check for a single PIPELINE_RULES entry.
+
+        Admins see everything. Non-admins: the rule must be `exposed`
+        AND the rule's tags must intersect the user's tags — except
+        when the rule has an empty tag list, which is the "visible to
+        everyone" migration default.
+        """
+        if self._is_admin:
+            return True
+        if not (rule or {}).get("exposed"):
+            return False
+        rule_tags = set(rule.get("tags") or [])
+        if not rule_tags:
+            return True  # untagged rule = permissive (migration path)
+        return bool(rule_tags & set(self._tags))
+
     def to_dict(self) -> dict[str, Any]:
         """Serializable view for `/auth/whoami`."""
-        return {"pages": dict(self._pages)}
+        return {
+            "pages": dict(self._pages),
+            "quick_config_tags": list(self._tags),
+        }
 
 
 # ---------------------------------------------------------------------

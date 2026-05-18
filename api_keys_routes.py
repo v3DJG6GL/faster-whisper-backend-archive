@@ -20,6 +20,7 @@ the raw key is copied to the clipboard, then never retrievable.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -57,9 +58,16 @@ class PatchPermissionsIn(BaseModel):
     appear; the store's `set_user_permissions` merges with the existing
     shape (omitted pages keep their stored scope). Cell-by-cell save
     is also fine; full-row save (what the matrix UI sends) just lists
-    every page."""
+    every page.
+
+    `quick_config_tags` is the user's per-rule tag set for the new
+    tag-based /quick-config visibility filter. `None` means "leave the
+    stored value untouched" — useful for cell-level saves that only
+    touched pages. An empty list `[]` is explicit "clear all tags"
+    (user sees only untagged rules)."""
     model_config = {"extra": "forbid"}
     pages: dict[str, str] = Field(default_factory=dict)
+    quick_config_tags: list[str] | None = None
 
 
 # ---------------------------------------------------------------------
@@ -87,6 +95,8 @@ async def api_keys_page() -> HTMLResponse:
     dependencies=[Depends(require_admin_host), Depends(require_admin)],
 )
 async def list_users_api() -> JSONResponse:
+    import config as cfg
+    import config_store
     users = api_keys_store.list_users()
     # Annotate each user with their active key count for the card header.
     # Batched: one GROUP BY query instead of N list_keys() roundtrips.
@@ -110,6 +120,11 @@ async def list_users_api() -> JSONResponse:
         "pages": list(api_keys_store.PAGES),
         "scoped_pages": sorted(api_keys_store.SCOPED_PAGES),
         "access_only_pages": sorted(api_keys_store.ACCESS_ONLY_PAGES),
+        # Union of every tag currently used by any rule. The matrix's
+        # tag-picker uses this for autocomplete + "tags actually in
+        # use" hints. Empty list means no rule is tagged yet, which
+        # is the day-0 migration state.
+        "available_tags": config_store.pipeline_rule_tags(cfg.PIPELINE_RULES),
     })
 
 
@@ -210,9 +225,10 @@ async def patch_user_permissions_api(
     if target["revoked_ts"] is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, "user is revoked")
     try:
-        merged = api_keys_store.set_user_permissions(
-            uid, {"pages": payload.pages},
-        )
+        merge_payload: dict[str, Any] = {"pages": payload.pages}
+        if payload.quick_config_tags is not None:
+            merge_payload["quick_config_tags"] = payload.quick_config_tags
+        merged = api_keys_store.set_user_permissions(uid, merge_payload)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
     return JSONResponse({"ok": True, "permissions": merged})

@@ -158,18 +158,22 @@ async def get_quick_config_page() -> HTMLResponse:
 async def get_state(
     user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
-    """Return ONLY the rules currently flagged exposed=True. The terminal
-    rule is filtered out unconditionally (admin UI already hides its expose
-    toggle, but enforce here too as defense in depth)."""
-    # _canon_rules accepts plain dicts OR Pydantic models and runs each
-    # through TypeAdapter(PipelineRule).validate_python — one place to
-    # normalise both shapes. Filter the canonical output (it's been
-    # through model_dump so .get is always available).
+    """Return rules the caller can see on /quick-config.
+
+    Visibility is a triple-AND: (a) the rule must not be the terminal
+    sentinel, (b) it must be `exposed=True`, (c) the caller's
+    `quick_config_tags` must intersect `rule.tags` (or `rule.tags` must
+    be empty = visible-to-all). Admins bypass (b)+(c).
+
+    All three checks live behind `perms.can_see_rule()` (auth.py) so the
+    policy lives in exactly one place — same pattern as the existing
+    page-permission gates."""
+    perms = user["permissions"]
     canonical = [
         r for r in _canon_rules(list(cfg.PIPELINE_RULES))
         if isinstance(r, dict)
         and r.get("type") != "terminal"
-        and r.get("exposed")
+        and perms.can_see_rule(r)
     ]
     # Tag each rule with a fingerprint of its canonical form. Client
     # echoes back per-rule on save; server uses it to detect concurrent
@@ -278,10 +282,16 @@ async def post_state(
                 f"(adding rules from /quick-config is not allowed)",
             )
         target = current_rules[idx]
-        if not target.get("exposed"):
+        # Defense-in-depth: must pass the same can_see_rule check the GET
+        # uses, so a user can't PATCH a rule their tag set forbids them
+        # from seeing (which would have been hidden in the UI anyway).
+        # The exposed + terminal + admin checks all live inside
+        # can_see_rule, so this single call replaces the bare
+        # `target.get("exposed")` test from before.
+        if not user["permissions"].can_see_rule(target):
             raise HTTPException(
                 status.HTTP_403_FORBIDDEN,
-                f"rule '{slug}' is not exposed for end-user editing",
+                f"rule '{slug}' is not visible to your user",
             )
         rtype = target.get("type", "?")
         if rtype == "terminal":
