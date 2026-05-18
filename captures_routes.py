@@ -2358,6 +2358,28 @@ _CAPTURES_HTML = r"""<!doctype html>
     opacity: 0.55;
   }
   .word-strip .word.rule-removed:hover { opacity: 0.85; }
+  /* Keyboard-nav cursor — dashed accent outline on the cursored word.
+     The cursor persists even when focus leaves the strip (so the user
+     knows where ←/→ would resume). The accent tint behind the cursor
+     only appears when the strip itself is focused — that's the visual
+     cue that keystrokes will land here. */
+  .word-strip .word.cursor {
+    outline: 2px dashed var(--accent, #58a6ff);
+    outline-offset: -2px;
+    border-radius: 2px;
+  }
+  .word-strip { outline: none; }
+  .word-strip:focus { outline: none; }
+  .word-strip.has-focus .word.cursor {
+    background: rgba(88, 166, 255, 0.12);
+  }
+  .word-strip-hint {
+    font-size: var(--fs-xs); color: var(--help);
+    font-family: var(--font-mono);
+    margin-top: 0.25rem; padding: 0 0.2rem;
+    display: none;
+  }
+  .word-strip-hint.show { display: block; }
   /* Inline green replacement next to a struck-through word. Same
      palette as /reports' .diff-ins so the track-changes look reads
      consistently across pages. Lives as a sibling span after the
@@ -3590,8 +3612,8 @@ _CAPTURES_HTML = r"""<!doctype html>
     var corrSec = document.createElement('div');
     corrSec.className = 'cc-section';
     corrSec.innerHTML = '<h3>Corrections</h3>'
-      + '<div class="help">Click a word to mark it; shift-click another '
-      + 'to extend the range; type the corrected text in the chip below.</div>';
+      + '<div class="help">Click a word, or use ← / → and type, to mark '
+      + 'and correct it; shift-click extends a range; Enter accepts, Del removes.</div>';
     var strip = document.createElement('div');
     strip.className = 'word-strip';
     state.words.forEach(function(w, i) {
@@ -3612,6 +3634,9 @@ _CAPTURES_HTML = r"""<!doctype html>
       state.wordEls.push(sp);
     });
     corrSec.appendChild(strip);
+    state.stripEl = strip;
+    if (typeof state.cursorIdx !== 'number') state.cursorIdx = -1;
+    _bindStripKeyboard(state);
 
     // Karaoke highlighting via timeupdate (~4 Hz; battery-friendly).
     function onTimeUpdate() {
@@ -3914,6 +3939,15 @@ _CAPTURES_HTML = r"""<!doctype html>
 
   function onWordClick(state, idx, shiftKey) {
     var clicked = state.words[idx];
+    // Mirror the keyboard cursor on every click so a mouse user can
+    // grab the keyboard mid-flow and resume navigation from where they
+    // clicked. _redrawCursor is defined further down (function decl
+    // hoisted inside the IIFE) — call only if the strip is keyboard-
+    // wired (older code paths leave state.stripEl unset).
+    if (state.stripEl && typeof _redrawCursor === 'function') {
+      state.cursorIdx = idx;
+      _redrawCursor(state);
+    }
     if (clicked && clicked.removed) {
       // Rule deleted this token from `final` — a chip would have no
       // anchor in the exported text. Click still seeks audio.
@@ -4044,8 +4078,28 @@ _CAPTURES_HTML = r"""<!doctype html>
       inp.addEventListener('keydown', function(ev) {
         if (ev.key === 'Enter') {
           ev.preventDefault();
-          applyCorrectionsToGround(state);
+          // Empty input + Enter = remove the chip (per the keyboard
+          // spec — "Removing all letters from a edited word + enter
+          // removes correction").
+          if (!(inp.value || '').trim()) {
+            removeChip(state, i);
+            applyCorrectionsToGround(state);
+          } else {
+            applyCorrectionsToGround(state);
+            inp.blur();
+          }
+          // Return focus to the word-strip so navigation resumes
+          // immediately. No-op if state.stripEl wasn't wired up (e.g.,
+          // older code paths that don't use the keyboard binder).
+          if (state.stripEl) {
+            try { state.stripEl.focus({ preventScroll: true }); } catch (_) {}
+          }
+        } else if (ev.key === 'Escape') {
+          ev.preventDefault();
           inp.blur();
+          if (state.stripEl) {
+            try { state.stripEl.focus({ preventScroll: true }); } catch (_) {}
+          }
         }
       });
       chip.appendChild(inp);
@@ -4623,6 +4677,130 @@ _CAPTURES_HTML = r"""<!doctype html>
     return m + ':' + (sec < 10 ? '0' : '') + sec;
   }
 
+  // -------------------------------------------------------------------
+  // Word-strip keyboard navigation — cursor + arrow keys + type-to-edit
+  // for chip corrections. Applied wherever a chip-correction word-strip
+  // renders: single-capture expand, group-expand, proposal preview, and
+  // batch-review card. Callers set state.stripEl + state.cursorIdx then
+  // call _bindStripKeyboard(state).
+  // -------------------------------------------------------------------
+  function _redrawCursor(state) {
+    if (!state.wordEls) return;
+    for (var i = 0; i < state.wordEls.length; i++) {
+      if (state.wordEls[i]) state.wordEls[i].classList.remove('cursor');
+    }
+    if (state.cursorIdx >= 0 && state.wordEls[state.cursorIdx]) {
+      var el = state.wordEls[state.cursorIdx];
+      el.classList.add('cursor');
+      try { el.scrollIntoView({ block: 'nearest', inline: 'nearest' }); }
+      catch (_) {}
+    }
+  }
+  function _moveCursor(state, idx) {
+    state.cursorIdx = idx;
+    _redrawCursor(state);
+  }
+  // Locate the chip covering state.cursorIdx; create one if absent +
+  // requested. Returns the chip's <input> DOM (focused) or null.
+  function _focusChipForCursor(state, createIfAbsent) {
+    if (state.cursorIdx < 0) return null;
+    var chipIdx = -1;
+    for (var i = 0; i < state.corrections.length; i++) {
+      if (chipCovers(state.corrections[i], state.cursorIdx)) { chipIdx = i; break; }
+    }
+    if (chipIdx < 0) {
+      if (!createIfAbsent) return null;
+      onWordClick(state, state.cursorIdx, false);
+      for (var j = 0; j < state.corrections.length; j++) {
+        if (chipCovers(state.corrections[j], state.cursorIdx)) { chipIdx = j; break; }
+      }
+    }
+    if (chipIdx < 0) return null;
+    var inputs = state.chipBox.querySelectorAll('.correct-input');
+    var inp = inputs[chipIdx];
+    if (inp) {
+      try { inp.focus({ preventScroll: true }); } catch (_) { inp.focus(); }
+    }
+    return inp || null;
+  }
+  function _removeChipAtCursor(state) {
+    if (state.cursorIdx < 0) return;
+    for (var i = 0; i < state.corrections.length; i++) {
+      if (chipCovers(state.corrections[i], state.cursorIdx)) {
+        removeChip(state, i);
+        applyCorrectionsToGround(state);
+        return;
+      }
+    }
+  }
+  function _bindStripKeyboard(state) {
+    var strip = state.stripEl;
+    if (!strip || strip._kbBound) return;
+    strip._kbBound = true;
+    strip.setAttribute('tabindex', '0');
+    // Hint line: visible only while the strip itself has focus.
+    var hint = document.createElement('div');
+    hint.className = 'word-strip-hint';
+    hint.textContent = '← / → navigate · type to edit · Enter accept · Del / Backspace remove · Esc release';
+    if (strip.parentNode) {
+      strip.parentNode.insertBefore(hint, strip.nextSibling);
+    }
+    strip.addEventListener('focus', function() {
+      strip.classList.add('has-focus');
+      hint.classList.add('show');
+      // Initialize cursor on first focus if not set.
+      if (state.cursorIdx < 0 && state.words.length) {
+        _moveCursor(state, 0);
+      }
+    });
+    strip.addEventListener('blur', function() {
+      strip.classList.remove('has-focus');
+      hint.classList.remove('show');
+    });
+    strip.addEventListener('keydown', function(e) {
+      if (e.isComposing) return;   // let IME handle dead keys / compositions
+      var n = state.words.length;
+      if (n === 0) return;
+      var k = e.key;
+      if (k === 'ArrowLeft') {
+        e.preventDefault();
+        _moveCursor(state, Math.max(0, (state.cursorIdx < 0 ? 0 : state.cursorIdx) - 1));
+      } else if (k === 'ArrowRight') {
+        e.preventDefault();
+        _moveCursor(state, Math.min(n - 1, (state.cursorIdx < 0 ? -1 : state.cursorIdx) + 1));
+      } else if (k === 'Home') {
+        e.preventDefault();
+        _moveCursor(state, 0);
+      } else if (k === 'End') {
+        e.preventDefault();
+        _moveCursor(state, n - 1);
+      } else if (k === 'Escape') {
+        e.preventDefault();
+        strip.blur();
+      } else if (k === 'Enter') {
+        e.preventDefault();
+        _focusChipForCursor(state, true);
+      } else if (k === 'Delete' || k === 'Backspace') {
+        e.preventDefault();
+        _removeChipAtCursor(state);
+      } else if (
+        !e.ctrlKey && !e.metaKey && !e.altKey &&
+        typeof k === 'string' && k.length === 1
+      ) {
+        // Printable single character — ensure chip exists + focus its
+        // input + replay the keystroke into the input (the browser
+        // won't auto-deliver it to the now-focused input because the
+        // original keydown fired on the strip).
+        var inp = _focusChipForCursor(state, true);
+        if (inp) {
+          e.preventDefault();
+          inp.value = (inp.value || '') + k;
+          inp.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+      }
+    });
+  }
+
   // Wrap an <audio> element in a compact play/pause + scrubber + time
   // strip. Replaces native <audio controls> in single-capture and group-
   // expand panels for visual consistency with the merge-preview controls.
@@ -4900,6 +5078,8 @@ _CAPTURES_HTML = r"""<!doctype html>
           wordEls: [],
           chipBox: chipBox,
           gtArea: gtArea,
+          stripEl: stripEl,
+          cursorIdx: -1,
           dirtyEl: null,
           activeWordIdx: -1,
           dirty: false,
@@ -4910,6 +5090,10 @@ _CAPTURES_HTML = r"""<!doctype html>
         state.wordEls = _renderWordStrip(stripEl, wordsArr, function(i, sh) {
           onWordClick(state, i, sh);
         });
+        _bindStripKeyboard(state);
+        // Stash state on the panel so the batch-card auto-focus can find
+        // it without walking the DOM tree.
+        panel._state = state;
         // Debounced save — fires whenever markDirty is invoked (chip
         // input, chip removal, chip extend). 250 ms matches the cadence
         // the rest of /captures uses informally.
@@ -5300,6 +5484,27 @@ _CAPTURES_HTML = r"""<!doctype html>
     setTimeout(function() {
       var tBtn = card.querySelector('.merge-preview-btn');
       if (tBtn) tBtn.click();
+      // Auto-focus the word-strip so keyboard nav (← / →, type to edit)
+      // works immediately without a click. Wait for the preview panel
+      // to render its strip — _saveProposalChips and the audio fetch
+      // both await, so poll briefly.
+      var tries = 0;
+      var focusTimer = setInterval(function() {
+        tries++;
+        var panel = card.querySelector('.merge-preview-panel');
+        var state = panel && panel._state;
+        var strip = state && state.stripEl;
+        if (strip && !strip.hidden && state.words && state.words.length) {
+          if (state.cursorIdx < 0) {
+            state.cursorIdx = 0;
+            _redrawCursor(state);
+          }
+          try { strip.focus({ preventScroll: true }); } catch (_) {}
+          clearInterval(focusTimer);
+        } else if (tries > 40) {   // ~4 s cap, gives up if preview never loads
+          clearInterval(focusTimer);
+        }
+      }, 100);
     }, 0);
   }
 
@@ -5601,10 +5806,9 @@ _CAPTURES_HTML = r"""<!doctype html>
         var corrSec = document.createElement('div');
         corrSec.className = 'cc-section';
         corrSec.innerHTML = '<h3>Corrections</h3>'
-          + '<div class="help">Click a word to mark it; shift-click '
-          + 'another to extend the range; type the corrected text in '
-          + 'the chip below. Edits auto-apply to the final-result '
-          + 'preview on blur / Enter.</div>';
+          + '<div class="help">Click a word, or use ← / → and type, to '
+          + 'mark and correct it; shift-click extends a range; Enter '
+          + 'accepts, Del removes.</div>';
         var staleHint = document.createElement('div');
         staleHint.className = 'help';
         staleHint.style.color = 'var(--cyan)';
@@ -5612,6 +5816,9 @@ _CAPTURES_HTML = r"""<!doctype html>
         var strip = document.createElement('div');
         strip.className = 'word-strip';
         corrSec.appendChild(strip);
+        groupState.stripEl = strip;
+        if (typeof groupState.cursorIdx !== 'number') groupState.cursorIdx = -1;
+        _bindStripKeyboard(groupState);
 
         // Karaoke highlight via timeupdate (attached once; reads the
         // live groupState.words). Survives applyServerGroup re-renders.
@@ -5943,6 +6150,9 @@ _CAPTURES_HTML = r"""<!doctype html>
             strip.appendChild(sp);
             groupState.wordEls.push(sp);
           });
+          // Word DOM was rebuilt — re-paint the keyboard cursor on the
+          // new spans so a mid-edit reload doesn't lose the cursor.
+          if (typeof _redrawCursor === 'function') _redrawCursor(groupState);
 
           // 6. Chips + pre-marked word selections from saved corrections.
           renderChips(groupState);
