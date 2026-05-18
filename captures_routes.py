@@ -1090,6 +1090,29 @@ async def preview_merge_audio_api(
     )
 
 
+@router.post(
+    "/captures/api/groups/preview-words",
+    dependencies=[Depends(require_admin_host)],
+)
+async def preview_merge_words_api(
+    payload: PreviewMergeIn,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> JSONResponse:
+    """Return the projected merged words for a hypothetical merge —
+    timestamps aligned to the audio that POST /preview-audio would stream
+    for the same payload. Lets the UI overlay karaoke highlighting on the
+    preview player without persisting a group row.
+
+    Pure CPU; no rate-limit (bounded by ≤30 members × few hundred words +
+    memoized per-word _postprocess_text). Same validation gates as the
+    audio endpoint."""
+    captures, _owner, _member_paths, _total_audio_ms = (
+        _validate_merge_payload(payload.member_ids, payload.silence_ms, user)
+    )
+    words = _build_merged_words(captures, payload.silence_ms)
+    return JSONResponse({"words": words})
+
+
 def _insert_group_with_gid(
     *,
     gid: str,
@@ -2641,6 +2664,18 @@ _CAPTURES_HTML = r"""<!doctype html>
   .merge-preview-btn .dur {
     color: var(--help); font-size: var(--fs-xs);
   }
+  .merge-preview-panel {
+    display: flex; flex-direction: column; gap: 0.4rem;
+    margin: 0.5rem 0; width: 100%;
+  }
+  .merge-preview-panel .merge-preview-audio {
+    width: 100%; height: 2.2rem;
+  }
+  .merge-preview-panel .word-strip {
+    background: var(--input-bg); border: 1px solid var(--border);
+    border-radius: 4px; padding: 0.4rem 0.5rem;
+    max-height: 12rem; overflow: auto;
+  }
   #propose-list .proposal .meter-bar {
     display: inline-block; width: 7rem; height: 0.4rem;
     background: var(--border); border-radius: 2px; overflow: hidden;
@@ -2723,6 +2758,7 @@ _CAPTURES_HTML = r"""<!doctype html>
       <span class="summary" id="merge-summary"></span>
       <span id="merge-preview-slot"></span>
     </div>
+    <div id="merge-preview-panel-host"></div>
     <p style="margin: 0.5rem 0 0.25rem; color: var(--help); font-size: var(--fs-sm);">
       Final result preview (derived from members + chips):
     </p>
@@ -4198,12 +4234,14 @@ _CAPTURES_HTML = r"""<!doctype html>
     refreshSummary();
     silSel.onchange = function() {
       refreshSummary();
-      if (previewBtn) previewBtn._refreshDur();
+      if (previewCtl && previewCtl.toggleBtn) previewCtl.toggleBtn._refreshDur();
     };
-    // Rebuild the preview button per open so it captures the current rows.
+    // Rebuild the preview controls per open so they capture the current rows.
     var slot = document.getElementById('merge-preview-slot');
     slot.innerHTML = '';
-    var previewBtn = _makeMergePreviewBtn(
+    var panelHost = document.getElementById('merge-preview-panel-host');
+    if (panelHost) panelHost.innerHTML = '';
+    var previewCtl = _makeMergePreviewBtn(
       function() { return rows.map(function(r) { return r.id; }); },
       function() { return parseInt(silSel.value, 10) || 300; },
       function() {
@@ -4212,7 +4250,8 @@ _CAPTURES_HTML = r"""<!doctype html>
         return totalAudio + gap * Math.max(0, rows.length - 1);
       }
     );
-    slot.appendChild(previewBtn);
+    slot.appendChild(previewCtl.toggleBtn);
+    if (panelHost) panelHost.appendChild(previewCtl.panel);
     document.getElementById('merge-cancel').onclick = function() {
       _stopAnyPreview();
       modal.classList.remove('show');
@@ -4240,97 +4279,195 @@ _CAPTURES_HTML = r"""<!doctype html>
   }
 
   // -------------------------------------------------------------------
-  // Merge preview audio — shared play button used by the propose-modal
-  // proposal cards AND the manual merge-modal. Streams a temp WAV from
-  // POST /captures/api/groups/preview-audio (built same way as the
-  // committed merge but never persisted).
+  // Merge preview audio + karaoke — shared component used by both the
+  // propose-modal proposal cards and the manual merge-modal. Streams a
+  // temp WAV from POST /preview-audio and the projected merged words
+  // from POST /preview-words; renders a native <audio controls> + a
+  // word-strip with the same .word.active highlighting used on the
+  // committed group-expand path.
   // -------------------------------------------------------------------
-  var _previewAudio = null;       // single <audio> element shared across buttons
   var _previewBlobUrl = null;     // current blob URL (revoked on stop)
-  var _previewActiveBtn = null;   // currently-playing button (updates label/icon)
+  var _previewActiveWrap = null;  // currently-playing wrapper (has _ctl handle)
 
   function _stopAnyPreview() {
-    if (_previewAudio) {
-      try { _previewAudio.pause(); } catch (_) {}
-      try { _previewAudio.removeAttribute('src'); _previewAudio.load(); } catch (_) {}
+    if (_previewActiveWrap && typeof _previewActiveWrap._teardown === 'function') {
+      try { _previewActiveWrap._teardown(); } catch (_) {}
+      _previewActiveWrap = null;
     }
     if (_previewBlobUrl) {
       try { URL.revokeObjectURL(_previewBlobUrl); } catch (_) {}
       _previewBlobUrl = null;
     }
-    if (_previewActiveBtn) {
-      _previewActiveBtn._setIcon('▶');
-      _previewActiveBtn.disabled = false;
-      _previewActiveBtn = null;
-    }
   }
 
-  // memberIdsFn() → array of capture ids (read at click time so the latest
-  //                 selection / proposal members are used)
-  // silenceMsFn() → silence_ms read from the modal's dropdown at click time
-  // durationFn()  → predicted total duration in seconds (display only)
+  function _renderWordStrip(stripEl, words) {
+    stripEl.innerHTML = '';
+    var els = [];
+    words.forEach(function(w) {
+      var sp = document.createElement('span');
+      sp.className = 'word';
+      sp.textContent = (w.word || '').replace(/^\s+/, ' ');
+      if (w.removed) {
+        sp.classList.add('rule-removed');
+        sp.title = 'removed by pipeline rule';
+      } else if (w.raw_word) {
+        sp.classList.add('post-edited');
+        sp.title = 'raw: ' + w.raw_word;
+      }
+      stripEl.appendChild(sp);
+      els.push(sp);
+    });
+    return els;
+  }
+
+  function _bindKaraoke(audioEl, words, wordEls) {
+    var activeIdx = -1;
+    audioEl.addEventListener('timeupdate', function() {
+      var t = audioEl.currentTime;
+      var idx = -1;
+      for (var i = 0; i < words.length; i++) {
+        var s = words[i].start || 0;
+        var e = words[i].end || s;
+        if (s <= t && t < e) { idx = i; break; }
+      }
+      if (idx !== activeIdx) {
+        if (activeIdx >= 0 && wordEls[activeIdx]) wordEls[activeIdx].classList.remove('active');
+        if (idx >= 0 && wordEls[idx]) wordEls[idx].classList.add('active');
+        activeIdx = idx;
+      }
+    });
+  }
+
+  // Returns { toggleBtn, panel } — caller appends each to its own host.
+  // The toggle lives in a compact row (proposal card row1 or merge-modal
+  // summary row). The panel hosts the audio + word-strip and goes below
+  // the row so it can expand full-width when active.
+  //
+  // memberIdsFn() / silenceMsFn() are read fresh at click time so the
+  // latest selection / proposal members / silence setting are used.
+  // durationFn() returns the predicted total duration in seconds (display).
   function _makeMergePreviewBtn(memberIdsFn, silenceMsFn, durationFn) {
-    var btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'merge-preview-btn';
-    btn.title = 'Preview the merged audio (no group is created)';
+    var toggleBtn = document.createElement('button');
+    toggleBtn.type = 'button';
+    toggleBtn.className = 'merge-preview-btn';
+    toggleBtn.title = 'Preview the merged audio with word-level karaoke';
     var iconEl = document.createElement('span');
     iconEl.textContent = '▶';
     var durEl = document.createElement('span');
     durEl.className = 'dur';
-    btn.appendChild(iconEl);
-    btn.appendChild(durEl);
-    btn._setIcon = function(s) { iconEl.textContent = s; };
-    btn._refreshDur = function() {
+    toggleBtn.appendChild(iconEl);
+    toggleBtn.appendChild(durEl);
+    toggleBtn._setIcon = function(s) { iconEl.textContent = s; };
+    toggleBtn._refreshDur = function() {
       var d = durationFn();
       durEl.textContent = (typeof d === 'number' && isFinite(d))
         ? d.toFixed(1) + ' s' : '';
     };
-    btn._refreshDur();
+    toggleBtn._refreshDur();
 
-    btn.addEventListener('click', async function() {
-      // If THIS button is the active player, stop and exit (toggle).
-      if (_previewActiveBtn === btn) { _stopAnyPreview(); return; }
+    var panel = document.createElement('div');
+    panel.className = 'merge-preview-panel';
+    panel.hidden = true;
+    var audioEl = document.createElement('audio');
+    audioEl.controls = true;
+    audioEl.preload = 'auto';
+    audioEl.className = 'merge-preview-audio';
+    var stripEl = document.createElement('div');
+    stripEl.className = 'merge-preview-strip word-strip';
+    panel.appendChild(audioEl);
+    panel.appendChild(stripEl);
+
+    function teardown() {
+      panel.hidden = true;
+      try { audioEl.pause(); } catch (_) {}
+      try { audioEl.removeAttribute('src'); audioEl.load(); } catch (_) {}
+      toggleBtn._setIcon('▶');
+      toggleBtn.disabled = false;
+      stripEl.innerHTML = '';
+    }
+    // Hand the teardown closure to the wrapper-like reference _stopAnyPreview holds.
+    panel._teardown = teardown;
+
+    // Sync the toggle icon with native audio state — covers clicks on
+    // the native <audio controls> pause/play affordance.
+    audioEl.addEventListener('pause', function() {
+      if (!panel.hidden) toggleBtn._setIcon('▶');
+    });
+    audioEl.addEventListener('play', function() {
+      if (!panel.hidden) toggleBtn._setIcon('⏸');
+    });
+
+    toggleBtn.addEventListener('click', async function() {
+      // If THIS panel is already the active one: pause/resume (native
+      // handles position retention — no re-fetch).
+      if (_previewActiveWrap === panel) {
+        if (audioEl.paused) {
+          try { await audioEl.play(); } catch (e) { /* user gesture lost; ignore */ }
+        } else {
+          audioEl.pause();
+        }
+        return;
+      }
+      // Different panel — stop any other active preview first.
       _stopAnyPreview();
       var ids = memberIdsFn() || [];
       if (ids.length < 2) { toast('Need at least 2 members to preview', true); return; }
-      btn.disabled = true;
-      btn._setIcon('…');
+      toggleBtn.disabled = true;
+      toggleBtn._setIcon('…');
       try {
         var headers = { 'Content-Type': 'application/json' };
         var tok = getToken();
         if (tok) headers['Authorization'] = 'Bearer ' + tok;
-        var resp = await fetch('/captures/api/groups/preview-audio', {
-          method: 'POST', headers: headers,
-          body: JSON.stringify({
-            member_ids: ids,
-            silence_ms: silenceMsFn() || 300,
-          }),
+        var body = JSON.stringify({
+          member_ids: ids,
+          silence_ms: silenceMsFn() || 300,
         });
-        if (!resp.ok) {
-          var msg = 'preview failed (' + resp.status + ')';
-          try { var j = await resp.json(); if (j && j.detail) msg = j.detail; } catch (_) {}
-          throw new Error(msg);
+        // Fetch audio + words in parallel; karaoke needs both.
+        var [audioResp, wordsResp] = await Promise.all([
+          fetch('/captures/api/groups/preview-audio', {
+            method: 'POST', headers: headers, body: body,
+          }),
+          fetch('/captures/api/groups/preview-words', {
+            method: 'POST', headers: headers, body: body,
+          }),
+        ]);
+        if (!audioResp.ok) {
+          var amsg = 'preview failed (' + audioResp.status + ')';
+          try { var aj = await audioResp.json(); if (aj && aj.detail) amsg = aj.detail; } catch (_) {}
+          throw new Error(amsg);
         }
-        var blob = await resp.blob();
+        if (!wordsResp.ok) {
+          var wmsg = 'word-preview failed (' + wordsResp.status + ')';
+          try { var wj = await wordsResp.json(); if (wj && wj.detail) wmsg = wj.detail; } catch (_) {}
+          throw new Error(wmsg);
+        }
+        var blob = await audioResp.blob();
+        var wordsJ = await wordsResp.json();
         _previewBlobUrl = URL.createObjectURL(blob);
-        if (!_previewAudio) {
-          _previewAudio = document.createElement('audio');
-          _previewAudio.addEventListener('ended', _stopAnyPreview);
-        }
-        _previewAudio.src = _previewBlobUrl;
-        _previewActiveBtn = btn;
-        btn._setIcon('⏸');
-        btn.disabled = false;
-        await _previewAudio.play();
+        audioEl.src = _previewBlobUrl;
+        var wordEls = _renderWordStrip(stripEl, wordsJ.words || []);
+        _bindKaraoke(audioEl, wordsJ.words || [], wordEls);
+        panel.hidden = false;
+        _previewActiveWrap = panel;
+        toggleBtn._setIcon('⏸');
+        toggleBtn.disabled = false;
+        await audioEl.play();
       } catch (e) {
-        btn.disabled = false;
-        btn._setIcon('▶');
-        _previewActiveBtn = null;
+        toggleBtn.disabled = false;
+        toggleBtn._setIcon('▶');
         if (e && e.message) toast(e.message, true);
       }
     });
-    return btn;
+
+    // Auto-revert toggle when playback finishes naturally.
+    audioEl.addEventListener('ended', function() {
+      // Don't tear down — leave the panel open with the audio at end so
+      // the user can scrub back. Just update the toggle icon (the native
+      // 'pause' event already fired but stay defensive).
+      toggleBtn._setIcon('▶');
+    });
+
+    return { toggleBtn: toggleBtn, panel: panel };
   }
 
   // -------------------------------------------------------------------
@@ -4420,14 +4557,15 @@ _CAPTURES_HTML = r"""<!doctype html>
       row1.appendChild(spk);
     }
 
-    row1.appendChild(_makeMergePreviewBtn(
+    var previewCtl = _makeMergePreviewBtn(
       function() { return p.member_ids; },
       function() {
         var sel = document.getElementById('propose-silence');
         return (sel && parseInt(sel.value, 10)) || 300;
       },
       function() { return p.total_duration_s; }
-    ));
+    );
+    row1.appendChild(previewCtl.toggleBtn);
 
     var sp = document.createElement('span');
     sp.style.flex = '1';
@@ -4445,6 +4583,10 @@ _CAPTURES_HTML = r"""<!doctype html>
     reason.className = 'reason';
     reason.textContent = p.reason || '';
     card.appendChild(reason);
+
+    // Preview panel host: full-width inline expansion below the card head.
+    // Stays hidden until the user clicks ▶ on this card.
+    card.appendChild(previewCtl.panel);
 
     var members = document.createElement('div');
     members.className = 'members';
