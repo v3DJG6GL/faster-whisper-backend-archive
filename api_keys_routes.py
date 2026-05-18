@@ -50,6 +50,18 @@ class CreateKeyIn(BaseModel):
     label: str = Field(default="", max_length=128)
 
 
+class PatchPermissionsIn(BaseModel):
+    """Payload for PATCH /api/users/{uid}/permissions.
+
+    `pages` is a partial map — only the cells the admin changed need
+    appear; the store's `set_user_permissions` merges with the existing
+    shape (omitted pages keep their stored scope). Cell-by-cell save
+    is also fine; full-row save (what the matrix UI sends) just lists
+    every page."""
+    model_config = {"extra": "forbid"}
+    pages: dict[str, str] = Field(default_factory=dict)
+
+
 # ---------------------------------------------------------------------
 # HTML page
 # ---------------------------------------------------------------------
@@ -80,12 +92,24 @@ async def list_users_api() -> JSONResponse:
     # Batched: one GROUP BY query instead of N list_keys() roundtrips.
     counts = api_keys_store.active_key_counts()
     out = [
-        {**u, "active_key_count": counts.get(u["id"], 0)}
+        {
+            **u,
+            "active_key_count": counts.get(u["id"], 0),
+            # permissions is already in `u` via _row_to_user_dict — keep
+            # the canonical key name so the matrix UI can read it
+            # directly without a second roundtrip.
+        }
         for u in users
     ]
     return JSONResponse({
         "users": out,
         "open_mode": not api_keys_store.is_locked_down(),
+        # Surface the page model so the front-end matrix can render
+        # column headers without hardcoding them — keeps server +
+        # client in sync when a new page is added.
+        "pages": list(api_keys_store.PAGES),
+        "scoped_pages": sorted(api_keys_store.SCOPED_PAGES),
+        "access_only_pages": sorted(api_keys_store.ACCESS_ONLY_PAGES),
     })
 
 
@@ -163,6 +187,35 @@ async def revoke_key_api(uid: str, kid: str) -> JSONResponse:
             f"{e} — generate another admin key first",
         )
     return JSONResponse({"ok": True})
+
+
+@router.patch(
+    "/api/users/{uid}/permissions",
+    dependencies=[Depends(require_admin_host), Depends(require_admin)],
+)
+async def patch_user_permissions_api(
+    uid: str, payload: PatchPermissionsIn,
+) -> JSONResponse:
+    """PATCH-merge per-page permissions onto a user. Returns the
+    canonical post-merge shape so the matrix UI can echo it back into
+    its rendered state without a second GET.
+
+    Admins still validate + persist (so a future demote-to-non-admin
+    path picks up the saved defaults) but their `is_admin` flag
+    short-circuits all page checks at request time — the matrix UI
+    greys their row out for clarity."""
+    target = api_keys_store.get_user(uid)
+    if target is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "user not found")
+    if target["revoked_ts"] is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "user is revoked")
+    try:
+        merged = api_keys_store.set_user_permissions(
+            uid, {"pages": payload.pages},
+        )
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    return JSONResponse({"ok": True, "permissions": merged})
 
 
 # ---------------------------------------------------------------------
@@ -287,6 +340,50 @@ _API_KEYS_HTML = r"""<!doctype html>
   .modal .err { margin: 0.55rem 0 0 0; }
   .modal .err:empty { display: none; }
   .hint { color: var(--help); font-size: var(--fs-sm); }
+
+  /* Per-user × per-page permission matrix.
+     User-rows × page-columns, each cell a tri-state select (none/own/all).
+     Admin rows are greyed out and disabled — they bypass page checks at
+     request time but we still render the row so a future demote path
+     stays predictable. Dirty rows tint yellow until Save flushes. */
+  .perm-matrix { width: 100%; border-collapse: collapse;
+    font-size: var(--fs-sm); margin-top: 0.35rem; }
+  .perm-matrix th, .perm-matrix td {
+    padding: 0.35rem 0.5rem; border-bottom: 1px solid var(--border);
+    text-align: left; vertical-align: middle; }
+  .perm-matrix th { color: var(--dim); font-weight: 500;
+    font-size: var(--fs-xs); text-transform: uppercase;
+    letter-spacing: 0.04em; white-space: nowrap; }
+  .perm-matrix th .tip { color: var(--dim); cursor: help;
+    margin-left: 0.25rem; border-bottom: 1px dotted var(--dim); }
+  .perm-matrix tbody td:first-child {
+    color: var(--bold); font-weight: 500; }
+  .perm-matrix tbody tr.admin-row { color: var(--dim); }
+  .perm-matrix tbody tr.admin-row td:first-child { color: var(--dim); }
+  .perm-matrix tbody tr.dirty td {
+    background: rgba(242, 204, 96, 0.07); }
+  .perm-matrix select {
+    background: var(--input-bg); color: var(--fg);
+    border: 1px solid var(--border); border-radius: 3px;
+    padding: 0.15rem 0.3rem; font: inherit; font-size: var(--fs-sm);
+    font-family: var(--font-sans);
+  }
+  .perm-matrix select:disabled {
+    opacity: 0.35; cursor: not-allowed; }
+  .perm-matrix .admin-cell {
+    color: var(--dim); font-style: italic; }
+  .perm-matrix button.save-perms {
+    background: var(--input-bg); border: 1px solid var(--border);
+    color: var(--fg); padding: 0.2rem 0.65rem; border-radius: 3px;
+    font: inherit; font-size: var(--fs-sm); cursor: pointer;
+    opacity: 0.5; transition: opacity 0.15s ease; }
+  .perm-matrix tbody tr.dirty button.save-perms {
+    opacity: 1; color: var(--green); border-color: var(--green); }
+  .perm-matrix button.save-perms:disabled {
+    opacity: 0.2; cursor: not-allowed; }
+  .perm-empty {
+    color: var(--dim); padding: 0.6rem 0; font-style: italic;
+    font-size: var(--fs-sm); }
   {{NAV_CSS}}
 </style></head>
 <body>
@@ -322,6 +419,18 @@ _API_KEYS_HTML = r"""<!doctype html>
       can hold any number of API keys (one per device is the standard
       pattern).
     </p>
+  </div>
+
+  <div class="card" id="perm-matrix-card" style="display:none">
+    <h3>Page permissions</h3>
+    <p class="hint">
+      Per-user access to each admin page. <strong>none</strong> hides
+      the page entirely (403 on its API). <strong>own</strong> shows
+      the page but filters records to the user's own; <strong>all</strong>
+      shows every user's data. <code>/config</code> and <code>/config/api-keys</code>
+      are always admin-only and never appear here.
+    </p>
+    <div id="perm-matrix-wrap"></div>
   </div>
 
   <div id="users-container"></div>
@@ -512,6 +621,144 @@ _API_KEYS_HTML = r"""<!doctype html>
     };
   }
 
+  // Tooltips describe what "own" means per page. Kept short — full
+  // help lives in the page card's intro paragraph.
+  var PAGE_TIPS = {
+    logs:         'own = only log lines tagged with this user’s id',
+    stats:        'system aggregates — no per-user view (none|all only)',
+    quick_config: 'own = this user’s submitted chips + their own recent traces',
+    reports:      'own = only reports this user submitted',
+    captures:     'own = only audio + transcripts dictated under this user’s key'
+  };
+
+  function renderMatrix(j) {
+    var card = document.getElementById('perm-matrix-card');
+    var wrap = document.getElementById('perm-matrix-wrap');
+    wrap.innerHTML = '';
+    var pages = j.pages || [];
+    if (!pages.length || !j.users || !j.users.length) {
+      card.style.display = 'none';
+      return;
+    }
+    card.style.display = 'block';
+
+    var accessOnly = new Set(j.access_only_pages || []);
+    var nonAdminUsers = j.users.filter(function(u){ return !u.is_admin; });
+    if (!nonAdminUsers.length) {
+      wrap.innerHTML =
+        '<div class="perm-empty">No non-admin users yet. Permissions only ' +
+        'apply to non-admin users — admins bypass all page checks.</div>';
+      return;
+    }
+
+    var table = document.createElement('table');
+    table.className = 'perm-matrix';
+    var thead = document.createElement('thead');
+    var headRow = document.createElement('tr');
+    var thUser = document.createElement('th');
+    thUser.textContent = 'User';
+    thUser.style.minWidth = '10rem';
+    headRow.appendChild(thUser);
+    pages.forEach(function(p) {
+      var th = document.createElement('th');
+      th.textContent = '/' + p.replace(/_/g, '-');
+      var tip = document.createElement('span');
+      tip.className = 'tip';
+      tip.textContent = '?';
+      tip.title = PAGE_TIPS[p] || '';
+      th.appendChild(tip);
+      headRow.appendChild(th);
+    });
+    var thSave = document.createElement('th');
+    thSave.textContent = '';
+    headRow.appendChild(thSave);
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+
+    var tbody = document.createElement('tbody');
+    j.users.forEach(function(u) {
+      var tr = document.createElement('tr');
+      tr.dataset.uid = u.id;
+      if (u.is_admin) tr.classList.add('admin-row');
+
+      var tdUser = document.createElement('td');
+      tdUser.textContent = u.username + (u.is_admin ? ' (admin)' : '');
+      tr.appendChild(tdUser);
+
+      var currentPages = (u.permissions && u.permissions.pages) || {};
+
+      pages.forEach(function(page) {
+        var td = document.createElement('td');
+        if (u.is_admin) {
+          td.className = 'admin-cell';
+          td.textContent = '—';
+          td.title = 'admin bypasses all page + scope checks';
+        } else {
+          var sel = document.createElement('select');
+          sel.dataset.page = page;
+          var allowed = accessOnly.has(page)
+            ? ['none', 'all']
+            : ['none', 'own', 'all'];
+          allowed.forEach(function(s) {
+            var opt = document.createElement('option');
+            opt.value = s;
+            opt.textContent = s;
+            sel.appendChild(opt);
+          });
+          sel.value = allowed.indexOf(currentPages[page]) >= 0
+            ? currentPages[page] : 'none';
+          sel.addEventListener('change', function() {
+            tr.classList.add('dirty');
+          });
+          td.appendChild(sel);
+        }
+        tr.appendChild(td);
+      });
+
+      var tdSave = document.createElement('td');
+      if (!u.is_admin) {
+        var btn = document.createElement('button');
+        btn.className = 'save-perms';
+        btn.textContent = 'Save';
+        btn.title = 'Save this row';
+        btn.addEventListener('click', function() {
+          savePerms(u.id, tr, btn);
+        });
+        tdSave.appendChild(btn);
+      }
+      tr.appendChild(tdSave);
+
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+  }
+
+  function savePerms(uid, tr, btn) {
+    var pages = {};
+    tr.querySelectorAll('select').forEach(function(sel) {
+      pages[sel.dataset.page] = sel.value;
+    });
+    btn.disabled = true;
+    api('PATCH',
+        '/config/api-keys/api/users/' + encodeURIComponent(uid) + '/permissions',
+        { pages: pages })
+      .then(function(r) {
+        if (!r.ok) return r.text().then(function(t) { throw new Error(t); });
+        return r.json();
+      })
+      .then(function() {
+        tr.classList.remove('dirty');
+        showToast('Permissions saved', 'ok');
+      })
+      .catch(function(e) {
+        showToast(String(e.message || e), 'err');
+      })
+      .finally(function() {
+        btn.disabled = false;
+      });
+  }
+
   function renderUser(u) {
     var card = document.createElement('div');
     card.className = 'card';
@@ -673,9 +920,11 @@ _API_KEYS_HTML = r"""<!doctype html>
     var ct = document.getElementById('users-container');
     ct.innerHTML = '';
     if (!j.users.length) {
+      document.getElementById('perm-matrix-card').style.display = 'none';
       ct.innerHTML = '<p class="hint">No users yet. Add one above to create the first admin.</p>';
       return;
     }
+    renderMatrix(j);
     j.users.forEach(function(u) { ct.appendChild(renderUser(u)); });
   }
 

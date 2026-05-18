@@ -262,6 +262,13 @@ header .wrap-anchor { flex-basis: 0; height: 0; display: none; }
    never see admin-only chrome. */
 header .admin-only { display: none; }
 body.role-admin header .admin-only { display: inline-flex; }
+
+/* Per-user-gated nav links (logs/stats/quick/reports/captures).
+   Hidden until OPEN_MODE_BANNER_JS sets `.allowed` per link based on
+   /auth/whoami → permissions.pages[X]. Admins still pass via the
+   server-side is_admin short-circuit. */
+header .page-link { display: none; }
+header .page-link.allowed { display: inline-flex; }
 """
 
 
@@ -326,17 +333,41 @@ OPEN_MODE_BANNER_JS = r"""
   fetch('/auth/whoami',{headers:h,cache:'no-store'})
     .then(function(r){ return r.ok ? r.json() : null; })
     .then(function(j){
-      if(!j || !j.open_mode) return;
-      var b=document.createElement('div');
-      b.setAttribute('role','alert');
-      b.style.cssText='background:#5a2424;color:#fff;padding:0.5rem 1rem;'
-        +'text-align:center;font-weight:600;font-size:0.95rem;'
-        +'position:sticky;top:0;z-index:20;';
-      b.innerHTML='⚠ No admin API key set — the server is in '
-        +'OPEN mode and anyone reachable can use it. '
-        +'<a href="/config/api-keys" style="color:#ffd1d1;text-decoration:underline">'
-        +'Generate the first admin key</a>.';
-      document.body.insertBefore(b, document.body.firstChild);
+      if(!j) return;
+      // Cache the whoami payload so pages that want to consult
+      // permissions later (e.g. for inline scope hints) don't re-fetch.
+      try { window.__whoami = j; } catch(_) {}
+
+      // OPEN-mode warning banner — only when no admin key configured.
+      if (j.open_mode) {
+        var b=document.createElement('div');
+        b.setAttribute('role','alert');
+        b.style.cssText='background:#5a2424;color:#fff;padding:0.5rem 1rem;'
+          +'text-align:center;font-weight:600;font-size:0.95rem;'
+          +'position:sticky;top:0;z-index:20;';
+        b.innerHTML='⚠ No admin API key set — the server is in '
+          +'OPEN mode and anyone reachable can use it. '
+          +'<a href="/config/api-keys" style="color:#ffd1d1;text-decoration:underline">'
+          +'Generate the first admin key</a>.';
+        document.body.insertBefore(b, document.body.firstChild);
+      }
+
+      // Per-page nav-link visibility. The nav renders every link with
+      // class `.page-link` default-hidden; we add `.allowed` per link
+      // the caller can reach. Admins pass on every link via the
+      // server-side is_admin short-circuit (permissions object is
+      // populated but is_admin alone is enough for visibility).
+      var perms = (j.permissions && j.permissions.pages) || {};
+      var isAdmin = !!j.is_admin;
+      document.querySelectorAll('header a.page-link[data-page]').forEach(
+        function(a) {
+          var page = a.getAttribute('data-page');
+          var scope = perms[page];
+          if (isAdmin || (scope && scope !== 'none')) {
+            a.classList.add('allowed');
+          }
+        }
+      );
     })
     .catch(function(){});
 })();</script>
@@ -765,21 +796,39 @@ def nav_html(current: str) -> str:
     Pills link to /logs?filter=<level> so a click jumps to the relevant log
     rows. Counts of zero render dimmed; non-zero render colored ("hot")."""
     counts = severity_counts()
-    # logs/stats/config + sev pills are admin-only — every page renders
-    # them with class "admin-only" which CSS hides by default. The page's
-    # JS adds `body.role-admin` after a successful state-load, revealing
-    # them. /quick-config in a non-admin user session never gets that class
-    # so the admin links stay hidden. The "quick" link is for everyone.
-    admin_only_labels = {"logs", "stats", "config", "keys", "reports", "captures"}
+    # Two visibility tracks:
+    #
+    #   - "admin-only" — config + api-keys + sev pills. These stay all-or-
+    #     nothing on the existing `body.role-admin` class (CSS hides by
+    #     default; pages add the class after a successful admin-API ping).
+    #
+    #   - "page-link" + data-page="<X>" — logs / stats / quick-config /
+    #     reports / captures. Per-user gated by OPEN_MODE_BANNER_JS via
+    #     /auth/whoami → permissions.pages[X]. CSS default-hides; the JS
+    #     adds `.allowed` per link the caller can reach. Admins always
+    #     pass via the is_admin short-circuit on the server side.
+    page_link_labels: dict[str, str] = {
+        "logs":     "logs",
+        "stats":    "stats",
+        "quick":    "quick_config",
+        "reports":  "reports",
+        "captures": "captures",
+    }
+    admin_only_labels = {"config", "keys"}
     parts: list[str] = ['<span class="navrow">']
     for label, href, active in _nav_items(current):
         classes = ["navlink"]
         if active:
             classes.append("active")
+        extra_attr = ""
         if label in admin_only_labels:
             classes.append("admin-only")
+        elif label in page_link_labels:
+            classes.append("page-link")
+            extra_attr = f' data-page="{page_link_labels[label]}"'
         parts.append(
-            f'<a class="{" ".join(classes)}" href="{href}">{label}</a>'
+            f'<a class="{" ".join(classes)}" href="{href}"{extra_attr}>'
+            f'{label}</a>'
         )
     parts.append("</span>")
 
