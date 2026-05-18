@@ -422,10 +422,19 @@ OPEN_MODE_BANNER_JS = r"""
   // Read the page-key carrier ONCE so any helper (the no-access landing,
   // the SCALE_PICKER, future scope-hint UI) can ask "what page am I on?"
   // without re-querying the DOM.
+  //   * __current_page = permission key (for can()/scope() lookups)
+  //   * __current_page_path = full URL path (for display in the landing
+  //     heading, so a nested page like /config/api-keys reads correctly
+  //     instead of showing just the permission key '/api-keys').
   try {
     var meta = document.querySelector('meta[name=page-key]');
     window.__current_page = meta ? (meta.getAttribute('content') || '') : '';
-  } catch(_) { window.__current_page = ''; }
+    window.__current_page_path = meta
+      ? (meta.getAttribute('data-page-path') || '') : '';
+  } catch(_) {
+    window.__current_page = '';
+    window.__current_page_path = '';
+  }
 
   var TOKEN_KEY='whisper_api_key';
   var key=null;
@@ -584,12 +593,16 @@ function timeTick(sel, ms) {
 #                                    every page has access regardless of
 #                                    whether it includes the placeholder.
 NOT_ADMIN_LANDING_JS = """
+// Per-page metadata used to render the landing's pill-style action
+// buttons. `href` is what the button navigates to. The button label
+// reuses `href` directly (no "Open " verb prefix — stacked verbs read
+// like the redundant menu) so the buttons look + behave like links.
 var _PAGE_LINK_INFO = {
-  logs:         { href: '/logs',         label: 'logs' },
-  stats:        { href: '/stats',        label: 'stats' },
-  quick_config: { href: '/quick-config', label: 'quick config' },
-  reports:      { href: '/reports',      label: 'reports' },
-  captures:     { href: '/captures',     label: 'captures' }
+  logs:         { href: '/logs' },
+  stats:        { href: '/stats' },
+  quick_config: { href: '/quick-config' },
+  reports:      { href: '/reports' },
+  captures:     { href: '/captures' }
 };
 
 function _renderNoAccessLanding(opts) {
@@ -614,13 +627,26 @@ function _renderNoAccessLanding(opts) {
 
   var btns = allowed.map(function(p) {
     var info = _PAGE_LINK_INFO[p];
-    return '<a href="' + info.href + '" class="landing-btn">Open '
-         + info.label + '</a>';
+    // Button text is the URL path itself (`/logs`, `/quick-config`,
+    // …) — drops the redundant "Open" verb and matches what the user
+    // expects to see in the address bar.
+    return '<a href="' + info.href + '" class="landing-btn">'
+         + info.href + '</a>';
   }).join('');
 
-  var slug = current && current !== '__admin_only__'
-    ? ' to /' + current.replace(/_/g, '-')
-    : (current === '__admin_only__' ? '' : '');
+  // Heading slug: prefer the full URL path stashed by OPEN_MODE_BANNER_JS
+  // (e.g. "/config/api-keys"), then fall back to a derived form, then to
+  // an empty suffix. Admin-only pages get the URL too — never the bare
+  // sentinel.
+  var displayPath = window.__current_page_path || '';
+  var slug;
+  if (displayPath) {
+    slug = ' to ' + displayPath;
+  } else if (current && current !== '__admin_only__') {
+    slug = ' to /' + current.replace(/_/g, '-');
+  } else {
+    slug = '';
+  }
   var body;
   if (allowed.length) {
     body = '<p>Your API key does not grant access to this page.</p>'
@@ -1278,13 +1304,31 @@ _PAGE_KEY_BY_CURRENT: dict[str, str] = {
     "api-keys":     "__admin_only__",
 }
 
+# Display-URL for each page, used as the heading slug in the no-access
+# landing. Keeps the rendered slug in lockstep with what the user typed
+# in the address bar (the permission-key alone is misleading for nested
+# routes like /config/api-keys — without this, the landing would say
+# "No access to /api-keys").
+_PAGE_PATH_BY_CURRENT: dict[str, str] = {
+    "logs":         "/logs",
+    "stats":        "/stats",
+    "quick-config": "/quick-config",
+    "reports":      "/reports",
+    "captures":     "/captures",
+    "config":       "/config",
+    "api-keys":     "/config/api-keys",
+}
+
 
 def _page_meta_tag(current: str) -> str:
-    """Render a `<meta name="page-key" content="<key>">` tag describing
-    the current page in permissions-API terms. Used by shared JS to
-    decide whether to render the no-access landing and which slug to
-    show in the heading."""
+    """Render a `<meta name="page-key" ...>` tag describing the current
+    page. Carries both the permission-key (which the central script uses
+    to decide whether to auto-render the landing) and the full URL path
+    (which the landing renders as the heading slug — matches the address
+    bar instead of just the permission slug)."""
     key = _PAGE_KEY_BY_CURRENT.get(current, "")
     if not key:
         return ""
-    return f'<meta name="page-key" content="{key}">'
+    path = _PAGE_PATH_BY_CURRENT.get(current, "")
+    extra = f' data-page-path="{path}"' if path else ""
+    return f'<meta name="page-key" content="{key}"{extra}>'

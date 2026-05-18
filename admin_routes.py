@@ -1205,6 +1205,18 @@ function showApp() {
 async function loadState() {
   const r = await api('GET', '/config/state');
   if (r.status === 401) return;  // showLogin already called
+  if (r.status === 403 && typeof _renderNoAccessLanding === 'function') {
+    // Valid bearer but no admin scope — render the shared landing
+    // instead of falling through to the generic toast (which would
+    // leave the page blank). Refresh whoami so the landing can list
+    // pages this user CAN reach.
+    try {
+      const w = await fetch('/auth/whoami', { headers: authHeaders() });
+      if (w.ok) window.__whoami = await w.json();
+    } catch (_) {}
+    _renderNoAccessLanding({ page: 'config' });
+    return;
+  }
   if (!r.ok) {
     toast('failed to load state: ' + r.status, true);
     return;
