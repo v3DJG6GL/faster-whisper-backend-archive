@@ -2665,16 +2665,29 @@ _CAPTURES_HTML = r"""<!doctype html>
     color: var(--help); font-size: var(--fs-xs);
   }
   .merge-preview-panel {
-    display: flex; flex-direction: column; gap: 0.4rem;
-    margin: 0.5rem 0; width: 100%;
+    display: flex; flex-direction: column; gap: 0.3rem;
+    margin: 0.4rem 0 0.2rem; width: 100%;
   }
-  .merge-preview-panel .merge-preview-audio {
-    width: 100%; height: 2.2rem;
+  .merge-preview-controls {
+    display: flex; align-items: center; gap: 0.4rem;
+  }
+  .merge-preview-scrub {
+    flex: 1; height: 0.5rem; margin: 0; cursor: pointer;
+    accent-color: var(--accent, #58a6ff);
+  }
+  .merge-preview-scrub:disabled { cursor: not-allowed; opacity: 0.4; }
+  .merge-preview-time {
+    font-family: var(--font-mono); font-size: var(--fs-xs);
+    color: var(--help); min-width: 2.2rem; text-align: right;
+  }
+  .merge-preview-time-sep {
+    color: var(--help); font-size: var(--fs-xs);
   }
   .merge-preview-panel .word-strip {
     background: var(--input-bg); border: 1px solid var(--border);
-    border-radius: 4px; padding: 0.4rem 0.5rem;
-    max-height: 12rem; overflow: auto;
+    border-radius: 4px; padding: 0.3rem 0.5rem;
+    font-size: var(--fs-sm);
+    max-height: 8rem; overflow: auto;
   }
   #propose-list .proposal .meter-bar {
     display: inline-block; width: 7rem; height: 0.4rem;
@@ -4280,19 +4293,50 @@ _CAPTURES_HTML = r"""<!doctype html>
 
   // -------------------------------------------------------------------
   // Merge preview audio + karaoke — shared component used by both the
-  // propose-modal proposal cards and the manual merge-modal. Streams a
-  // temp WAV from POST /preview-audio and the projected merged words
-  // from POST /preview-words; renders a native <audio controls> + a
-  // word-strip with the same .word.active highlighting used on the
-  // committed group-expand path.
+  // propose-modal proposal cards and the manual merge-modal.
+  //
+  // Architecture (matches the proven a669f05 play/pause pattern):
+  //   - ONE module-global detached <audio> (`_previewAudio`) — Firefox
+  //     hates per-card attached <audio controls> elements and aborts
+  //     the media load on ancestor display:none, surfacing as
+  //     "NS_ERROR_DOM_MEDIA_ABORT_ERR". A single shared detached
+  //     element bypasses that whole class of failures.
+  //   - Per card: a toggle button + a compact panel containing a small
+  //     custom scrubber, a "0:00 / 0:00" time label, and the karaoke
+  //     word-strip. The shared audio is rebound to whichever card is
+  //     currently active.
+  //   - Each Activation rebinds the shared audio: revoke old blob,
+  //     fetch audio + words in parallel, set new src, swap karaoke
+  //     binding to this card's word-strip, play.
   // -------------------------------------------------------------------
-  var _previewBlobUrl = null;     // current blob URL (revoked on stop)
-  var _previewActiveWrap = null;  // currently-playing wrapper (has _ctl handle)
+  var _previewAudio = null;        // singleton detached <audio>; lazy-init
+  var _previewBlobUrl = null;      // current blob URL (revoked on stop)
+  var _previewActivePanel = null;  // currently-active panel (or null)
+  var _previewBound = null;        // teardown fn for active karaoke + scrubber wiring
+
+  function _getPreviewAudio() {
+    if (_previewAudio) return _previewAudio;
+    _previewAudio = document.createElement('audio');
+    // Intentionally NOT appended to DOM, NOT controls=true — the prior
+    // attached + controls implementation broke Firefox's media fetch.
+    _previewAudio.preload = 'auto';
+    return _previewAudio;
+  }
 
   function _stopAnyPreview() {
-    if (_previewActiveWrap && typeof _previewActiveWrap._teardown === 'function') {
-      try { _previewActiveWrap._teardown(); } catch (_) {}
-      _previewActiveWrap = null;
+    if (_previewBound) {
+      try { _previewBound(); } catch (_) {}
+      _previewBound = null;
+    }
+    if (_previewActivePanel) {
+      _previewActivePanel.hidden = true;
+      var t = _previewActivePanel._toggleBtn;
+      if (t) { t._setIcon('▶'); t.disabled = false; }
+      _previewActivePanel = null;
+    }
+    if (_previewAudio) {
+      try { _previewAudio.pause(); } catch (_) {}
+      try { _previewAudio.removeAttribute('src'); _previewAudio.load(); } catch (_) {}
     }
     if (_previewBlobUrl) {
       try { URL.revokeObjectURL(_previewBlobUrl); } catch (_) {}
@@ -4320,10 +4364,30 @@ _CAPTURES_HTML = r"""<!doctype html>
     return els;
   }
 
-  function _bindKaraoke(audioEl, words, wordEls) {
+  function _fmtTime(s) {
+    if (!isFinite(s) || s < 0) s = 0;
+    var m = Math.floor(s / 60);
+    var sec = Math.floor(s % 60);
+    return m + ':' + (sec < 10 ? '0' : '') + sec;
+  }
+
+  // Bind the shared audio's `timeupdate` / scrubber-input / pause / play
+  // to this panel's UI. Returns a teardown function that detaches the
+  // listeners (called when switching to a different preview).
+  function _bindPanelToAudio(audio, panel, words, wordEls) {
     var activeIdx = -1;
-    audioEl.addEventListener('timeupdate', function() {
-      var t = audioEl.currentTime;
+    var scrub = panel._scrub;
+    var timeEl = panel._time;
+    var toggleBtn = panel._toggleBtn;
+    var totalEl = panel._total;
+    var seeking = false;
+
+    function onTimeUpdate() {
+      var t = audio.currentTime || 0;
+      if (!seeking && audio.duration) {
+        scrub.value = (t / audio.duration) * 1000;
+      }
+      timeEl.textContent = _fmtTime(t);
       var idx = -1;
       for (var i = 0; i < words.length; i++) {
         var s = words[i].start || 0;
@@ -4335,17 +4399,42 @@ _CAPTURES_HTML = r"""<!doctype html>
         if (idx >= 0 && wordEls[idx]) wordEls[idx].classList.add('active');
         activeIdx = idx;
       }
-    });
+    }
+    function onLoaded() {
+      totalEl.textContent = _fmtTime(audio.duration || 0);
+      scrub.disabled = false;
+    }
+    function onPause() { toggleBtn._setIcon('▶'); }
+    function onPlay()  { toggleBtn._setIcon('⏸'); }
+    function onScrubInput() {
+      seeking = true;
+      if (audio.duration) {
+        audio.currentTime = (scrub.value / 1000) * audio.duration;
+      }
+    }
+    function onScrubChange() { seeking = false; }
+
+    audio.addEventListener('timeupdate', onTimeUpdate);
+    audio.addEventListener('loadedmetadata', onLoaded);
+    audio.addEventListener('durationchange', onLoaded);
+    audio.addEventListener('pause', onPause);
+    audio.addEventListener('play', onPlay);
+    scrub.addEventListener('input', onScrubInput);
+    scrub.addEventListener('change', onScrubChange);
+
+    return function teardown() {
+      audio.removeEventListener('timeupdate', onTimeUpdate);
+      audio.removeEventListener('loadedmetadata', onLoaded);
+      audio.removeEventListener('durationchange', onLoaded);
+      audio.removeEventListener('pause', onPause);
+      audio.removeEventListener('play', onPlay);
+      scrub.removeEventListener('input', onScrubInput);
+      scrub.removeEventListener('change', onScrubChange);
+      if (activeIdx >= 0 && wordEls[activeIdx]) wordEls[activeIdx].classList.remove('active');
+    };
   }
 
   // Returns { toggleBtn, panel } — caller appends each to its own host.
-  // The toggle lives in a compact row (proposal card row1 or merge-modal
-  // summary row). The panel hosts the audio + word-strip and goes below
-  // the row so it can expand full-width when active.
-  //
-  // memberIdsFn() / silenceMsFn() are read fresh at click time so the
-  // latest selection / proposal members / silence setting are used.
-  // durationFn() returns the predicted total duration in seconds (display).
   function _makeMergePreviewBtn(memberIdsFn, silenceMsFn, durationFn) {
     var toggleBtn = document.createElement('button');
     toggleBtn.type = 'button';
@@ -4368,47 +4457,49 @@ _CAPTURES_HTML = r"""<!doctype html>
     var panel = document.createElement('div');
     panel.className = 'merge-preview-panel';
     panel.hidden = true;
-    var audioEl = document.createElement('audio');
-    audioEl.controls = true;
-    audioEl.preload = 'auto';
-    audioEl.className = 'merge-preview-audio';
+    var controls = document.createElement('div');
+    controls.className = 'merge-preview-controls';
+    var scrub = document.createElement('input');
+    scrub.type = 'range'; scrub.min = '0'; scrub.max = '1000'; scrub.value = '0';
+    scrub.className = 'merge-preview-scrub';
+    scrub.disabled = true;
+    var timeEl = document.createElement('span');
+    timeEl.className = 'merge-preview-time';
+    timeEl.textContent = '0:00';
+    var sep = document.createElement('span');
+    sep.className = 'merge-preview-time-sep'; sep.textContent = '/';
+    var totalEl = document.createElement('span');
+    totalEl.className = 'merge-preview-time';
+    totalEl.textContent = '0:00';
+    controls.appendChild(scrub);
+    controls.appendChild(timeEl);
+    controls.appendChild(sep);
+    controls.appendChild(totalEl);
     var stripEl = document.createElement('div');
     stripEl.className = 'merge-preview-strip word-strip';
-    panel.appendChild(audioEl);
+    panel.appendChild(controls);
     panel.appendChild(stripEl);
 
-    function teardown() {
-      panel.hidden = true;
-      try { audioEl.pause(); } catch (_) {}
-      try { audioEl.removeAttribute('src'); audioEl.load(); } catch (_) {}
-      toggleBtn._setIcon('▶');
-      toggleBtn.disabled = false;
-      stripEl.innerHTML = '';
-    }
-    // Hand the teardown closure to the wrapper-like reference _stopAnyPreview holds.
-    panel._teardown = teardown;
-
-    // Sync the toggle icon with native audio state — covers clicks on
-    // the native <audio controls> pause/play affordance.
-    audioEl.addEventListener('pause', function() {
-      if (!panel.hidden) toggleBtn._setIcon('▶');
-    });
-    audioEl.addEventListener('play', function() {
-      if (!panel.hidden) toggleBtn._setIcon('⏸');
-    });
+    panel._toggleBtn = toggleBtn;
+    panel._scrub = scrub;
+    panel._time = timeEl;
+    panel._total = totalEl;
+    panel._strip = stripEl;
 
     toggleBtn.addEventListener('click', async function() {
-      // If THIS panel is already the active one: pause/resume (native
-      // handles position retention — no re-fetch).
-      if (_previewActiveWrap === panel) {
-        if (audioEl.paused) {
-          try { await audioEl.play(); } catch (e) { /* user gesture lost; ignore */ }
+      var audio = _getPreviewAudio();
+      // Same card already active → toggle pause/resume; native audio
+      // retains currentTime across pause.
+      if (_previewActivePanel === panel) {
+        if (audio.paused) {
+          try { await audio.play(); }
+          catch (e) { if (e && e.name !== 'AbortError') toast(e.message || 'play failed', true); }
         } else {
-          audioEl.pause();
+          audio.pause();
         }
         return;
       }
-      // Different panel — stop any other active preview first.
+      // Different card → tear down prior, fetch fresh.
       _stopAnyPreview();
       var ids = memberIdsFn() || [];
       if (ids.length < 2) { toast('Need at least 2 members to preview', true); return; }
@@ -4422,14 +4513,9 @@ _CAPTURES_HTML = r"""<!doctype html>
           member_ids: ids,
           silence_ms: silenceMsFn() || 300,
         });
-        // Fetch audio + words in parallel; karaoke needs both.
         var [audioResp, wordsResp] = await Promise.all([
-          fetch('/captures/api/groups/preview-audio', {
-            method: 'POST', headers: headers, body: body,
-          }),
-          fetch('/captures/api/groups/preview-words', {
-            method: 'POST', headers: headers, body: body,
-          }),
+          fetch('/captures/api/groups/preview-audio', { method:'POST', headers:headers, body:body }),
+          fetch('/captures/api/groups/preview-words', { method:'POST', headers:headers, body:body }),
         ]);
         if (!audioResp.ok) {
           var amsg = 'preview failed (' + audioResp.status + ')';
@@ -4443,39 +4529,23 @@ _CAPTURES_HTML = r"""<!doctype html>
         }
         var blob = await audioResp.blob();
         var wordsJ = await wordsResp.json();
-        // Unhide the panel BEFORE wiring the audio src — Firefox aborts
-        // the media fetch on display:none ancestors, which surfaces as
-        // "The fetching process for the media resource was aborted by
-        // the user agent at the user's request." on the play() promise.
+        var wordsArr = wordsJ.words || [];
+        // Wire UI before src so events fire correctly.
         panel.hidden = false;
-        _previewActiveWrap = panel;
-        var wordEls = _renderWordStrip(stripEl, wordsJ.words || []);
-        _bindKaraoke(audioEl, wordsJ.words || [], wordEls);
+        _previewActivePanel = panel;
+        var wordEls = _renderWordStrip(stripEl, wordsArr);
+        _previewBound = _bindPanelToAudio(audio, panel, wordsArr, wordEls);
         _previewBlobUrl = URL.createObjectURL(blob);
-        audioEl.src = _previewBlobUrl;
+        audio.src = _previewBlobUrl;
         toggleBtn._setIcon('⏸');
         toggleBtn.disabled = false;
-        try {
-          await audioEl.play();
-        } catch (e) {
-          // AbortError fires when the user clicks the native ⏸ or
-          // another card's ▶ before the autoplay attempt completes —
-          // benign; the audio element settles into the paused state.
-          if (e && e.name !== 'AbortError') throw e;
-        }
+        try { await audio.play(); }
+        catch (e) { if (e && e.name !== 'AbortError') throw e; }
       } catch (e) {
         toggleBtn.disabled = false;
         toggleBtn._setIcon('▶');
         if (e && e.message) toast(e.message, true);
       }
-    });
-
-    // Auto-revert toggle when playback finishes naturally.
-    audioEl.addEventListener('ended', function() {
-      // Don't tear down — leave the panel open with the audio at end so
-      // the user can scrub back. Just update the toggle icon (the native
-      // 'pause' event already fired but stay defensive).
-      toggleBtn._setIcon('▶');
     });
 
     return { toggleBtn: toggleBtn, panel: panel };
