@@ -139,6 +139,7 @@ _STATS_VIEWER_HTML = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>faster-whisper-backend · stats</title>
+{{PAGE_META}}
 {{SCALE_BOOTSTRAP_HEAD}}
 <link rel="stylesheet" href="/static/uplot.min.css">
 <link rel="stylesheet" href="/static/gridstack.min.css">
@@ -784,7 +785,7 @@ function setStatus(text, cls) {
 
 function openStream() {
   if (es) { try { es.close(); } catch {} }
-  es = new EventSource('/stats/stream');
+  es = new EventSource('/stats/stream' + _statsKeyParam());
   es.onmessage = (e) => {
     try {
       const snap = JSON.parse(e.data);
@@ -831,13 +832,29 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
+// Read the bearer for fetch + SSE so locked-down callers with
+// scope("stats") != "none" can actually load. EventSource can't set
+// Authorization headers, so /stats/stream accepts `?key=<raw>` as a
+// fallback (server-side `_require_stats_page_sse` already handles it).
+function _statsAuthHeaders() {
+  var t;
+  try { t = sessionStorage.getItem('whisper_api_key') || ''; } catch(_) { t = ''; }
+  return t ? { Authorization: 'Bearer ' + t } : {};
+}
+function _statsKeyParam() {
+  var t;
+  try { t = sessionStorage.getItem('whisper_api_key') || ''; } catch(_) { t = ''; }
+  return t ? '?key=' + encodeURIComponent(t) : '';
+}
+
 // Initial fetch so the page renders before the first SSE tick arrives.
-fetch('/stats/snapshot', { cache: 'no-store' })
-  .then(r => r.json())
+// role-admin used to be added here unconditionally — that leaked admin
+// chrome to non-admins. OPEN_MODE_BANNER_JS is now the single source
+// of truth (it sets role-admin iff whoami.is_admin=true).
+fetch('/stats/snapshot', { headers: _statsAuthHeaders(), cache: 'no-store' })
+  .then(r => r.ok ? r.json() : null)
   .then(snap => {
-    // /stats is IP-gated (no token); reaching it means LAN access. Treat
-    // as admin so the .admin-only nav links + sev pills render.
-    document.body.classList.add('role-admin');
+    if (!snap) return;
     pushHistory(snap); render(snap);
   })
   .catch(err => console.warn('[stats] initial fetch failed', err))

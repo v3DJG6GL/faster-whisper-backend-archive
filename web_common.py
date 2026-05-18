@@ -269,6 +269,47 @@ body.role-admin header .admin-only { display: inline-flex; }
    server-side is_admin short-circuit. */
 header .page-link { display: none; }
 header .page-link.allowed { display: inline-flex; }
+
+/* No-access landing card — rendered by _renderNoAccessLanding() when
+   the bearer is valid but the caller lacks permission for the current
+   page. Replaces the page's <main> content. Lists every page the
+   caller CAN reach as a button, plus a Sign-out fallback. */
+.no-access-landing {
+  max-width: 36rem; margin: 4rem auto; text-align: center;
+  padding: 2rem; background: var(--panel);
+  border: 1px solid var(--border); border-radius: 0.375rem;
+}
+.no-access-landing h2 {
+  margin: 0 0 0.5rem; color: var(--bold);
+}
+.no-access-landing p { color: var(--help); }
+.no-access-landing .landing-hint {
+  margin: 1rem 0 0.25rem; font-size: var(--fs-sm);
+}
+.no-access-landing .landing-actions {
+  margin: 0.5rem 0 0; display: flex; gap: 0.6rem;
+  justify-content: center; flex-wrap: wrap;
+}
+.no-access-landing .landing-btn {
+  color: var(--cyan); border: 1px solid var(--cyan);
+  padding: 0.45rem 1rem; border-radius: 0.25rem;
+  text-decoration: none; font-size: var(--fs-sm);
+}
+.no-access-landing .landing-btn:hover {
+  background: rgba(121, 192, 255, 0.08);
+}
+.no-access-landing .landing-signout {
+  margin-top: 1.1rem; padding-top: 0.8rem;
+  border-top: 1px solid var(--border);
+}
+.no-access-landing button {
+  background: var(--panel); border: 1px solid var(--border);
+  color: var(--fg); padding: 0.45rem 1rem; border-radius: 4px;
+  cursor: pointer; font: inherit; font-size: var(--fs-sm);
+}
+.no-access-landing button:hover {
+  background: #21262d; color: var(--bold);
+}
 """
 
 
@@ -325,6 +366,14 @@ SCALE_PICKER_JS = """
 # from sessionStorage (same key all pages use).
 OPEN_MODE_BANNER_JS = r"""
 <script>(function(){
+  // Read the page-key carrier ONCE so any helper (the no-access landing,
+  // the SCALE_PICKER, future scope-hint UI) can ask "what page am I on?"
+  // without re-querying the DOM.
+  try {
+    var meta = document.querySelector('meta[name=page-key]');
+    window.__current_page = meta ? (meta.getAttribute('content') || '') : '';
+  } catch(_) { window.__current_page = ''; }
+
   var TOKEN_KEY='whisper_api_key';
   var key=null;
   try { key=sessionStorage.getItem(TOKEN_KEY)||''; } catch(_){}
@@ -352,13 +401,19 @@ OPEN_MODE_BANNER_JS = r"""
         document.body.insertBefore(b, document.body.firstChild);
       }
 
-      // Per-page nav-link visibility. The nav renders every link with
-      // class `.page-link` default-hidden; we add `.allowed` per link
-      // the caller can reach. Admins pass on every link via the
-      // server-side is_admin short-circuit (permissions object is
-      // populated but is_admin alone is enough for visibility).
-      var perms = (j.permissions && j.permissions.pages) || {};
       var isAdmin = !!j.is_admin;
+      var perms = (j.permissions && j.permissions.pages) || {};
+
+      // Single source of truth for `body.role-admin` — the body class
+      // reveals admin-only chrome (/config + /config/api-keys nav links,
+      // severity pills, in-page admin buttons). Pages used to add it
+      // unconditionally after a successful state fetch, which leaked
+      // admin chrome to non-admins on /stats and /logs and /reports.
+      if (isAdmin) document.body.classList.add('role-admin');
+
+      // Per-page nav-link visibility. The nav renders every link with
+      // class `.page-link` default-hidden; add `.allowed` per link the
+      // caller can reach. Admins pass on every link via is_admin.
       document.querySelectorAll('header a.page-link[data-page]').forEach(
         function(a) {
           var page = a.getAttribute('data-page');
@@ -368,6 +423,25 @@ OPEN_MODE_BANNER_JS = r"""
           }
         }
       );
+
+      // Auto-render the no-access landing when we know — from /auth/
+      // whoami — that the bearer is valid AND lacks permission for the
+      // current page. Skips:
+      //   - admin-only pages (page-key="__admin_only__") — those are
+      //     gated server-side by require_admin; the per-page load()
+      //     handler renders the landing in response to a 403 it gets
+      //     from the API. The central script can't infer "no access"
+      //     from permissions.pages alone for those.
+      //   - admins (handled above by the role-admin reveal).
+      var current = window.__current_page;
+      if (
+        current && current !== '__admin_only__'
+        && !isAdmin
+        && (!perms[current] || perms[current] === 'none')
+        && typeof _renderNoAccessLanding === 'function'
+      ) {
+        _renderNoAccessLanding({ page: current });
+      }
     })
     .catch(function(){});
 })();</script>
@@ -432,30 +506,103 @@ function timeTick(sel, ms) {
 """
 
 
-# Admin-only landing card used by pages that 401/403 a non-admin caller
-# (api_keys, reports, captures). Inserted into the page's existing
-# <script> IIFE so callers can invoke _renderNotAdminLanding() directly.
+# No-access landing card used when the bearer is valid but the caller
+# lacks access to the current page. Replaces the old `Admin only`
+# hard-coded card. The new version reads `window.__whoami` (set by
+# OPEN_MODE_BANNER_JS) to list every other page the caller CAN reach,
+# rendering one button per accessible page plus a Sign-out button.
+# Falls back to a "no pages available" message when the caller has
+# scope=none everywhere.
+#
+# `_renderNotAdminLanding` is kept as a thin alias so existing callers
+# (`reports_routes._renderAdminOnlyIfNonAdmin`, the similar inline helper
+# in captures_routes, and api_keys_routes._check403) keep working.
+#
+# Two flavours:
+#   - NOT_ADMIN_LANDING_JS         — raw (no <script> wrapper). Injected
+#                                    inside a page's existing <script>
+#                                    IIFE via {{NOT_ADMIN_LANDING_JS}}.
+#                                    Used by pages that already host a
+#                                    big inline IIFE (reports, captures,
+#                                    api_keys).
+#   - NOT_ADMIN_LANDING_GLOBAL_JS  — full <script> wrapper that puts the
+#                                    helpers on the global window. Pulled
+#                                    in alongside OPEN_MODE_BANNER_JS so
+#                                    every page has access regardless of
+#                                    whether it includes the placeholder.
 NOT_ADMIN_LANDING_JS = """
-function _renderNotAdminLanding() {
+var _PAGE_LINK_INFO = {
+  logs:         { href: '/logs',         label: 'logs' },
+  stats:        { href: '/stats',        label: 'stats' },
+  quick_config: { href: '/quick-config', label: 'quick config' },
+  reports:      { href: '/reports',      label: 'reports' },
+  captures:     { href: '/captures',     label: 'captures' }
+};
+
+function _renderNoAccessLanding(opts) {
+  // Clear admin chrome — same reason it's removed: the landing shows
+  // when the caller is NOT entitled to admin UI on this page.
   document.body.classList.remove('role-admin');
   var main = document.getElementsByTagName('main')[0];
   if (!main) return;
+
+  var current = (opts && opts.page) || window.__current_page || '';
+  var who = window.__whoami || {};
+  var perms = (who.permissions && who.permissions.pages) || {};
+  var isAdmin = !!who.is_admin;
+
+  // Pages the caller can reach, minus the one they're on (it's the
+  // page we can't reach — listing it would be confusing).
+  var allowed = Object.keys(_PAGE_LINK_INFO).filter(function(p) {
+    if (p === current) return false;
+    if (isAdmin) return true;
+    return perms[p] && perms[p] !== 'none';
+  });
+
+  var btns = allowed.map(function(p) {
+    var info = _PAGE_LINK_INFO[p];
+    return '<a href="' + info.href + '" class="landing-btn">Open '
+         + info.label + '</a>';
+  }).join('');
+
+  var slug = current && current !== '__admin_only__'
+    ? ' to /' + current.replace(/_/g, '-')
+    : (current === '__admin_only__' ? '' : '');
+  var body;
+  if (allowed.length) {
+    body = '<p>Your API key does not grant access to this page.</p>'
+         + '<p class="landing-hint">Pages you can access:</p>'
+         + '<div class="landing-actions">' + btns + '</div>';
+  } else {
+    body = '<p>Your API key does not grant access to this page, and no '
+         + 'other pages are available either. Ask an admin to grant '
+         + 'access.</p>';
+  }
+
   main.innerHTML =
-    '<div style="max-width:36rem;margin:4rem auto;text-align:center;'
-    + 'padding:2rem;background:var(--panel);border:1px solid var(--border);'
-    + 'border-radius:0.375rem;">'
-    + '<h2 style="margin:0 0 0.5rem;color:var(--bold);">Admin only</h2>'
-    + '<p style="color:var(--help);">This page requires an admin API key. '
-    + 'Sign in with an admin key or go to your personal page.</p>'
-    + '<p style="margin-top:1.2rem;">'
-    + '<a href="/quick-config" style="color:var(--cyan);'
-    + 'border:1px solid var(--cyan);padding:0.45rem 1rem;'
-    + 'border-radius:0.25rem;text-decoration:none;">Open /quick-config</a> '
+    '<div class="no-access-landing">'
+    + '<h2>No access' + slug + '</h2>'
+    + body
+    + '<p class="landing-signout">'
     + '<button onclick="sessionStorage.removeItem(\\u0027whisper_api_key\\u0027);'
-    + 'location.reload()" style="margin-left:0.5rem;">Sign out</button>'
+    + 'location.reload()">Sign out</button>'
     + '</p></div>';
 }
+
+// Backwards-compat alias — old callers used `_renderNotAdminLanding()`.
+function _renderNotAdminLanding() {
+  _renderNoAccessLanding({ page: window.__current_page || '' });
+}
 """
+
+
+# Global wrapper around NOT_ADMIN_LANDING_JS — puts the helpers on the
+# window so every page has access regardless of whether it includes the
+# {{NOT_ADMIN_LANDING_JS}} placeholder. Injected via render_page next to
+# OPEN_MODE_BANNER_JS so the centralised auto-landing path can call
+# `_renderNoAccessLanding` for /logs, /stats, /quick-config without
+# requiring their templates to opt in to the older placeholder.
+NOT_ADMIN_LANDING_GLOBAL_JS = "<script>" + NOT_ADMIN_LANDING_JS + "</script>"
 
 
 SEV_POLLER_JS = """
@@ -861,7 +1008,10 @@ def render_page(template: str, current: str) -> str:
       - {{SCALE_BOOTSTRAP_HEAD}} → tiny pre-paint script (top of <head>)
       - {{RULE_EDITOR_JS}}       → shared per-rule body editors
       - {{TIME_HELPERS_JS}}      → absTime / relTime / fmtWhen / timeTick
-      - {{NOT_ADMIN_LANDING_JS}} → _renderNotAdminLanding() helper
+      - {{NOT_ADMIN_LANDING_JS}} → _renderNoAccessLanding() helper
+                                   (+ _renderNotAdminLanding alias)
+      - {{PAGE_META}}            → <meta name="page-key" ...> carrier so
+                                   shared JS knows which page it's on
 
     Pages that don't include a given placeholder are returned unchanged."""
     return (
@@ -870,9 +1020,45 @@ def render_page(template: str, current: str) -> str:
         .replace("{{NAV_CSS}}", NAV_CSS)
         .replace("{{SCALE_PICKER}}", SCALE_PICKER_HTML)
         .replace("{{SCALE_PICKER_JS}}", SCALE_PICKER_JS)
-        .replace("{{SEV_POLLER_JS}}", SEV_POLLER_JS + OPEN_MODE_BANNER_JS)
+        .replace(
+            "{{SEV_POLLER_JS}}",
+            # Order matters: the global landing helpers must be defined
+            # BEFORE OPEN_MODE_BANNER_JS runs, because the central script
+            # calls `_renderNoAccessLanding` once whoami resolves.
+            SEV_POLLER_JS + NOT_ADMIN_LANDING_GLOBAL_JS + OPEN_MODE_BANNER_JS,
+        )
         .replace("{{SCALE_BOOTSTRAP_HEAD}}", SCALE_BOOTSTRAP_HEAD)
         .replace("{{RULE_EDITOR_JS}}", RULE_EDITOR_JS)
         .replace("{{TIME_HELPERS_JS}}", TIME_HELPERS_JS)
         .replace("{{NOT_ADMIN_LANDING_JS}}", NOT_ADMIN_LANDING_JS)
+        .replace("{{PAGE_META}}", _page_meta_tag(current))
     )
+
+
+# Maps the `current=` argument passed by each page route into the
+# permission-key used by api_keys_store.PAGES. Pages absent from this
+# map (api-keys, config) are admin-only — they don't participate in
+# per-page scope gating; the central JS short-circuits for them.
+_PAGE_KEY_BY_CURRENT: dict[str, str] = {
+    "logs":         "logs",
+    "stats":        "stats",
+    "quick-config": "quick_config",
+    "reports":      "reports",
+    "captures":     "captures",
+    # Admin-only pages: emit a sentinel so the JS can distinguish
+    # "no per-page perm to check" from "we're on a data page that maps
+    # to a key in the permissions dict".
+    "config":       "__admin_only__",
+    "api-keys":     "__admin_only__",
+}
+
+
+def _page_meta_tag(current: str) -> str:
+    """Render a `<meta name="page-key" content="<key>">` tag describing
+    the current page in permissions-API terms. Used by shared JS to
+    decide whether to render the no-access landing and which slug to
+    show in the heading."""
+    key = _PAGE_KEY_BY_CURRENT.get(current, "")
+    if not key:
+        return ""
+    return f'<meta name="page-key" content="{key}">'

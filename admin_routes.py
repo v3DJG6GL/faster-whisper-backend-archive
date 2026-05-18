@@ -631,6 +631,7 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>faster-whisper-backend · config</title>
+{{PAGE_META}}
 {{SCALE_BOOTSTRAP_HEAD}}
 <style>
   :root {
@@ -1209,9 +1210,10 @@ async function loadState() {
     return;
   }
   state = await r.json();
-  // /config/state requires admin token, so reaching this point means
-  // the caller is admin → reveal admin-only nav elements.
-  document.body.classList.add('role-admin');
+  // role-admin is set by OPEN_MODE_BANNER_JS (single source of truth)
+  // when whoami.is_admin=true. /config/state requires admin so callers
+  // who reach this point ARE admin, but the central handler already
+  // covered the body-class add — keep this comment as a breadcrumb.
   dirty = {};
   $('save-btn').disabled = true;
   $('discard-btn').disabled = true;

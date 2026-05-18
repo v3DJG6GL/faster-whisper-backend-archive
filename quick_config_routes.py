@@ -509,6 +509,7 @@ _QUICK_CONFIG_HTML = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <title>Quick config — WhisperAPI</title>
+{{PAGE_META}}
 {{SCALE_BOOTSTRAP_HEAD}}
 <style>
   :root {
@@ -894,7 +895,10 @@ function promptToken() {
 }
 
 async function ensureToken() {
-  // Probe /quick-config/state. On 401 prompt; retry once.
+  // Probe /quick-config/state. On 401 prompt; retry once. On 403
+  // (valid bearer, no quick_config scope) render the shared no-access
+  // landing and keep the bearer so the user can navigate elsewhere
+  // without re-logging in.
   let r = await api('GET', '/quick-config/state');
   if (r.status === 401) {
     const t = await promptToken();
@@ -906,6 +910,15 @@ async function ensureToken() {
       showToast('invalid token', 'err');
       return null;
     }
+  }
+  if (r.status === 403 && typeof _renderNoAccessLanding === 'function') {
+    // Refresh whoami so the landing can list reachable pages.
+    try {
+      const w = await fetch('/auth/whoami', { headers: authHeaders() });
+      if (w.ok) window.__whoami = await w.json();
+    } catch (_) {}
+    _renderNoAccessLanding({ page: 'quick_config' });
+    return null;
   }
   return r;
 }

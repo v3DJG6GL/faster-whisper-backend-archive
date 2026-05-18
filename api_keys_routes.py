@@ -227,6 +227,7 @@ _API_KEYS_HTML = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <title>API keys — WhisperAPI</title>
+{{PAGE_META}}
 {{SCALE_BOOTSTRAP_HEAD}}
 <style>
   :root {
@@ -503,8 +504,10 @@ _API_KEYS_HTML = r"""<!doctype html>
       var who = await fetch('/auth/whoami', { headers: authHeaders() });
       if (who.ok) {
         var j = await who.json();
+        // Cache whoami so the landing can list pages the caller CAN reach.
+        try { window.__whoami = j; } catch(_) {}
         if (j && j.is_admin === false) {
-          _renderNotAdminLanding();
+          _renderNoAccessLanding({ page: 'api-keys' });
           return true;
         }
       }
@@ -898,9 +901,23 @@ _API_KEYS_HTML = r"""<!doctype html>
       if (!v) return;
       setToken(v);
       r = await api('GET', '/config/api-keys/api/users');
-      if (!r.ok) {
+      // 403 after a valid bearer = "valid key, no admin scope" — keep
+      // the bearer in storage and render the no-access landing. Don't
+      // fall through to the `setToken('') + invalid key` branch below
+      // (that branch is for cases when the typed key didn't resolve).
+      if (r.status === 403 && await _check403(r)) return;
+      // 401 here means the typed key wasn't recognised — clear it so the
+      // next reload re-prompts. (No 403 short-circuit hit means we got
+      // either 401 or a 5xx; the modal stays open via the err msg.)
+      if (r.status === 401) {
         setToken('');
         document.getElementById('token-err').textContent = 'invalid key';
+        return;
+      }
+      // Other non-2xx (5xx, network): surface the status without
+      // nuking the bearer.
+      if (!r.ok) {
+        showToast('Load failed: HTTP ' + r.status, 'err');
         return;
       }
     }
@@ -910,11 +927,9 @@ _API_KEYS_HTML = r"""<!doctype html>
       return;
     }
     var j = await r.json();
-    // Reaching this endpoint successfully means the bearer resolved to
-    // an admin (or the server is in OPEN mode → synthetic admin). Set
-    // body.role-admin so NAV_CSS reveals the admin-only nav links + the
-    // severity pills.
-    document.body.classList.add('role-admin');
+    // role-admin is set by OPEN_MODE_BANNER_JS (single source of truth)
+    // when whoami.is_admin=true. This page used to add it here
+    // unconditionally; redundant now that the central script owns it.
     var banner = document.getElementById('open-banner');
     banner.style.display = j.open_mode ? 'block' : 'none';
     var ct = document.getElementById('users-container');

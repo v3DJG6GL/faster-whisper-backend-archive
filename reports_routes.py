@@ -461,6 +461,7 @@ _REPORTS_HTML = """<!doctype html>
 <meta charset="utf-8">
 <title>Whisper — Reports</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+{{PAGE_META}}
 {{SCALE_BOOTSTRAP_HEAD}}
 <style>
   :root {
@@ -873,14 +874,20 @@ _REPORTS_HTML = """<!doctype html>
   {{NOT_ADMIN_LANDING_JS}}
 
   async function _renderAdminOnlyIfNonAdmin() {
+    // Renamed-but-kept-for-compat: every 403 on this page means the
+    // caller is a non-admin (the API gate is require_page("reports")
+    // — a 403 means "valid bearer, no scope on /reports"). Render the
+    // shared no-access landing slugged with the current page.
     try {
       var tok = getToken();
       var hdrs = tok ? { Authorization: 'Bearer ' + tok } : {};
       var r = await fetch('/auth/whoami', { headers: hdrs });
       if (r.ok) {
         var j = await r.json();
+        // Cache whoami so _renderNoAccessLanding can list reachable pages.
+        try { window.__whoami = j; } catch(_) {}
         if (j && j.is_admin === false) {
-          _renderNotAdminLanding();
+          _renderNoAccessLanding({ page: 'reports' });
           return true;
         }
       }
@@ -1345,7 +1352,9 @@ _REPORTS_HTML = """<!doctype html>
       rebuildModelFilter();
       updateCounts();
       render();
-      document.body.classList.add('role-admin');
+      // role-admin is set by OPEN_MODE_BANNER_JS (single source of truth)
+      // when whoami.is_admin=true. Adding it here unconditionally would
+      // leak admin chrome to non-admins with reports=own/all scope.
     } catch (e) {
       if (e.message === 'unauthorized' || e.message === 'not-admin') return;
       toast('Failed to load reports: ' + e.message, true);

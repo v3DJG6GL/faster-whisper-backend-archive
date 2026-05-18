@@ -1977,6 +1977,7 @@ _LOG_VIEWER_HTML = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>faster-whisper-backend · live logs</title>
+{{PAGE_META}}
 {{SCALE_BOOTSTRAP_HEAD}}
 <script>(function(){var v=localStorage.getItem('whisper-log-zoom');
   if(v)document.documentElement.style.setProperty('--log-zoom',v);})();</script>
@@ -2138,16 +2139,25 @@ _LOG_VIEWER_HTML = """<!doctype html>
   });
   clearBtn.addEventListener('click', () => { log.innerHTML = ''; });
 
-  const es = new EventSource('/logs/stream');
+  // EventSource can't set Authorization headers — pass the bearer via
+  // ?key=<raw> so the server-side `_require_logs_page_sse` fallback
+  // resolves the user (locked-down + non-admin viewer must authenticate
+  // for the stream to open).
+  function _logsKey() {
+    var t;
+    try { t = sessionStorage.getItem('whisper_api_key') || ''; } catch(_) { t = ''; }
+    return t ? '?key=' + encodeURIComponent(t) : '';
+  }
+  const es = new EventSource('/logs/stream' + _logsKey());
   es.onmessage = (e) => append(e.data);
   es.onerror = () => {
     statusEl.textContent = 'reconnecting…';
     statusEl.className = 'pill paused';
   };
   es.onopen = () => {
-    // /logs is IP-gated (no token); reaching it means LAN access. Treat
-    // as admin so the .admin-only nav links + sev pills render.
-    document.body.classList.add('role-admin');
+    // role-admin used to be added here unconditionally — that leaked
+    // admin chrome to non-admins. OPEN_MODE_BANNER_JS is now the single
+    // source of truth (sets role-admin iff whoami.is_admin=true).
     if (!paused) {
       statusEl.textContent = 'live';
       statusEl.className = 'pill live';

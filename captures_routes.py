@@ -2244,6 +2244,7 @@ _CAPTURES_HTML = r"""<!doctype html>
 <meta charset="utf-8">
 <title>Whisper — Captures</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+{{PAGE_META}}
 {{SCALE_BOOTSTRAP_HEAD}}
 <style>
   :root {
@@ -3305,14 +3306,20 @@ _CAPTURES_HTML = r"""<!doctype html>
   {{NOT_ADMIN_LANDING_JS}}
 
   async function _renderAdminOnlyIfNonAdmin() {
+    // Renamed-but-kept-for-compat: every 403 on this page means the
+    // caller is a non-admin (the API gate is require_page("captures")
+    // — a 403 means "valid bearer, no scope on /captures"). Render the
+    // shared no-access landing slugged with the current page.
     try {
       var tok = getToken();
       var hdrs = tok ? { Authorization: 'Bearer ' + tok } : {};
       var r = await fetch('/auth/whoami', { headers: hdrs });
       if (r.ok) {
         var j = await r.json();
+        // Cache whoami so _renderNoAccessLanding can list reachable pages.
+        try { window.__whoami = j; } catch(_) {}
         if (j && j.is_admin === false) {
-          _renderNotAdminLanding();
+          _renderNoAccessLanding({ page: 'captures' });
           return true;
         }
       }
