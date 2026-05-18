@@ -2209,15 +2209,21 @@ async def whoami(
     """Resolve the bearer to a user payload the WebUI uses to render the
     login modal + user-aware chrome.
 
-    Returns `{open_mode: bool, user_id, username, is_admin}`. A 401 means
-    the bearer is missing/invalid AND the server is in locked-down mode —
-    the WebUI re-prompts."""
+    Returns `{open_mode, user_id, username, is_admin, permissions}`. The
+    `permissions` object is `{pages: {logs: 'own'|'all'|'none', ...}}`
+    — used by each page's JS to hide nav links the user can't reach and
+    to render scope hints like "viewing only your own records". Admin
+    users always see all pages + all data; the permissions object is
+    still populated for symmetry. A 401 means the bearer is missing/
+    invalid AND the server is in locked-down mode — the WebUI re-prompts."""
     import api_keys_store as _ak
+    perms = user.get("permissions")
     return {
         "open_mode": not _ak.is_locked_down(),
         "user_id": user.get("user_id"),
         "username": user.get("username"),
         "is_admin": bool(user.get("is_admin")),
+        "permissions": perms.to_dict() if perms is not None else {"pages": {}},
     }
 
 

@@ -25,6 +25,7 @@ WARNING banner so the operator can bootstrap.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import secrets
@@ -63,13 +64,54 @@ _LAST_USED_DEBOUNCE_S = 60.0
 KEY_PREFIX = "wk_"
 _KEY_BYTES = 32   # secrets.token_urlsafe(32) → 43-char base64url, 256-bit entropy
 
+# ---------------------------------------------------------------------
+# Permission model — per-user page access + own/all scope
+# ---------------------------------------------------------------------
+
+# Tri-state per page: "none" | "own" | "all".
+#   "none" → 403 on the page (and its API sub-routes).
+#   "own"  → page visible, store layer filters by caller's user_id.
+#   "all"  → page visible, no user_id filter (admin-equivalent visibility).
+# Admins (is_admin=1) bypass this entirely via the super-role short-circuit.
+# /config and /config/api-keys are admin-only by definition and never appear.
+PAGES: tuple[str, ...] = ("logs", "stats", "quick_config", "reports", "captures")
+
+# Per-user data pages — support the full none|own|all triple.
+SCOPED_PAGES: frozenset[str] = frozenset(
+    ("logs", "quick_config", "reports", "captures")
+)
+
+# Pages without a per-user notion — only none|all is meaningful.
+# (stats is server-wide aggregate metrics; "own" would be nonsensical.)
+ACCESS_ONLY_PAGES: frozenset[str] = frozenset(("stats",))
+
+# Allowed scope values per page, used by set_user_permissions() validation.
+_ALLOWED_SCOPES: dict[str, tuple[str, ...]] = {
+    p: (("none", "all") if p in ACCESS_ONLY_PAGES else ("none", "own", "all"))
+    for p in PAGES
+}
+
+# Safe-by-default for new + existing non-admin users:
+#   per-data pages → "own" (see their own records),
+#   stats          → "none" (no leak of server health).
+DEFAULT_NONADMIN_PERMS: dict[str, Any] = {
+    "pages": {
+        "logs":         "own",
+        "stats":        "none",
+        "quick_config": "own",
+        "reports":      "own",
+        "captures":     "own",
+    },
+}
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
-  id          TEXT PRIMARY KEY,
-  username    TEXT NOT NULL UNIQUE,
-  is_admin    INTEGER NOT NULL DEFAULT 0,
-  created_ts  REAL NOT NULL,
-  revoked_ts  REAL
+  id           TEXT PRIMARY KEY,
+  username     TEXT NOT NULL UNIQUE,
+  is_admin     INTEGER NOT NULL DEFAULT 0,
+  created_ts   REAL NOT NULL,
+  revoked_ts   REAL,
+  permissions  TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS idx_users_active ON users(revoked_ts);
 
@@ -104,7 +146,35 @@ def init_db(db_path: str) -> None:
     _conn.execute("PRAGMA journal_mode=WAL;")
     _conn.execute("PRAGMA synchronous=NORMAL;")
     _conn.executescript(_SCHEMA)
+    _migrate_add_permissions_locked()
     _rebuild_index_locked()
+
+
+def _migrate_add_permissions_locked() -> None:
+    """One-shot migration for DBs that predate the `permissions` column.
+    Idempotent: ALTER fails-silent if the column already exists, and the
+    backfill UPDATE only touches rows still on the empty '{}' default.
+
+    Called from init_db() so a fresh deployment (which gets `permissions`
+    via _SCHEMA) and an upgrade (which needs the ALTER) end on the same
+    final shape."""
+    conn = _require_conn()
+    try:
+        conn.execute(
+            "ALTER TABLE users ADD COLUMN permissions TEXT NOT NULL DEFAULT '{}'"
+        )
+    except sqlite3.OperationalError:
+        pass  # column already exists — fresh DB, or second-boot upgrade
+    cur = conn.execute(
+        "UPDATE users SET permissions = ?"
+        " WHERE permissions = '{}' AND is_admin = 0",
+        (json.dumps(DEFAULT_NONADMIN_PERMS),),
+    )
+    if cur.rowcount:
+        logger.info(
+            "[auth] backfilled default permissions for %d non-admin user(s)",
+            cur.rowcount,
+        )
 
 
 def _require_conn() -> sqlite3.Connection:
@@ -149,7 +219,21 @@ def _row_to_user_dict(row: sqlite3.Row) -> dict[str, Any]:
         "is_admin": bool(row["is_admin"]),
         "created_ts": float(row["created_ts"]),
         "revoked_ts": float(row["revoked_ts"]) if row["revoked_ts"] is not None else None,
+        "permissions": _parse_permissions(row["permissions"] if "permissions" in row.keys() else None),
     }
+
+
+def _parse_permissions(raw: "str | None") -> dict[str, Any]:
+    """Decode the JSON-encoded permissions column. Returns an empty dict on
+    null/blank/invalid input — the policy object treats missing pages as
+    'none', which is the safe default for an unknown shape."""
+    if not raw:
+        return {}
+    try:
+        v = json.loads(raw)
+        return v if isinstance(v, dict) else {}
+    except (json.JSONDecodeError, TypeError):
+        return {}
 
 
 def _row_to_key_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -178,7 +262,8 @@ def _rebuild_index_locked() -> None:
     global _KEY_INDEX, _IS_LOCKED_DOWN
     conn = _require_conn()
     rows = conn.execute(
-        "SELECT k.key_hash, k.id AS key_id, u.id AS user_id, u.username, u.is_admin"
+        "SELECT k.key_hash, k.id AS key_id, u.id AS user_id, u.username,"
+        " u.is_admin, u.permissions"
         " FROM api_keys k JOIN users u ON u.id = k.user_id"
         " WHERE k.revoked_ts IS NULL AND u.revoked_ts IS NULL"
     ).fetchall()
@@ -189,6 +274,7 @@ def _rebuild_index_locked() -> None:
             "user_id": r["user_id"],
             "username": r["username"],
             "is_admin": bool(r["is_admin"]),
+            "permissions_raw": _parse_permissions(r["permissions"]),
         }
     _KEY_INDEX = idx
     _IS_LOCKED_DOWN = any(v["is_admin"] for v in idx.values())
@@ -208,13 +294,18 @@ def create_user(username: str, is_admin: bool) -> str:
         raise ValueError("username too long (max 128 chars)")
     uid = uuid.uuid4().hex
     now = time.time()
+    # Admin users get '{}' — they bypass the policy anyway. Non-admins
+    # get the safe default so they can immediately review their own data
+    # on /captures, /reports, /quick-config, /logs (stats stays off).
+    perms_json = "{}" if is_admin else json.dumps(DEFAULT_NONADMIN_PERMS)
     conn = _require_conn()
     try:
         with _lock:
             conn.execute(
-                "INSERT INTO users (id, username, is_admin, created_ts, revoked_ts)"
-                " VALUES (?,?,?,?,NULL)",
-                (uid, username, 1 if is_admin else 0, now),
+                "INSERT INTO users (id, username, is_admin, created_ts,"
+                " revoked_ts, permissions)"
+                " VALUES (?,?,?,?,NULL,?)",
+                (uid, username, 1 if is_admin else 0, now, perms_json),
             )
             _rebuild_index_locked()
     except sqlite3.IntegrityError as e:
@@ -485,7 +576,94 @@ OPEN_MODE_USER: dict[str, Any] = {
     "user_id": "(open-mode)",
     "username": "(open mode)",
     "is_admin": True,
+    # is_admin=True short-circuits the policy object anyway, but populate
+    # the raw shape so a hypothetical demote-to-non-admin path doesn't see
+    # a missing key.
+    "permissions_raw": {},
 }
+
+
+# ---------------------------------------------------------------------
+# Permission helpers (user-level, JSON column on users)
+# ---------------------------------------------------------------------
+
+def get_user_permissions(user_id: str) -> dict[str, Any]:
+    """Return the JSON-decoded permissions dict for `user_id`, or an
+    empty dict for unknown / revoked / sentinel ids. Cheap render-time
+    lookup used by the admin matrix UI."""
+    if not user_id or user_id == "(open-mode)":
+        return {}
+    conn = _require_conn()
+    row = conn.execute(
+        "SELECT permissions FROM users WHERE id = ?", (user_id,),
+    ).fetchone()
+    if row is None:
+        return {}
+    return _parse_permissions(row["permissions"])
+
+
+def set_user_permissions(user_id: str, perms: dict[str, Any]) -> dict[str, Any]:
+    """PATCH-merge a permissions update onto the user's stored shape.
+    Returns the (validated + canonical) dict that landed in the DB so
+    the caller can echo it back to the UI.
+
+    Merge semantics: incoming `perms["pages"]` is merged with whatever
+    is currently stored; pages absent from the payload retain their
+    existing scope. The matrix UI sends the full set on each Save, but
+    partial PATCH calls (CLI, future bulk-edit) only need to send the
+    cells they want to change.
+
+    Validation rules:
+      - `perms["pages"]` must be a dict (other top-level keys ignored).
+      - Page names must be in api_keys_store.PAGES.
+      - Scope values must be in _ALLOWED_SCOPES[page] — i.e., "none"|"own"|
+        "all" for scoped pages, "none"|"all" for access-only pages.
+      - Pages missing from BOTH incoming and stored shapes default to
+        "none" — the persisted JSON is always canonical (all PAGES keys
+        present), which keeps the matrix UI simple.
+
+    Raises ValueError on any invalid input. Rebuilds the in-memory index
+    so live key holders see the new scope on their next request (no
+    logout required)."""
+    if not isinstance(perms, dict):
+        raise ValueError("permissions must be a JSON object")
+    incoming_pages = perms.get("pages", {})
+    if not isinstance(incoming_pages, dict):
+        raise ValueError("permissions.pages must be a JSON object")
+    for page, scope in incoming_pages.items():
+        if page not in PAGES:
+            raise ValueError(f"unknown page: {page!r}")
+        allowed = _ALLOWED_SCOPES[page]
+        if scope not in allowed:
+            raise ValueError(
+                f"invalid scope {scope!r} for {page!r}"
+                f" (allowed: {', '.join(allowed)})"
+            )
+    # Merge: incoming wins, otherwise keep what's stored, otherwise "none".
+    existing = get_user_permissions(user_id).get("pages") or {}
+    merged_pages: dict[str, str] = {}
+    for page in PAGES:
+        if page in incoming_pages:
+            merged_pages[page] = incoming_pages[page]
+        elif page in existing and existing[page] in _ALLOWED_SCOPES[page]:
+            merged_pages[page] = existing[page]
+        else:
+            merged_pages[page] = "none"
+    clean = {"pages": merged_pages}
+    conn = _require_conn()
+    with _lock:
+        cur = conn.execute(
+            "UPDATE users SET permissions = ? WHERE id = ? AND revoked_ts IS NULL",
+            (json.dumps(clean), user_id),
+        )
+        if cur.rowcount == 0:
+            raise ValueError("user not found or revoked")
+        _rebuild_index_locked()
+    logger.info(
+        "[auth] permissions updated user=%s pages=%s",
+        user_id[:8], merged_pages,
+    )
+    return clean
 
 
 def is_locked_down() -> bool:

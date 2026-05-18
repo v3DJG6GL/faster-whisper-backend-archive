@@ -1,14 +1,21 @@
 """FastAPI auth dependencies — the bearer-token gate that resolves an
 incoming `Authorization: Bearer <api_key>` header to a `UserRecord`.
 
-Two-level dependency layering (FastAPI idiomatic):
+Three-level dependency layering (FastAPI idiomatic):
 
   - `get_current_user`: hashes the bearer, looks up in api_keys_store,
-    raises 401 on miss. In OPEN mode (no admin key configured yet)
-    returns the synthetic `OPEN_MODE_USER` so existing checks keep
-    working while the operator bootstraps.
+    raises 401 on miss. Attaches a `Permissions` policy object so
+    callers can ask "can this user reach page X?" / "what data scope?".
+    In OPEN mode (no admin key configured yet) returns the synthetic
+    `OPEN_MODE_USER` so existing checks keep working while the operator
+    bootstraps.
   - `require_admin`: depends on `get_current_user` and raises 403 if
-    `is_admin=False`.
+    `is_admin=False`. Used for system-mutation endpoints (/config,
+    /config/api-keys, delete/clear/reapply-rules).
+  - `require_page(name)`: dependency factory — raises 403 if the user
+    has no access to the named page. Mounted on the per-data routers
+    (/captures, /reports, /quick-config, /logs, /stats) at the
+    APIRouter constructor so every sub-route inherits the check.
 
 Open-mode logging: a background asyncio task emits a WARNING every 60
 seconds while the server has no admin keys, so the operator sees the
@@ -42,6 +49,67 @@ _FORBIDDEN = HTTPException(
 
 
 # ---------------------------------------------------------------------
+# Permissions — policy object
+# ---------------------------------------------------------------------
+
+class Permissions:
+    """Read-side wrapper around a user's stored permissions JSON.
+
+    Built once per request by `get_current_user`. Routes ask three
+    questions:
+      - `can(page)`        — page-access gate (admin bypass).
+      - `scope(page)`      — "own" or "all" for visible pages.
+      - `effective_user_id_for(page, uid)` — store-layer filter contract:
+                              None  → no filter
+                              str   → WHERE user_id = ?
+    Plus `assert_can_read_row(row, page, uid)` for detail-by-id endpoints
+    — returns 404 (not 403) on scope miss to avoid leaking existence
+    (OWASP IDOR Prevention Cheat Sheet guidance).
+    """
+
+    __slots__ = ("_pages", "_is_admin")
+
+    def __init__(self, raw: dict[str, Any] | None, is_admin: bool) -> None:
+        pages = (raw or {}).get("pages", {})
+        self._pages: dict[str, str] = pages if isinstance(pages, dict) else {}
+        self._is_admin = bool(is_admin)
+
+    def can(self, page: str) -> bool:
+        if self._is_admin:
+            return True
+        return self._pages.get(page, "none") != "none"
+
+    def scope(self, page: str) -> str:
+        if self._is_admin:
+            return "all"
+        return self._pages.get(page, "none")
+
+    def effective_user_id_for(self, page: str, caller_uid: str) -> str | None:
+        """Return the value to pass to store layer as `user_id=...`.
+        None = "no filter" (admin-equivalent visibility); str = the
+        caller's own id (own-only filter). Store helpers (e.g.,
+        `captures_store.list_captures`) already treat None as no-filter
+        — this method is the one place that contract is encoded."""
+        return None if self.scope(page) == "all" else caller_uid
+
+    def assert_can_read_row(
+        self, row: dict[str, Any] | None, page: str, caller_uid: str,
+    ) -> None:
+        """Detail-endpoint guard. 404 (not 403) on cross-user reads —
+        a 403 would confirm the row exists, which is itself a leak."""
+        if self.scope(page) == "all":
+            return
+        if (row or {}).get("user_id") != caller_uid:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, "not found",
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serializable view for `/auth/whoami`."""
+        return {"pages": dict(self._pages)}
+
+
+# ---------------------------------------------------------------------
 # Dependencies
 # ---------------------------------------------------------------------
 
@@ -51,16 +119,23 @@ def get_current_user(
     """Resolve the bearer to a user record. Raises 401 on miss (locked
     down) or returns the synthetic admin (open mode).
 
-    Returns a dict with keys: key_id, user_id, username, is_admin.
+    Returns a dict with keys: key_id, user_id, username, is_admin,
+    permissions (a `Permissions` policy object).
     """
     if not api_keys_store.is_locked_down():
-        return dict(api_keys_store.OPEN_MODE_USER)
-
-    if creds is None or (creds.scheme or "").lower() != "bearer":
-        raise _UNAUTH
-    rec = api_keys_store.lookup_by_raw_key(creds.credentials or "")
-    if rec is None:
-        raise _UNAUTH
+        rec = dict(api_keys_store.OPEN_MODE_USER)
+    else:
+        if creds is None or (creds.scheme or "").lower() != "bearer":
+            raise _UNAUTH
+        rec = api_keys_store.lookup_by_raw_key(creds.credentials or "")
+        if rec is None:
+            raise _UNAUTH
+    # Attach the policy object so routes can ask can(page)/scope(page)
+    # without each one re-parsing the JSON.
+    rec["permissions"] = Permissions(
+        rec.get("permissions_raw") or {},
+        bool(rec.get("is_admin")),
+    )
     return rec
 
 
@@ -71,6 +146,32 @@ def require_admin(
     if not user.get("is_admin"):
         raise _FORBIDDEN
     return user
+
+
+def require_page(name: str):
+    """Dependency factory: 403 if the user has no access to the named
+    page. Admins bypass via Permissions.can(). Mount on the APIRouter
+    constructor so every present + future sub-route inherits the check
+    — closes the "forgot to gate this endpoint" hole.
+
+    Usage:
+        router = APIRouter(
+            prefix="/captures",
+            dependencies=[
+                Depends(require_admin_host),
+                Depends(require_page("captures")),
+            ],
+        )
+    """
+    def _dep(user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
+        perms: Permissions = user["permissions"]
+        if not perms.can(name):
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                f"no access to /{name.replace('_', '-')}",
+            )
+        return user
+    return _dep
 
 
 # ---------------------------------------------------------------------
