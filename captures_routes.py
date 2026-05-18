@@ -2945,9 +2945,6 @@ _CAPTURES_HTML = r"""<!doctype html>
   #propose-batch .batch-done .actions {
     display: flex; gap: 0.5rem; justify-content: center;
   }
-  #propose-batch-top.active {
-    background: var(--accent, #58a6ff); color: var(--bg); border-color: var(--accent, #58a6ff);
-  }
 
   {{NAV_CSS}}
 </style>
@@ -3045,7 +3042,6 @@ _CAPTURES_HTML = r"""<!doctype html>
   <div class="box">
     <div class="propose-top">
       <h3>Proposed merges</h3>
-      <button id="propose-batch-top" title="Step through proposals one at a time with keyboard / swipe shortcuts">Batch review</button>
       <button id="propose-refresh-top">Refresh</button>
       <button id="propose-close-top">Close</button>
     </div>
@@ -5389,31 +5385,26 @@ _CAPTURES_HTML = r"""<!doctype html>
   var _batchCurrentCard = null;
   var _batchKeyHandler = null;
   var _batchTouchState = null;
-  // True when batch mode was entered directly from the /captures page
-  // (via ⚡ Batch review merges) — i.e. the user never saw the list view
-  // and shouldn't be dumped into it when they hit "Exit batch".
-  var _batchEnteredDirectly = false;
 
-  function _enterBatchMode(opts) {
+  function _enterBatchMode() {
     if (_batchActive) return;
     _batchActive = true;
-    _batchEnteredDirectly = !!(opts && opts.direct);
     _batchAccepted = 0;
     _batchDismissed = 0;
     document.getElementById('propose-list').hidden = true;
     document.getElementById('propose-batch').hidden = false;
-    document.getElementById('propose-batch-top').classList.add('active');
-    document.getElementById('propose-batch-top').textContent = 'Exit batch';
     _batchKeyHandler = function(e) { _onBatchKey(e); };
     document.addEventListener('keydown', _batchKeyHandler);
     _renderBatchCard();
   }
 
+  // Batch mode is always entered directly from the /captures page (via
+  // the ⚡ Batch review merges button), so exiting always closes the
+  // modal. Esc, the modal's Close button, and the end-of-batch "Close"
+  // button all route through here.
   function _exitBatchMode() {
     if (!_batchActive) return;
-    var wasDirect = _batchEnteredDirectly;
     _batchActive = false;
-    _batchEnteredDirectly = false;
     _stopAnyPreview();
     document.removeEventListener('keydown', _batchKeyHandler);
     _batchKeyHandler = null;
@@ -5421,14 +5412,7 @@ _CAPTURES_HTML = r"""<!doctype html>
     document.getElementById('propose-list').hidden = false;
     document.getElementById('propose-batch').hidden = true;
     document.getElementById('propose-batch').innerHTML = '';
-    document.getElementById('propose-batch-top').classList.remove('active');
-    document.getElementById('propose-batch-top').textContent = 'Batch review';
-    // If the user entered batch mode DIRECTLY from the page, they never
-    // wanted to see the list — exiting the batch should close the whole
-    // popup rather than drop them into a view they didn't ask for.
-    if (wasDirect) {
-      document.getElementById('propose-modal').classList.remove('show');
-    }
+    document.getElementById('propose-modal').classList.remove('show');
   }
 
   function _renderBatchCard() {
@@ -5538,16 +5522,11 @@ _CAPTURES_HTML = r"""<!doctype html>
       _batchAccepted = 0; _batchDismissed = 0;
       _renderBatchCard();
     });
-    var listBtn = document.createElement('button');
-    listBtn.type = 'button';
-    listBtn.textContent = 'Back to list';
-    listBtn.addEventListener('click', _exitBatchMode);
     var closeBtn = document.createElement('button');
     closeBtn.type = 'button';
     closeBtn.textContent = 'Close';
     closeBtn.addEventListener('click', _closePropose);
     acts.appendChild(refreshBtn);
-    acts.appendChild(listBtn);
     acts.appendChild(closeBtn);
     done.appendChild(acts);
     host.appendChild(done);
@@ -5674,7 +5653,7 @@ _CAPTURES_HTML = r"""<!doctype html>
     var startInBatch = opts && opts.startInBatch;
     _loadProposals().then(function() {
       if (startInBatch && _proposals.length > 0 && !_batchActive) {
-        _enterBatchMode({ direct: true });
+        _enterBatchMode();
       }
     });
   }
@@ -6412,15 +6391,10 @@ _CAPTURES_HTML = r"""<!doctype html>
     _stopAnyPreview();
     document.getElementById('propose-modal').classList.remove('show');
   }
-  function _toggleBatchMode() {
-    if (_batchActive) _exitBatchMode();
-    else _enterBatchMode();
-  }
   document.getElementById('propose-refresh').addEventListener('click', _loadProposals);
   document.getElementById('propose-close').addEventListener('click', _closePropose);
   document.getElementById('propose-refresh-top').addEventListener('click', _loadProposals);
   document.getElementById('propose-close-top').addEventListener('click', _closePropose);
-  document.getElementById('propose-batch-top').addEventListener('click', _toggleBatchMode);
 
   // Revoke any open audio blob URLs on tab close — also handled per-row
   // on collapse, but this is the safety net.
