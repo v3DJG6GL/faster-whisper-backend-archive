@@ -856,26 +856,63 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
     transition: height 120ms ease;
   }
   .rule-row.disabled { opacity: 0.55; }
-  .rule-row .row-header { display: flex; align-items: center; gap: 0.5rem;
+  /* Two-line head: identity (drag, #, enabled, label, slug, type, edit)
+     on line 1 — line 2 carries metadata (tag picker, user-editable
+     toggle, untagged badge). Splits the cognitive load so the load-
+     bearing field (rule-label) actually has room to breathe. */
+  .rule-row .row-header { display: flex; flex-direction: column;
+    gap: 0.35rem; padding: 0.45rem 0.6rem; }
+  .rule-row .row-header-line1,
+  .rule-row .row-header-line2 {
+    display: flex; align-items: center; gap: 0.5rem;
     flex-wrap: wrap; row-gap: 0.25rem;
-    font-family: var(--font-mono); font-size: var(--fs-sm); }
-  /* Allow the label to actually shrink within the flex row, so the
-     row stays on one line at typical widths and wraps to the row-gap
-     line when truly narrow (rather than overflowing horizontally). */
-  .rule-row .rule-label { min-width: 0; }
+    font-family: var(--font-mono); font-size: var(--fs-sm);
+  }
+  /* Line 2 is metadata — slightly smaller + dim, indented under the
+     drag handle so the visual hierarchy reads "this is detail about
+     the row above". */
+  .rule-row .row-header-line2 {
+    padding-left: 1.75rem;
+    font-size: var(--fs-xs);
+    color: var(--dim);
+  }
+  /* Hide line 2 for terminal rules (no tags / no exposed flag apply). */
+  .rule-row.terminal .row-header-line2 { display: none; }
+  /* Line 2's "tags:" prefix sits before the picker. Fixed-width so
+     pills always start at the same x across rows. */
+  .rule-row .row-header-line2 .meta-label {
+    color: var(--dim); user-select: none; min-width: 2.5rem;
+  }
+  /* The rule label is the load-bearing field — it gets every spare
+     pixel of line 1 and ellipses on the right when truly narrow. The
+     full text lives in title= so hover always reveals it. */
+  .rule-row .rule-label {
+    flex: 1; min-width: 0; color: var(--fg);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
   .rule-row .drag-handle { cursor: grab; user-select: none; color: var(--dim);
     padding: 0.125rem 0.25rem; }
   .rule-row .drag-handle:active { cursor: grabbing; }
   .rule-row.locked .drag-handle { cursor: not-allowed; }
   .rule-row .ordinal { color: var(--dim); min-width: 1.5rem; text-align: right; }
-  .rule-row .expose-toggle { display: inline-flex; gap: 0.25rem; align-items: center;
-    font-size: var(--fs-xs); color: var(--dim); user-select: none; cursor: pointer;
-    padding: 0 0.25rem; border-radius: 3px; }
-  .rule-row .expose-toggle.on { color: var(--green); }
-  .rule-row .rule-label { flex: 1; color: var(--fg); }
+  /* Generalised labelled-toggle widget used for BOTH `enabled` (line 1)
+     and `user-editable` (line 2). Same shape, same green-when-on cue,
+     same dim-when-off. Renamed from `.expose-toggle` — that name lied
+     about the toggle below it (the user thought "simple" meant a
+     /simple page somewhere). */
+  .rule-row .toggle { display: inline-flex; gap: 0.3rem;
+    align-items: center; user-select: none; cursor: pointer;
+    padding: 0 0.25rem; border-radius: 3px;
+    color: var(--dim); }
+  .rule-row .toggle.on { color: var(--green); }
+  .rule-row .toggle input { margin: 0; }
   .rule-row .rule-slug { color: var(--dim); font-size: var(--fs-xs); font-style: italic; }
+  /* Type pill — fixed min-width so the label column starts at a
+     predictable x across rows (the previous shrink-to-fit made the
+     label jump left-right between regex / cb:wordlist / cb:dedup). */
   .rule-row .type-pill { display: inline-block; padding: 0 0.375rem; border-radius: 3px;
-    font-size: var(--fs-xs); background: #21262d; color: var(--cyan); }
+    font-size: var(--fs-xs); background: #21262d; color: var(--cyan);
+    min-width: 4rem; text-align: center; }
   .rule-row .expand-btn, .rule-row .delete-btn {
     background: transparent; border: 1px solid var(--border);
     color: var(--fg); padding: 0.125rem 0.375rem; border-radius: 3px; cursor: pointer;
@@ -884,6 +921,18 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
   .rule-row .row-body { padding-left: 2rem; padding-top: 0.375rem; display: none; }
   .rule-row.expanded .row-body { display: block; }
   .rule-row.terminal .row-body { display: block; padding-top: 0.25rem; }
+  /* Destructive-actions footer inside the expanded body. Holds reset /
+     delete — keeps them out of the scannable head row (PatternFly
+     "destructive actions outside scannable rows" guidance). */
+  .rule-row .row-body-actions {
+    display: flex; gap: 0.5rem; margin-top: 0.6rem;
+    padding-top: 0.5rem; border-top: 1px solid var(--border);
+    justify-content: flex-end;
+  }
+  .rule-row .row-body-actions .reset-link,
+  .rule-row .row-body-actions .delete-btn {
+    font-size: var(--fs-xs);
+  }
   .rule-editor { display: flex; flex-direction: column; gap: 0.25rem; }
   .rule-editor .map-table { font-family: var(--font-mono); font-size: var(--fs-sm); }
   .rule-editor .map-table input { background: transparent; color: var(--fg);
@@ -1056,7 +1105,10 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
   .pipeline-rules-wrap.checklist-mode .rule-row {
     padding: 0.25rem 0.5rem; }
   .pipeline-rules-wrap.checklist-mode .rule-row .row-header {
-    display: flex; align-items: center; gap: 0.5rem; }
+    /* Override the two-line column flow used in the global rule editor —
+       per-model checklist rows are intentionally single-line + compact. */
+    display: flex; flex-direction: row; align-items: center;
+    gap: 0.5rem; padding: 0; }
   .pipeline-rules-wrap.checklist-mode .rule-row.excluded .rule-label {
     color: var(--dim); text-decoration: line-through; }
   .pipeline-rules-wrap.checklist-mode .rule-row .rule-checklist-status {
@@ -2685,9 +2737,41 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
     // Restore expansion across repaints (state lives in expandedNames Set).
     if (expandedNames.has(rule.name)) row.classList.add('expanded');
 
-    // Header row.
+    // ----- Labelled-toggle factory (used for `enabled` on line 1 and
+    // `user-editable` on line 2). Same shape, same green-when-on cue,
+    // same dim-when-off — readable as a parallel pair. ------------------
+    function _labelledToggle(text, checked, opts) {
+      opts = opts || {};
+      const wrap = document.createElement('label');
+      wrap.className = 'toggle';
+      if (checked) wrap.classList.add('on');
+      if (opts.title) wrap.title = opts.title;
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = !!checked;
+      if (opts.disabled) cb.disabled = true;
+      cb.addEventListener('change', () => {
+        wrap.classList.toggle('on', cb.checked);
+        if (opts.onChange) opts.onChange(cb.checked);
+      });
+      wrap.appendChild(cb);
+      const lbl = document.createElement('span');
+      lbl.textContent = text;
+      wrap.appendChild(lbl);
+      return wrap;
+    }
+
+    // Header is now a flex COLUMN with two children — line 1 (identity)
+    // and line 2 (metadata). The previous single-line layout meant the
+    // rule-label was the first thing to truncate when 10+ inline
+    // controls fought for horizontal space.
     const head = document.createElement('div');
     head.className = 'row-header';
+    const headLine1 = document.createElement('div');
+    headLine1.className = 'row-header-line1';
+    head.appendChild(headLine1);
+    const headLine2 = document.createElement('div');
+    headLine2.className = 'row-header-line2';
 
     const drag = document.createElement('span');
     drag.className = 'drag-handle';
@@ -2729,72 +2813,26 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
         dragSrcIdx = null;
       });
     }
-    head.appendChild(drag);
+    headLine1.appendChild(drag);
 
-    const cb = document.createElement('input');
-    cb.type = 'checkbox'; cb.checked = !!rule.enabled;
-    cb.title = 'Enable / disable this rule';
-    if (rule.type === 'terminal') cb.disabled = true;
-    cb.addEventListener('change', () => {
-      rule.enabled = cb.checked;
-      commitFull();
-    });
-    head.appendChild(cb);
-
-    // "Show on /quick-config" — admin marks a rule as exposed to end users.
-    // Skipped for terminal rules (no useful body to edit). The checkbox sits
-    // beside the enabled toggle so the two flags read as a pair.
-    let _untaggedBadge = null;  // updated on tag change + expose change
-    if (rule.type !== 'terminal') {
-      const expWrap = document.createElement('label');
-      expWrap.className = 'expose-toggle';
-      expWrap.title = 'Show this rule on /quick-config so end-users can edit its body';
-      const expCb = document.createElement('input');
-      expCb.type = 'checkbox';
-      expCb.checked = !!rule.exposed;
-      expCb.addEventListener('change', () => {
-        rule.exposed = expCb.checked;
-        expWrap.classList.toggle('on', expCb.checked);
-        _syncUntaggedBadge();
+    // `enabled` toggle on line 1 — gets a visible label "enabled" (not
+    // just a tooltip). Terminal rules disable the toggle but still show
+    // it for visual rhythm.
+    const enabledToggle = _labelledToggle('enabled', !!rule.enabled, {
+      title: 'Enable / disable this rule',
+      disabled: rule.type === 'terminal',
+      onChange: (val) => {
+        rule.enabled = val;
         commitFull();
-      });
-      if (rule.exposed) expWrap.classList.add('on');
-      expWrap.appendChild(expCb);
-      const expTxt = document.createElement('span');
-      expTxt.textContent = 'simple';
-      expWrap.appendChild(expTxt);
-      head.appendChild(expWrap);
+      },
+    });
+    headLine1.appendChild(enabledToggle);
 
-      // Per-rule tag picker. Mounted next to the expose toggle because
-      // tagging is what makes "exposed" actually mean "visible to a
-      // subset"; the two flags pair conceptually.
-      const tagWrap = document.createElement('span');
-      tagWrap.className = 'rule-tag-wrap';
-      const picker = window._renderTagPicker({
-        initial: Array.isArray(rule.tags) ? rule.tags : [],
-        available: _allRuleTags(),
-        placeholder: '+ tag',
-        onChange: (newTags) => {
-          rule.tags = newTags;
-          _syncUntaggedBadge();
-          commitFull();
-        },
-      });
-      tagWrap.appendChild(picker.el);
-      head.appendChild(tagWrap);
-
-      // Yellow "visible to all users" badge — shown when the rule is
-      // exposed AND has no tags (the asymmetric default that lets it
-      // reach every non-admin user). Helps admins spot rules they
-      // probably wanted to scope but forgot to tag.
-      _untaggedBadge = document.createElement('span');
-      _untaggedBadge.className = 'rule-untagged-badge';
-      _untaggedBadge.textContent = '· visible to all users';
-      _untaggedBadge.title = 'Exposed but untagged — every authenticated user '
-        + 'with /quick-config access sees this rule. Add tags to scope it '
-        + 'to specific users.';
-      head.appendChild(_untaggedBadge);
-    }
+    // Line 2 is built later (after we've decided whether this is a
+    // terminal row — those skip line 2 entirely). The badge variable
+    // is hoisted so _syncUntaggedBadge() can find it before line 2's
+    // construction completes.
+    let _untaggedBadge = null;
     function _syncUntaggedBadge() {
       if (!_untaggedBadge) return;
       const isUntagged = !rule.tags || !rule.tags.length;
@@ -2805,23 +2843,24 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
 
     const ord = document.createElement('span');
     ord.className = 'ordinal';
-    ord.textContent = String(idx + 1);
-    head.appendChild(ord);
+    ord.textContent = '#' + (idx + 1);
+    headLine1.appendChild(ord);
 
     const lbl = document.createElement('span');
     lbl.className = 'rule-label';
     lbl.textContent = rule.label || rule.name;
-    head.appendChild(lbl);
+    lbl.title = rule.label || rule.name;   // hover reveals full text when ellipsised
+    headLine1.appendChild(lbl);
 
     const slug = document.createElement('span');
     slug.className = 'rule-slug';
     slug.textContent = '(' + (rule.name || '?') + ')';
-    head.appendChild(slug);
+    headLine1.appendChild(slug);
 
     const pill = document.createElement('span');
     pill.className = 'type-pill';
     pill.textContent = _typePill(rule.type);
-    head.appendChild(pill);
+    headLine1.appendChild(pill);
 
     const expandBtn = document.createElement('button');
     expandBtn.type = 'button';
@@ -2840,13 +2879,74 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
       }
       _setExpandLabel();
     });
-    head.appendChild(expandBtn);
+    headLine1.appendChild(expandBtn);
 
+    // ----- Line 2 (metadata): tag picker + user-editable toggle +
+    // untagged badge. Terminal rules skip it entirely — they have no
+    // tags, no exposed flag, no user-editable concept. ---------------
+    if (rule.type !== 'terminal') {
+      const tagsLbl = document.createElement('span');
+      tagsLbl.className = 'meta-label';
+      tagsLbl.textContent = 'tags:';
+      headLine2.appendChild(tagsLbl);
+
+      const tagWrap = document.createElement('span');
+      tagWrap.className = 'rule-tag-wrap';
+      const picker = window._renderTagPicker({
+        initial: Array.isArray(rule.tags) ? rule.tags : [],
+        available: _allRuleTags(),
+        placeholder: '+ tag',
+        onChange: (newTags) => {
+          rule.tags = newTags;
+          _syncUntaggedBadge();
+          commitFull();
+        },
+      });
+      tagWrap.appendChild(picker.el);
+      headLine2.appendChild(tagWrap);
+
+      // `user-editable` toggle (was the confusing "simple" string).
+      // Tooltip explains the where; the visible label is the truthful
+      // effect description.
+      const exposedToggle = _labelledToggle('user-editable', !!rule.exposed, {
+        title: 'Show on /quick-config so non-admin users can edit '
+             + 'this rule’s body.',
+        onChange: (val) => {
+          rule.exposed = val;
+          _syncUntaggedBadge();
+          commitFull();
+        },
+      });
+      headLine2.appendChild(exposedToggle);
+
+      // Yellow "visible to all users" badge — shown when the rule is
+      // exposed AND has no tags (the asymmetric default that lets it
+      // reach every non-admin user). Helps admins spot rules they
+      // probably wanted to scope but forgot to tag.
+      _untaggedBadge = document.createElement('span');
+      _untaggedBadge.className = 'rule-untagged-badge';
+      _untaggedBadge.textContent = '⚠ untagged · visible to all users';
+      _untaggedBadge.title = 'Exposed but untagged — every authenticated user '
+        + 'with /quick-config access sees this rule. Add tags to scope it '
+        + 'to specific users.';
+      headLine2.appendChild(_untaggedBadge);
+      _syncUntaggedBadge();
+
+      head.appendChild(headLine2);
+    }
+
+    // ----- Body footer destructive actions (reset / delete). Moved
+    // out of the head row per the new layout — these are rare +
+    // destructive, so they live in the expanded body where mis-clicks
+    // are less likely (PatternFly guidance). The variables are built
+    // here so the closures capture `rule`/`idx`/`expandedNames`; the
+    // button itself is appended to the body footer further down. ------
+    const _destructiveBtns = [];
     if (rule.seeded) {
       const reset = document.createElement('button');
       reset.type = 'button';
       reset.className = 'reset-link';
-      reset.textContent = '↺ reset';
+      reset.textContent = '↺ reset to default';
       reset.title = 'Restore this rule to its in-repo default';
       reset.addEventListener('click', () => {
         const baseline = _baselineList().find(b => b.name === rule.name);
@@ -2854,8 +2954,8 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
         rules[idx] = JSON.parse(JSON.stringify(baseline));
         commitFull();
       });
-      head.appendChild(reset);
-    } else {
+      _destructiveBtns.push(reset);
+    } else if (rule.type !== 'terminal') {
       const del = document.createElement('button');
       del.type = 'button';
       del.className = 'delete-btn';
@@ -2866,7 +2966,7 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
         rules.splice(idx, 1);
         commitFull();
       });
-      head.appendChild(del);
+      _destructiveBtns.push(del);
     }
     row.appendChild(head);
 
@@ -2963,6 +3063,16 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
       // would be invisible. The expand-click handler fires refresh() on
       // first reveal instead.
       if (row.classList.contains('expanded')) requestAnimationFrame(refresh);
+    }
+
+    // Destructive actions live in a body-footer (out of the scannable
+    // head row). Append AFTER the rule editor + test panel so the
+    // visual order reads: edit body → run test → reset/delete.
+    if (_destructiveBtns.length) {
+      const footer = document.createElement('div');
+      footer.className = 'row-body-actions';
+      for (const btn of _destructiveBtns) footer.appendChild(btn);
+      body.appendChild(footer);
     }
 
     row.appendChild(body);
