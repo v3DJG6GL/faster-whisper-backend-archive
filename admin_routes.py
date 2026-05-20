@@ -432,6 +432,83 @@ async def _apply_hot_changes(written: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+@router.get("/factory-rules",
+            dependencies=[Depends(require_admin_host), Depends(require_admin)])
+async def get_factory_rules() -> dict[str, Any]:
+    """Return the committed factory pipeline rules (config.json) for the
+    WebUI's "Defaults" editing mode.
+
+    Distinct from GET /config/state, which returns the EFFECTIVE rules
+    (config.json overlaid by config.local.json). This returns the raw factory
+    layer so the admin edits the defaults themselves, not the local overlay.
+    """
+    try:
+        rules = config_store.load_factory_rules()
+    except RuntimeError as e:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(e))
+    return {"PIPELINE_RULES": _canon_rules(rules)}
+
+
+@router.post("/factory-rules",
+             dependencies=[Depends(require_admin_host), Depends(require_admin)])
+async def post_factory_rules(payload: dict[str, Any], request: Request) -> JSONResponse:
+    """Validate and persist the factory pipeline rules to the committed
+    config.json. Whole-list replace — the WebUI's "Defaults" mode always sends
+    the full list.
+
+    config.json is git-tracked, so the save surfaces as a working-tree change
+    the admin then commits + pushes to ship the fix to every deployment.
+
+    After the write: refresh cfg._BASELINE (the "reset to default" baseline),
+    recompute the effective cfg.PIPELINE_RULES (config.local.json still wins if
+    it carries its own PIPELINE_RULES — unchanged local-override behaviour),
+    and rebuild the pipeline cache.
+    """
+    rules = payload.get("PIPELINE_RULES")
+    if not isinstance(rules, list):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "payload must contain a 'PIPELINE_RULES' array",
+        )
+    try:
+        saved = config_store.save_factory_rules(rules)
+    except ValidationError as e:
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content={"errors": config_store.format_validation_errors(e)},
+        )
+    except OSError as e:
+        logger.error("[config] factory-rules save failed: %s", e)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            f"could not write config.json: {e}")
+
+    # config.json IS the factory baseline — refresh the in-memory snapshot the
+    # WebUI's "↺ reset to default" and /config/state `default_value` rely on.
+    if isinstance(getattr(cfg, "_BASELINE", None), dict):
+        cfg._BASELINE["PIPELINE_RULES"] = [dict(r) for r in saved]
+
+    # Recompute the EFFECTIVE rule list. config.local.json's PIPELINE_RULES
+    # still wins if present (per-deployment local override — unchanged); only
+    # when there is no local override does the factory list run directly.
+    overrides = config_store.load_overrides()
+    local_rules = overrides.get("PIPELINE_RULES")
+    shadowed = isinstance(local_rules, list)
+    cfg.PIPELINE_RULES = local_rules if shadowed else [dict(r) for r in saved]
+
+    try:
+        import main as _main
+        _main.rebuild_caches()
+        logger.info("[config] rebuilt pipeline caches after factory-rules save")
+    except Exception as e:
+        logger.error("[config] cache rebuild failed after factory save: %s", e)
+
+    client_host = request.client.host if request.client else "?"
+    logger.info("[config] factory-rules update from=%s rules=%d shadowed_by_local=%s",
+                client_host, len(saved), shadowed)
+
+    return JSONResponse({"saved": len(saved), "shadowed_by_local": shadowed})
+
+
 @router.post("/test-pipeline",
              dependencies=[Depends(require_admin_host), Depends(require_admin)])
 async def test_pipeline(payload: dict[str, Any]) -> JSONResponse:
@@ -823,6 +900,19 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
   /* Advanced warning banner above the Step 3 fields */
   .advanced-warn { background: #2d1f0a; color: var(--yellow); border-left: 3px solid var(--yellow);
     padding: 0.375rem 0.625rem; margin: 0.5rem 0; border-radius: 3px; font-size: var(--fs-sm); }
+  /* Pipeline rules: Local-overrides vs Defaults (config.json) mode toggle */
+  .pipeline-mode-bar { display: flex; gap: 0.375rem; margin-bottom: 0.375rem; }
+  .pipeline-mode-bar button { background: #161b22; color: var(--dim);
+    border: 1px solid var(--border); border-radius: 3px;
+    padding: 0.25rem 0.625rem; cursor: pointer; font: inherit; font-size: var(--fs-sm); }
+  .pipeline-mode-bar button.active { color: var(--cyan); border-color: var(--cyan);
+    font-weight: 600; }
+  /* Banner shown while editing the git-tracked factory defaults */
+  .pipeline-defaults-banner { background: #2d1f0a; color: var(--yellow);
+    border-left: 3px solid var(--yellow); padding: 0.375rem 0.625rem;
+    margin: 0.5rem 0; border-radius: 3px; font-size: var(--fs-sm); }
+  .pipeline-defaults-saverow { display: flex; gap: 0.5rem; align-items: center;
+    margin-top: 0.5rem; flex-wrap: wrap; }
   /* Test panel */
   .regex-test-panel { background: #161b22; border: 1px solid var(--border);
     border-radius: 4px; padding: 0.625rem 0.75rem; margin: 0.5rem 0 0.875rem 0; }
@@ -1468,7 +1558,7 @@ function makeEditor(name) {
   // PIPELINE_RULES gets its own list-of-rules editor (mixed row types,
   // drag-to-reorder, per-row test badge). Routed by name BEFORE shape checks
   // since the value is a list.
-  if (name === 'PIPELINE_RULES') return makeRuleListEditor(name, v || [], 'full', {});
+  if (name === 'PIPELINE_RULES') return makePipelineRulesField(name, v || []);
   // Captures-specific exclude list — same checklist widget as per-model
   // PIPELINE_RULES_EXCLUDE, sourced from the live PIPELINE_RULES. The
   // widget's `excludeSet` drives the visible state; `onToggle(slug,
@@ -2521,7 +2611,14 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
   }  // end if (!isChecklist) — drag handlers
 
   // --- baseline / dirtiness helpers (drive reset-button visibility) ----
-  function _baselineList() { return fieldDef(name).default_value || []; }
+  // Factory mode edits the defaults themselves — there is no "reset to
+  // default" baseline beneath them (git is the undo), so return []. That
+  // also hides every per-row reset button (a rule is never "dirty" against
+  // an empty baseline).
+  function _baselineList() {
+    if (opts.factory) return [];
+    return fieldDef(name).default_value || [];
+  }
   function _isRuleDirtyAgainst(rule, baselineMap) {
     if (!rule || !rule.seeded) return false;
     const baseline = baselineMap.get(rule.name);
@@ -2567,13 +2664,21 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
   // rebuild the DOM — that would steal focus mid-keystroke and collapse
   // any other expanded rows. Structural changes (add/delete/reorder/reset/
   // toggle-enabled) DO rebuild because the visible row layout changes.
+  // Factory mode persists via opts.onChange (its own Save button →
+  // POST /config/factory-rules); local mode pushes into the global dirty
+  // overlay via setDirty so the page-level Save → /config/state picks it up.
+  function _commitSnapshot() {
+    const snap = JSON.parse(JSON.stringify(rules));
+    if (opts.factory) { if (opts.onChange) opts.onChange(snap); }
+    else setDirty(name, snap);
+  }
   function commitData() {
     if (isChecklist) return;   // checklist mode is read-only — no setDirty
-    setDirty(name, JSON.parse(JSON.stringify(rules)));
+    _commitSnapshot();
     refreshControlsVisibility();
   }
   function commitFull() {
-    setDirty(name, JSON.parse(JSON.stringify(rules)));
+    _commitSnapshot();
     paintAll();
   }
 
@@ -2942,7 +3047,12 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
     // here so the closures capture `rule`/`idx`/`expandedNames`; the
     // button itself is appended to the body footer further down. ------
     const _destructiveBtns = [];
-    if (rule.seeded) {
+    // Defaults mode edits the canonical factory list, so every non-terminal
+    // rule is deletable there; "↺ reset to default" only applies in local
+    // mode (in factory mode the rule IS the default — git is the undo).
+    const _canReset = rule.seeded && !opts.factory;
+    const _canDelete = rule.type !== 'terminal' && (opts.factory || !rule.seeded);
+    if (_canReset) {
       const reset = document.createElement('button');
       reset.type = 'button';
       reset.className = 'reset-link';
@@ -2955,12 +3065,14 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
         commitFull();
       });
       _destructiveBtns.push(reset);
-    } else if (rule.type !== 'terminal') {
+    } else if (_canDelete) {
       const del = document.createElement('button');
       del.type = 'button';
       del.className = 'delete-btn';
       del.textContent = '× delete';
-      del.title = 'Remove this custom rule';
+      del.title = opts.factory
+        ? 'Remove this rule from the factory defaults (config.json)'
+        : 'Remove this custom rule';
       del.addEventListener('click', () => {
         expandedNames.delete(rule.name);
         rules.splice(idx, 1);
@@ -3019,7 +3131,7 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
       body.appendChild(labelWrap);
     }
 
-    body.appendChild(renderTypeEditor(rule, commitData));
+    body.appendChild(renderTypeEditor(rule, commitData, { showNote: true }));
 
     if (rule.type !== 'terminal') {
       const status = document.createElement('div');
@@ -3119,7 +3231,7 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
 
   const addBtn = document.createElement('button');
   addBtn.type = 'button';
-  addBtn.textContent = '+ Add custom rule';
+  addBtn.textContent = opts.factory ? '+ Add rule' : '+ Add custom rule';
   addBtn.addEventListener('click', () => _openAddCustomDialog());
   ctrls.appendChild(addBtn);
 
@@ -3144,7 +3256,9 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
     if (terminal) rules.push(terminal);
     commitFull();
   });
-  ctrls.appendChild(resetOrderBtn);
+  // Reset controls are meaningless in factory mode (you are editing the
+  // defaults — git is the undo), so they are only wired up for local mode.
+  if (!opts.factory) ctrls.appendChild(resetOrderBtn);
 
   const resetAllBtn = document.createElement('button');
   resetAllBtn.type = 'button';
@@ -3170,7 +3284,7 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
       : r);
     commitFull();
   });
-  ctrls.appendChild(resetAllBtn);
+  if (!opts.factory) ctrls.appendChild(resetAllBtn);
 
   wrap.appendChild(ctrls);
 
@@ -3222,9 +3336,11 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
       const slugSet = new Set(rules.map(r => r.name));
       const slug = _ensureUniqueSlug(_slugify(lbl), slugSet);
       const t = typeSel.value;
+      // In factory mode a new rule becomes a committed factory default, so
+      // it is seeded; in local mode it is a per-deployment custom rule.
       const newRule = {
         name: slug, label: lbl, type: t,
-        enabled: true, locked: false, seeded: false,
+        enabled: true, locked: false, seeded: !!opts.factory,
       };
       // Seed empty type-specific fields; the user fills them in via the
       // expanded body editor (auto-opened below). Empty patterns are
@@ -3262,6 +3378,151 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
   }
 
   paintAll();
+  return wrap;
+}
+
+
+// PIPELINE_RULES field: a two-mode editor.
+//   "Local overrides" — edits the effective rules through the standard
+//      /config/state save flow (config.local.json). Unchanged behaviour.
+//   "Defaults"        — edits the committed factory defaults (config.json)
+//      directly via /config/factory-rules, so a fix to a broken default rule
+//      can be git-pushed to every deployment.
+function makePipelineRulesField(name, localRules) {
+  const wrap = document.createElement('div');
+  wrap.className = 'pipeline-field';
+
+  const modeBar = document.createElement('div');
+  modeBar.className = 'pipeline-mode-bar';
+  let mode = 'local';                       // 'local' | 'defaults'
+  const localBtn = document.createElement('button');
+  localBtn.type = 'button';
+  localBtn.textContent = 'Local overrides';
+  localBtn.title = "Edit this deployment's local override (config.local.json) "
+                 + '— gitignored, per-deployment.';
+  const defBtn = document.createElement('button');
+  defBtn.type = 'button';
+  defBtn.textContent = 'Defaults (config.json)';
+  defBtn.title = 'Edit the committed factory defaults (config.json) — '
+               + 'git-tracked; commit & push to ship a fix to every deployment.';
+  modeBar.appendChild(localBtn);
+  modeBar.appendChild(defBtn);
+  wrap.appendChild(modeBar);
+
+  // Local-mode editor — built eagerly, identical to the previous behaviour.
+  const localPane = document.createElement('div');
+  localPane.appendChild(makeRuleListEditor(name, localRules || [], 'full', {}));
+  wrap.appendChild(localPane);
+
+  // Defaults-mode editor — built lazily on first switch (one network round-trip).
+  const defPane = document.createElement('div');
+  defPane.style.display = 'none';
+  wrap.appendChild(defPane);
+  let defBuilt = false;
+
+  function _syncMode() {
+    localBtn.classList.toggle('active', mode === 'local');
+    defBtn.classList.toggle('active', mode === 'defaults');
+    localPane.style.display = mode === 'local' ? '' : 'none';
+    defPane.style.display = mode === 'defaults' ? '' : 'none';
+  }
+
+  async function _buildDefaultsPane() {
+    defPane.innerHTML = '<div class="help">Loading factory defaults…</div>';
+    let j;
+    try {
+      const r = await api('GET', '/config/factory-rules');
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      j = await r.json();
+    } catch (e) {
+      defPane.innerHTML = '<div class="regex-status err">✗ could not load '
+        + 'config.json — ' + (e && e.message ? e.message : 'error') + '</div>';
+      defBuilt = false;            // allow a retry on next switch
+      return;
+    }
+    defPane.innerHTML = '';
+
+    const banner = document.createElement('div');
+    banner.className = 'pipeline-defaults-banner';
+    banner.innerHTML = '⚠ <strong>Editing factory defaults.</strong> '
+      + 'Saving writes the git-tracked <code>config.json</code> — commit &amp; '
+      + 'push to ship the change to every deployment.';
+    defPane.appendChild(banner);
+
+    let factoryRules = j.PIPELINE_RULES || [];
+
+    const saveRow = document.createElement('div');
+    saveRow.className = 'pipeline-defaults-saverow';
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.textContent = 'Save defaults to config.json';
+    saveBtn.disabled = true;
+    const saveStatus = document.createElement('span');
+    saveStatus.className = 'help';
+
+    const editor = makeRuleListEditor(name, factoryRules, 'full', {
+      factory: true,
+      onChange: (snapshot) => {
+        factoryRules = snapshot;
+        saveBtn.disabled = false;
+        saveStatus.textContent = 'unsaved changes';
+      },
+    });
+    defPane.appendChild(editor);
+
+    saveBtn.addEventListener('click', async () => {
+      saveBtn.disabled = true;
+      saveStatus.textContent = 'saving…';
+      let resp;
+      try {
+        resp = await api('POST', '/config/factory-rules',
+                         { PIPELINE_RULES: factoryRules });
+      } catch (e) {
+        saveStatus.innerHTML = '<span class="err">✗ network error</span>';
+        saveBtn.disabled = false;
+        return;
+      }
+      if (resp.status === 422) {
+        let msg = 'validation failed';
+        try {
+          const e = await resp.json();
+          msg = (e.errors || []).map(x => x.msg || x.message || x).join('; ') || msg;
+        } catch (_) {}
+        saveStatus.innerHTML = '<span class="err">✗ ' + msg + '</span>';
+        saveBtn.disabled = false;
+        return;
+      }
+      if (!resp.ok) {
+        saveStatus.innerHTML = '<span class="err">✗ save failed (HTTP '
+          + resp.status + ')</span>';
+        saveBtn.disabled = false;
+        return;
+      }
+      const out = await resp.json();
+      if (out.shadowed_by_local) {
+        saveStatus.innerHTML = '<span style="color:var(--yellow)">✓ saved '
+          + out.saved + ' rules to config.json — but this deployment has a '
+          + 'local PIPELINE_RULES override, so the change is inactive here '
+          + 'until that override is cleared. Commit &amp; push to ship it.</span>';
+      } else {
+        saveStatus.innerHTML = '✓ saved ' + out.saved + ' rules to config.json '
+          + '— applied to the running service. Commit &amp; push to ship it.';
+      }
+    });
+
+    saveRow.appendChild(saveBtn);
+    saveRow.appendChild(saveStatus);
+    defPane.appendChild(saveRow);
+  }
+
+  localBtn.addEventListener('click', () => { mode = 'local'; _syncMode(); });
+  defBtn.addEventListener('click', async () => {
+    mode = 'defaults';
+    _syncMode();
+    if (!defBuilt) { defBuilt = true; await _buildDefaultsPane(); }
+  });
+
+  _syncMode();
   return wrap;
 }
 

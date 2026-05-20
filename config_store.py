@@ -30,6 +30,10 @@ from pydantic import BaseModel, Field, ValidationError, field_validator, model_v
 
 _REPO_DIR = os.path.dirname(os.path.abspath(__file__))
 OVERRIDES_PATH = os.path.join(_REPO_DIR, "config.local.json")
+# Committed factory-default pipeline rules. Unlike config.local.json this file
+# IS version-controlled — the admin WebUI's "Defaults" mode edits it so rule
+# fixes can be git-pushed to every deployment. See load_factory_rules().
+FACTORY_PATH = os.path.join(_REPO_DIR, "config.json")
 
 
 # Map AdminConfig field name -> env var that pins it. Mirrors the override
@@ -571,6 +575,12 @@ class _RuleBase(BaseModel):
     # `quick_config_tags` intersects this list". Admins always see
     # everything. See auth.Permissions.can_see_rule().
     tags: list[str] = Field(default_factory=list, max_length=32)
+    # Free-text rationale for the rule — why it exists, ordering constraints,
+    # tradeoffs. Lives in config.json so a rule's "why" travels with it (this
+    # was inline config.py commentary before the factory defaults moved to
+    # config.json). Optional; defaults to "" so older config.local.json files
+    # that predate this field still validate.
+    note: Annotated[str, Field(max_length=4000)] = ""
 
     @field_validator("tags", mode="before")
     @classmethod
@@ -1181,6 +1191,93 @@ def load_overrides(path: str = OVERRIDES_PATH) -> dict[str, Any]:
     return out
 
 
+def _atomic_write_json(obj: Any, path: str, *, sort_keys: bool, tmp_prefix: str) -> None:
+    """Atomically write `obj` as pretty JSON to `path`.
+
+    Write to a tempfile in the same directory, fsync, then os.replace. The
+    rename is retried a few times — on Windows an AV scanner can briefly hold
+    the destination open and raise PermissionError.
+
+    `sort_keys`: True for config.local.json (stable diff of a flat settings
+    dict); False for config.json so the committed factory rules keep their
+    authored order and git diffs stay minimal.
+    """
+    dst_dir = os.path.dirname(os.path.abspath(path)) or "."
+    os.makedirs(dst_dir, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=tmp_prefix, suffix=".tmp", dir=dst_dir)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(obj, f, indent=2, ensure_ascii=False, sort_keys=sort_keys)
+            f.flush()
+            os.fsync(f.fileno())
+        last_err: Exception | None = None
+        for _ in range(5):
+            try:
+                os.replace(tmp, path)
+                tmp = ""  # consumed
+                break
+            except PermissionError as e:
+                last_err = e
+                time.sleep(0.1)
+        else:
+            raise last_err if last_err else OSError("os.replace failed")
+    finally:
+        if tmp and os.path.exists(tmp):
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+def load_factory_rules(path: str = FACTORY_PATH) -> list[dict[str, Any]]:
+    """Load and validate the committed factory pipeline rules from config.json.
+
+    Unlike load_overrides(), this RAISES on any problem — config.json is a
+    required, committed file and the pipeline has no rules without it. The
+    caller surfaces the failure as a fatal startup error.
+
+    Returns the validated PIPELINE_RULES list (list of plain dicts).
+    """
+    if not os.path.exists(path):
+        raise RuntimeError(
+            f"factory rules file not found: {path} — it is required and "
+            f"committed to the repository. Restore it with "
+            f"'git checkout config.json'."
+        )
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        raise RuntimeError(f"cannot read factory rules file {path}: {e}") from e
+    if not isinstance(raw, dict) or "PIPELINE_RULES" not in raw:
+        raise RuntimeError(
+            f"{path} must be a JSON object with a 'PIPELINE_RULES' key"
+        )
+    try:
+        validated = AdminConfig.model_validate({"PIPELINE_RULES": raw["PIPELINE_RULES"]})
+    except ValidationError as e:
+        raise RuntimeError(f"{path} failed validation:\n{e}") from e
+    return validated.model_dump(exclude_none=True, mode="json")["PIPELINE_RULES"]
+
+
+def save_factory_rules(rules: list[Any], path: str = FACTORY_PATH) -> list[dict[str, Any]]:
+    """Validate `rules` and atomically write them to config.json.
+
+    Unlike save_overrides() this is a WHOLE-FILE replace — the WebUI's
+    "Defaults" mode always sends the full rule list, not a dirty diff.
+
+    Returns the validated, coerced rule list. Raises ValidationError on bad
+    input — the route handler converts that to a 422 response.
+    """
+    validated = AdminConfig.model_validate({"PIPELINE_RULES": rules})
+    out_rules = validated.model_dump(exclude_none=True, mode="json")["PIPELINE_RULES"]
+    _atomic_write_json(
+        {"schema_version": 1, "PIPELINE_RULES": out_rules},
+        path, sort_keys=False, tmp_prefix=".config.",
+    )
+    return out_rules
+
+
 def save_overrides(payload: dict[str, Any], path: str = OVERRIDES_PATH) -> dict[str, Any]:
     """Validate `payload` against AdminConfig and atomically write it to disk.
 
@@ -1236,31 +1333,7 @@ def save_overrides(payload: dict[str, Any], path: str = OVERRIDES_PATH) -> dict[
     validated = AdminConfig.model_validate(merged)
     to_write = validated.model_dump(exclude_none=True, mode="json")
 
-    dst_dir = os.path.dirname(os.path.abspath(path)) or "."
-    os.makedirs(dst_dir, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".config.local.", suffix=".tmp", dir=dst_dir)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(to_write, f, indent=2, ensure_ascii=False, sort_keys=True)
-            f.flush()
-            os.fsync(f.fileno())
-        last_err: Exception | None = None
-        for _ in range(5):
-            try:
-                os.replace(tmp, path)
-                tmp = ""  # consumed
-                break
-            except PermissionError as e:
-                last_err = e
-                time.sleep(0.1)
-        else:
-            raise last_err if last_err else OSError("os.replace failed")
-    finally:
-        if tmp and os.path.exists(tmp):
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
+    _atomic_write_json(to_write, path, sort_keys=True, tmp_prefix=".config.local.")
 
     # Return only the fields that actually changed in this call. Compare
     # against `existing` (what was on disk before) using the validated form

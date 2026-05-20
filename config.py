@@ -112,260 +112,54 @@ DEFAULT_PROMPT: "str | None" = (
 # =============================================================================
 # Text post-processing pipeline (PIPELINE_RULES)
 # =============================================================================
-# A single ordered list of rules applied to the joined transcript. Each rule
-# is one of:
-#   - "regex"                       — pattern + replacement (re.sub)
-#   - "callback:lowercase-wordlist" — strip terminator, lowercase next word if in wordlist
-#   - "callback:map"                — auto-built alternation of map keys; lookup replacement
-#   - "callback:dedup"              — collapse adjacent punctuation (last-non-comma wins)
-#   - "callback:upper"              — capitalize after sentence terminator
-#   - "terminal"                    — final lstrip(" \t\r") + rstrip(" \t\r"); always last
+# The ordered rule list applied to the joined transcript lives in the
+# committed file config.json -- NOT in this module. The admin WebUI's
+# "Defaults" mode edits config.json so rule fixes can be git-pushed to every
+# deployment; config.local.json still layers per-deployment overrides on top
+# (precedence: ENV > config.local.json > config.json).
 #
-# Rules are reorderable, disable-able, and resettable from the admin WebUI
-# (/config). The 13 seeded defaults below + 1 terminal trim row are the
-# canonical pipeline for Swiss-German dictation. Custom rules (with
-# `seeded: False`) can be added at any non-terminal position via the WebUI.
+# Each rule's `type` is one of:
+#   - "regex"                       -- pattern + replacement (re.sub)
+#   - "callback:lowercase-wordlist" -- strip terminator, lowercase next word if in wordlist
+#   - "callback:map"                -- auto-built alternation of map keys; lookup replacement
+#   - "callback:dedup"              -- collapse adjacent punctuation (last-non-comma wins)
+#   - "callback:upper"              -- capitalize after sentence terminator
+#   - "terminal"                    -- final lstrip(" \t\r") + rstrip(" \t\r"); always last
+#
+# Ordering invariants: dictation-map multi-word phrases must precede their
+# single-word components (longest-first wins); the terminal rule is always
+# last. See README ("Pipeline rules") for the full rationale.
 #
 # Each rule's regex pattern is precompiled in main.rebuild_caches() at module
 # load and again when the WebUI saves changes (CACHE_REBUILD_FIELDS).
-PIPELINE_RULES: list[dict] = [
-    {
-        "name": "replace-szet-lc",
-        "label": "Replace ß → ss",
-        "type": "regex",
-        "pattern": "ß",
-        "replacement": "ss",
-        "enabled": True, "locked": False, "seeded": True,
-    },
-    {
-        "name": "replace-szet-uc",
-        "label": "Replace ẞ → SS",
-        "type": "regex",
-        "pattern": "ẞ",
-        "replacement": "SS",
-        "enabled": True, "locked": False, "seeded": True,
-    },
-    {
-        # Anything in string.punctuation NOT in `./-:,?!` is removed, plus
-        # the German low quote „. The remaining `./-:,?!` are kept for the
-        # later strip rules' digit-protected logic.
-        "name": "strip-non-keep-punct",
-        "label": "Strip non-keep punctuation",
-        "type": "regex",
-        "pattern": r"[\"#$%&'()*+;<=>@\[\\\]^_`{|}~„]",
-        "replacement": "",
-        "enabled": True, "locked": False, "seeded": True,
-    },
-    {
-        "name": "normalize-digit-range",
-        "label": "Normalize digit-range hyphen → slash",
-        "type": "regex",
-        "pattern": r"(\d)\s*-\s*(\d)",
-        "replacement": r"\1/\2",
-        "enabled": True, "locked": False, "seeded": True,
-    },
-    {
-        # Pass A: paired strip — match terminator + capital-word, strip the
-        # terminator and lowercase the next word IFF it's in `wordlist`.
-        # German nouns are always capitalized; the wordlist is non-nouns
-        # (interrogatives, conjunctions, articles, etc.) — case-insensitive.
-        "name": "strip-and-lowercase-non-noun",
-        "label": "Strip + lowercase next non-noun",
-        "type": "callback:lowercase-wordlist",
-        "pattern": r"(?<!\d)[.?!](\s*)([A-ZÄÖÜ])(\w*)",
-        "wordlist": [
-            # Interrogatives
-            "wie", "was", "wer", "wann", "wo", "warum", "wieso", "weshalb",
-            "welche", "welcher", "welches", "welchem", "welchen",
-            # Conjunctions
-            "und", "oder", "aber", "doch", "denn", "weil", "wenn", "dann",
-            "dass", "obwohl", "während", "sondern", "deshalb", "trotzdem",
-            "falls", "ob",
-            # Articles
-            "der", "die", "das", "den", "dem", "des",
-            "ein", "eine", "einer", "einem", "einen", "eines",
-            "kein", "keine", "keiner", "keinem", "keinen",
-            # Common adverbs / particles
-            "auch", "nur", "noch", "schon", "hier", "da", "dort",
-            "heute", "morgen", "gestern", "jetzt", "nicht",
-            "sehr", "ganz", "etwas", "viel", "wenig", "oft", "immer",
-            # Common prepositions
-            "in", "auf", "an", "von", "mit", "zu", "bei", "aus",
-            "über", "unter", "vor", "nach", "für", "gegen", "ohne", "um",
-            "durch", "ab", "seit",
-            # Common verb forms at sentence start
-            "ist", "sind", "war", "waren", "hat", "haben",
-            "wird", "werden", "kann", "soll", "muss", "will",
-            "könnte", "sollte", "müsste", "wollte",
-        ],
-        "enabled": True, "locked": False, "seeded": True,
-    },
-    {
-        # Plain strip — catches lone .?! the paired pass missed PLUS soft-pause
-        # commas (digit-protected: "1,000" survives; "Frau, Müller" loses the
-        # comma). Replacement is empty; no side effects.
-        "name": "strip-only-terminators-and-commas",
-        "label": "Strip-only terminators + commas",
-        "type": "regex",
-        "pattern": r"(?<!\d)[.?!]|(?<!\d),|,(?!\d)",
-        "replacement": "",
-        "enabled": True, "locked": False, "seeded": True,
-    },
-    {
-        # Spoken word → literal symbol. Word-bounded, case-insensitive.
-        # Multi-word phrases (e.g. "eckige Klammer auf") MUST appear before
-        # their single-word components — main.py sorts the keys longest-first
-        # when building the alternation regex, so the longest phrase wins.
-        #
-        # Tradeoff: a dictation system can't distinguish noun-Punkt from
-        # symbol-Punkt — substitutions are unconditional. Untick `enabled`
-        # for "verbatim" mode.
-        "name": "dictation-map",
-        "label": "Dictation map",
-        "type": "callback:map",
-        "map": {
-            # --- Multi-word phrases ----------------------------------------
-            "neuer Absatz": "\n\n",
-            "neuer Absätze": "\n\n",
-            "neue Absätze": "\n\n",
-            "neuer Apfel": "\n\n",
-            "neue Zeile": "\n",
-            "neue Zeilen": "\n",
-            "neue Teile": "\n",
-            "neue Seile": "\n",
-            "neue Säule": "\n",
-            "eckige Klammer auf": "[",
-            "eckige Klammer zu": "]",
-            "geschweifte Klammer auf": "{",
-            "geschweifte Klammer zu": "}",
-            "Anführungszeichen unten": "„",
-            "Anführungszeichen oben": "“",
-            "Klammer auf": "(",
-            "Klammer zu": ")",
-            "kleiner als": "<",
-            "größer als": ">",
-            # --- Single-word punctuation -----------------------------------
-            "Punkt": ".",
-            "Komma": ",",
-            "Doppelpunkt": ":",
-            "Semikolon": ";",
-            "Strichpunkt": ";",
-            "Fragezeichen": "?",
-            "Ausrufezeichen": "!",
-            "Ausrufungszeichen": "!",
-            "Bindestrich": "-",
-            "Trennstrich": "-",
-            "Gedankenstrich": "–",
-            "Schrägstrich": "/",
-            "Backslash": "\\",
-            "Apostroph": "'",
-            "Unterstrich": "_",
-            "Sternchen": "*",
-            "Raute": "#",
-            "Gänsefüßchen": '"',
-            "Gänsefüsschen": '"',
-            # "Franken" → "CHF" (not "Fr.") to avoid Step CAPITALIZE wrongly
-            # uppercasing the next word ("Fr. Pro" → "Fr. pro").
-            "Franken": "CHF",
-            "Frankenzeichen": "CHF",
-            # --- Math / typographic symbols --------------------------------
-            "Prozent": "%",
-            "Prozentzeichen": "%",
-            "Paragraph": "§",
-            "Paragraphenzeichen": "§",
-            "Grad": "°",
-            "Gradzeichen": "°",
-            "Klammeraffe": "@",
-            "Plus": "+",
-            "Pluszeichen": "+",
-            "Minus": "-",
-            "Minuszeichen": "-",
-            "Gleich": "=",
-            "Gleichheitszeichen": "=",
-            "Tilde": "~",
-            "Pipe": "|",
-            "Dach": "^",
-            "Eurozeichen": "€",
-            "Dollarzeichen": "$",
-            "Et-Zeichen": "&",
-            "Und-Zeichen": "&",
-            "Kaufmannsund": "&",
-        },
-        "enabled": True, "locked": True, "seeded": True,
-    },
-    {
-        "name": "space-before-closing-punct",
-        "label": "Remove space before closing punctuation",
-        "type": "regex",
-        "pattern": r"[ \t]+([,.:;!?\)\]\}])",
-        "replacement": r"\1",
-        "enabled": True, "locked": True, "seeded": True,
-    },
-    {
-        "name": "space-after-opening-punct",
-        "label": "Remove space after opening punctuation",
-        "type": "regex",
-        "pattern": r"([\(\[\{])[ \t]+",
-        "replacement": r"\1",
-        "enabled": True, "locked": True, "seeded": True,
-    },
-    {
-        # NEW vs the previous 11-step pipeline. Whisper segments are joined
-        # with empty separator — if both adjacent segments end/start with
-        # whitespace the join produces an interior double-space that no other
-        # rule cleans (TIDY SPACING only matches whitespace adjacent to
-        # punctuation).
-        "name": "collapse-multi-space",
-        "label": "Collapse multi-space",
-        "type": "regex",
-        "pattern": r"  +",
-        "replacement": " ",
-        "enabled": True, "locked": True, "seeded": True,
-    },
-    {
-        # Whisper emits its own commas as soft pauses around dictation
-        # keywords. After substitution we get runs like ",." (Punkt) or ",;"
-        # (Semikolon). The user's intended mark wins: prefer any non-comma
-        # in the run, and within non-commas prefer the LAST one (dictation
-        # came after the Whisper pause). Pure commas collapse to one comma.
-        "name": "dedup-punct",
-        "label": "Dedup punctuation runs",
-        "type": "callback:dedup",
-        "pattern": r"[,.:;!?]{2,}",
-        "enabled": True, "locked": True, "seeded": True,
-    },
-    {
-        # Around a dictation-emitted "\n" / "\n\n" we often have residue: a
-        # Whisper-emitted comma ("Müller, \n"), trailing space (" \n"), or
-        # punctuation that leaked through ("\n , Welt"). Collapse the
-        # neighborhood — optional whitespace + optional comma — on each side.
-        "name": "tidy-newlines",
-        "label": "Tidy newlines",
-        "type": "regex",
-        "pattern": r"[ \t]*,?[ \t]*(\n+)[ \t]*,?[ \t]*",
-        "replacement": r"\1",
-        "enabled": True, "locked": True, "seeded": True,
-    },
-    {
-        # After dictation inserts ".", "?", "!", "\n", "\n\n", the following
-        # letter starts a new sentence/paragraph. Whisper has no idea about
-        # our substitution, so it leaves the next letter lowercase.
-        "name": "capitalize-after-terminator",
-        "label": "Capitalize after sentence terminator",
-        "type": "callback:upper",
-        "pattern": r"([.?!]\s+|\n+\s*)([a-zäöüß])",
-        "enabled": True, "locked": True, "seeded": True,
-    },
-    {
-        # Final, hardcoded — runs after the loop. lstrip+rstrip strip leading
-        # and trailing space/tab/CR but NOT \n, so a user-dictated leading or
-        # trailing "neue Zeile" ("\n") at the edges of the utterance survives.
-        "name": "trim-edges",
-        "label": "Trim edges (always-last)",
-        "type": "terminal",
-        "enabled": True, "locked": True, "seeded": True,
-    },
-]
+def _load_factory_pipeline_rules() -> "list[dict]":
+    """Load the committed factory pipeline rules from config.json.
+
+    Stdlib-only (no pydantic) so config.py imports even in a minimal
+    environment; the admin save path validates with pydantic separately.
+    Raises RuntimeError on a missing/corrupt file -- config.json is required
+    and committed, so its absence is a deployment error, not a soft fallback.
+    """
+    import json
+    _path = os.path.join(_REPO_DIR, "config.json")
+    if not os.path.exists(_path):
+        raise RuntimeError(
+            f"config.json not found at {_path} -- it is required and committed "
+            f"to the repository. Restore it with 'git checkout config.json'."
+        )
+    try:
+        with open(_path, "r", encoding="utf-8") as _f:
+            _raw = json.load(_f)
+    except (OSError, json.JSONDecodeError) as _e:
+        raise RuntimeError(f"config.json is unreadable or malformed: {_e}") from _e
+    if not isinstance(_raw, dict) or not isinstance(_raw.get("PIPELINE_RULES"), list):
+        raise RuntimeError(
+            "config.json must be a JSON object with a 'PIPELINE_RULES' array"
+        )
+    return _raw["PIPELINE_RULES"]
+
+
+PIPELINE_RULES: list[dict] = _load_factory_pipeline_rules()
 
 
 # =============================================================================

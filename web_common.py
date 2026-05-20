@@ -1041,6 +1041,25 @@ function renderTypeEditor(rule, commitData, opts) {
   const box = document.createElement('div');
   box.className = 'rule-editor';
 
+  // Rule rationale / documentation. Only the admin /config editor passes
+  // `showNote` — /quick-config omits it (non-admin users cannot patch the
+  // `note` field, see _PATCH_ALLOWED_FIELDS in quick_config_routes.py).
+  if (opts.showNote) {
+    const noteLbl = document.createElement('div');
+    noteLbl.className = 'help';
+    noteLbl.textContent = 'note (rationale / documentation):';
+    box.appendChild(noteLbl);
+    const noteTa = document.createElement('textarea');
+    noteTa.className = 'rule-note';
+    noteTa.rows = 2;
+    noteTa.spellcheck = false;
+    noteTa.style.width = '100%';
+    noteTa.style.boxSizing = 'border-box';
+    noteTa.value = rule.note == null ? '' : rule.note;
+    noteTa.addEventListener('input', () => { rule.note = noteTa.value; commitData(); });
+    box.appendChild(noteTa);
+  }
+
   if (rule.type === 'terminal') {
     const note = document.createElement('div');
     note.className = 'help';
