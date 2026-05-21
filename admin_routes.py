@@ -170,9 +170,9 @@ def _resolved_value(field: str) -> Any:
 # discriminated-union's declaration order — same on both `value` and
 # `default_value` so JSON.stringify on each yields identical strings
 # when the rule contents match. Without this, _BASELINE keeps source
-# order from config.py while the resolved value (after a local.json
-# overlay) carries Pydantic's parent-first MRO order, and the WebUI's
-# _isRuleDirtyAgainst() always reports dirty on first paint.
+# order while the resolved value (after a local.json overlay) carries
+# Pydantic's parent-first MRO order, and the WebUI's dirty / origin-badge
+# comparisons would report a spurious diff on first paint.
 def _canon_rules(rules: Any) -> Any:
     if not isinstance(rules, list):
         return rules
@@ -190,8 +190,8 @@ def _canon_rules(rules: Any) -> Any:
 # `map` on a callback:map rule). The resolved value (after a local.json
 # overlay) and the baseline `default_value` (from cfg._BASELINE) can carry
 # different insertion orders even when contents are equal — which makes
-# JSON.stringify(value) !== JSON.stringify(default_value) and the WebUI's
-# _isRuleDirtyAgainst() falsely reports dirty on first paint, AND clicking reset
+# JSON.stringify(value) !== JSON.stringify(default_value) so the WebUI's
+# dirty / origin-badge checks falsely report a diff, AND clicking reset
 # visibly re-sorts the rows. Recursively sorting nested dict keys (applied
 # identically to value AND default_value) makes the equality check reliable.
 # Forced alphabetical is the right canonical order for `cb:map` rules: the
@@ -435,12 +435,11 @@ async def _apply_hot_changes(written: dict[str, Any]) -> dict[str, Any]:
 @router.get("/factory-rules",
             dependencies=[Depends(require_admin_host), Depends(require_admin)])
 async def get_factory_rules() -> dict[str, Any]:
-    """Return the committed factory pipeline rules (config.json) for the
-    WebUI's "Defaults" editing mode.
+    """Return the committed factory pipeline rules (config.json).
 
-    Distinct from GET /config/state, which returns the EFFECTIVE rules
-    (config.json overlaid by config.local.json). This returns the raw factory
-    layer so the admin edits the defaults themselves, not the local overlay.
+    The WebUI fetches this just before a "promote" so the diff dialog compares
+    against the truly-current config.json. Distinct from GET /config/state,
+    which returns the EFFECTIVE rules (config.json overlaid by config.local.json).
     """
     try:
         rules = config_store.load_factory_rules()
@@ -453,8 +452,9 @@ async def get_factory_rules() -> dict[str, Any]:
              dependencies=[Depends(require_admin_host), Depends(require_admin)])
 async def post_factory_rules(payload: dict[str, Any], request: Request) -> JSONResponse:
     """Validate and persist the factory pipeline rules to the committed
-    config.json. Whole-list replace — the WebUI's "Defaults" mode always sends
-    the full list.
+    config.json. Whole-list replace — the WebUI's promote actions send the full
+    intended config.json array (one rule spliced in, or the whole effective list
+    for "promote all").
 
     config.json is git-tracked, so the save surfaces as a working-tree change
     the admin then commits + pushes to ship the fix to every deployment.
@@ -462,7 +462,8 @@ async def post_factory_rules(payload: dict[str, Any], request: Request) -> JSONR
     After the write: refresh cfg._BASELINE (the "reset to default" baseline),
     recompute the effective cfg.PIPELINE_RULES (config.local.json still wins if
     it carries its own PIPELINE_RULES — unchanged local-override behaviour),
-    and rebuild the pipeline cache.
+    and rebuild the pipeline cache. The response carries the canonicalized saved
+    rules so the editor can refresh its in-memory `factoryRules` snapshot.
     """
     rules = payload.get("PIPELINE_RULES")
     if not isinstance(rules, list):
@@ -506,7 +507,48 @@ async def post_factory_rules(payload: dict[str, Any], request: Request) -> JSONR
     logger.info("[config] factory-rules update from=%s rules=%d shadowed_by_local=%s",
                 client_host, len(saved), shadowed)
 
-    return JSONResponse({"saved": len(saved), "shadowed_by_local": shadowed})
+    return JSONResponse({
+        "saved": len(saved),
+        "shadowed_by_local": shadowed,
+        "rules": _canon_rules(saved),
+    })
+
+
+@router.post("/factory-rules/clear-local-override",
+             dependencies=[Depends(require_admin_host), Depends(require_admin)])
+async def clear_local_pipeline_override(request: Request) -> JSONResponse:
+    """Remove the PIPELINE_RULES override from config.local.json so the committed
+    config.json becomes the live pipeline on this deployment.
+
+    Offered after a "promote all": once the factory file holds everything, the
+    local snapshot is redundant and only shadows config.json. Clearing it makes
+    config.json the runtime source here too.
+
+    Done as a dedicated route (not POST /config/state with a None sentinel)
+    because _apply_hot_changes, on override removal, falls back to the stale
+    in-memory value rather than the baseline — so it would not take effect
+    until restart. Here we explicitly reload config.json into cfg.
+    """
+    try:
+        config_store.save_overrides({"PIPELINE_RULES": None})
+        factory = config_store.load_factory_rules()
+    except (ValidationError, RuntimeError, OSError) as e:
+        logger.error("[config] clear-local-override failed: %s", e)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            f"could not clear local override: {e}")
+
+    cfg.PIPELINE_RULES = factory
+    try:
+        import main as _main
+        _main.rebuild_caches()
+        logger.info("[config] rebuilt pipeline caches after clearing local override")
+    except Exception as e:
+        logger.error("[config] cache rebuild failed after clear-local-override: %s", e)
+
+    client_host = request.client.host if request.client else "?"
+    logger.info("[config] local PIPELINE_RULES override cleared from=%s — "
+                "config.json (%d rules) is now live", client_host, len(factory))
+    return JSONResponse({"ok": True, "rules": len(factory)})
 
 
 @router.post("/test-pipeline",
@@ -900,19 +942,44 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
   /* Advanced warning banner above the Step 3 fields */
   .advanced-warn { background: #2d1f0a; color: var(--yellow); border-left: 3px solid var(--yellow);
     padding: 0.375rem 0.625rem; margin: 0.5rem 0; border-radius: 3px; font-size: var(--fs-sm); }
-  /* Pipeline rules: Local-overrides vs Defaults (config.json) mode toggle */
-  .pipeline-mode-bar { display: flex; gap: 0.375rem; margin-bottom: 0.375rem; }
-  .pipeline-mode-bar button { background: #161b22; color: var(--dim);
-    border: 1px solid var(--border); border-radius: 3px;
-    padding: 0.25rem 0.625rem; cursor: pointer; font: inherit; font-size: var(--fs-sm); }
-  .pipeline-mode-bar button.active { color: var(--cyan); border-color: var(--cyan);
-    font-weight: 600; }
-  /* Banner shown while editing the git-tracked factory defaults */
-  .pipeline-defaults-banner { background: #2d1f0a; color: var(--yellow);
-    border-left: 3px solid var(--yellow); padding: 0.375rem 0.625rem;
-    margin: 0.5rem 0; border-radius: 3px; font-size: var(--fs-sm); }
-  .pipeline-defaults-saverow { display: flex; gap: 0.5rem; align-items: center;
-    margin-top: 0.5rem; flex-wrap: wrap; }
+  /* Pipeline rule origin badges (factory / edited / local-only vs config.json) */
+  .rule-origin-badge { font-size: var(--fs-xs); font-family: var(--font-mono);
+    white-space: nowrap; }
+  .rule-origin-badge.factory { color: var(--dim); }
+  .rule-origin-badge.edited { color: var(--yellow); }
+  .rule-origin-badge.local-only { color: var(--green); }
+  /* Per-row + list-wide "promote to config.json" affordances */
+  .promote-btn { background: none; border: 1px solid var(--cyan); color: var(--cyan);
+    border-radius: 3px; padding: 0 0.375rem; cursor: pointer; font: inherit;
+    font-size: var(--fs-xs); }
+  .promote-btn:hover { background: #161b22; }
+  .promote-all-btn { background: none; border: none; padding: 0; cursor: pointer;
+    font: inherit; font-size: var(--fs-xs); color: var(--cyan);
+    text-decoration: underline; text-underline-offset: 2px; }
+  /* Promote diff / confirm modal */
+  .rule-modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+    display: flex; align-items: center; justify-content: center; z-index: 1000; }
+  .rule-modal { background: #161b22; border: 1px solid var(--border);
+    border-radius: 6px; padding: 1rem 1.25rem; max-width: 46rem; width: 90%;
+    max-height: 80vh; overflow: auto; }
+  .rule-modal-title { font-weight: 600; margin-bottom: 0.625rem; }
+  .rule-modal-buttons { display: flex; gap: 0.5rem; justify-content: flex-end;
+    margin-top: 0.875rem; flex-wrap: wrap; }
+  .rule-modal-buttons button.primary { color: var(--cyan); border-color: var(--cyan); }
+  .promote-diff { margin-top: 0.5rem; }
+  .promote-diff-row { display: grid; grid-template-columns: 7rem 1fr 1fr;
+    gap: 0.5rem; font-family: var(--font-mono); font-size: var(--fs-xs);
+    padding: 0.25rem 0; border-bottom: 1px solid var(--border); }
+  .promote-diff-key { color: var(--dim); }
+  .promote-diff-old { color: var(--red); white-space: pre-wrap; word-break: break-all; }
+  .promote-diff-new { color: var(--green); white-space: pre-wrap; word-break: break-all; }
+  .promote-change-line { font-size: var(--fs-sm); margin-top: 0.25rem; }
+  .promote-unsaved-note { color: var(--yellow); font-size: var(--fs-xs);
+    margin-top: 0.5rem; }
+  .rule-toast { position: fixed; bottom: 1.25rem; left: 50%;
+    transform: translateX(-50%); background: #161b22; color: var(--fg);
+    border: 1px solid var(--cyan); border-radius: 4px;
+    padding: 0.5rem 0.875rem; font-size: var(--fs-sm); z-index: 1001; }
   /* Test panel */
   .regex-test-panel { background: #161b22; border: 1px solid var(--border);
     border-radius: 4px; padding: 0.625rem 0.75rem; margin: 0.5rem 0 0.875rem 0; }
@@ -1558,7 +1625,7 @@ function makeEditor(name) {
   // PIPELINE_RULES gets its own list-of-rules editor (mixed row types,
   // drag-to-reorder, per-row test badge). Routed by name BEFORE shape checks
   // since the value is a list.
-  if (name === 'PIPELINE_RULES') return makePipelineRulesField(name, v || []);
+  if (name === 'PIPELINE_RULES') return makeRuleListEditor(name, v || [], 'full', {});
   // Captures-specific exclude list — same checklist widget as per-model
   // PIPELINE_RULES_EXCLUDE, sourced from the live PIPELINE_RULES. The
   // widget's `excludeSet` drives the visible state; `onToggle(slug,
@@ -2610,52 +2677,99 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
   });
   }  // end if (!isChecklist) — drag handlers
 
-  // --- baseline / dirtiness helpers (drive reset-button visibility) ----
-  // Factory mode edits the defaults themselves — there is no "reset to
-  // default" baseline beneath them (git is the undo), so return []. That
-  // also hides every per-row reset button (a rule is never "dirty" against
-  // an empty baseline).
-  function _baselineList() {
-    if (opts.factory) return [];
-    return fieldDef(name).default_value || [];
+  // --- factory baseline (config.json) ---------------------------------
+  // `factoryRules` mirrors the committed config.json: seeded from the page's
+  // default_value (cfg._BASELINE) and refreshed from every successful
+  // POST /config/factory-rules response, so origin badges, the promote
+  // affordances and reset buttons stay correct after a promote.
+  let factoryRules = JSON.parse(JSON.stringify(
+    (fieldDef(name) && fieldDef(name).default_value) || []));
+  function _baselineList() { return factoryRules; }
+  function _factoryRule(slug) {
+    for (const b of factoryRules) if (b.name === slug) return b;
+    return null;
   }
-  function _isRuleDirtyAgainst(rule, baselineMap) {
-    if (!rule || !rule.seeded) return false;
-    const baseline = baselineMap.get(rule.name);
-    if (!baseline) return false;
-    return JSON.stringify(rule) !== JSON.stringify(baseline);
+  function _factoryHas(slug) { return _factoryRule(slug) !== null; }
+  // Deep key-sort so two rules with equal content but different key order
+  // (a freshly-added rule vs the server-canonicalized copy) compare equal.
+  function _sortDeep(o) {
+    if (Array.isArray(o)) return o.map(_sortDeep);
+    if (o && typeof o === 'object') {
+      const out = {};
+      for (const k of Object.keys(o).sort()) out[k] = _sortDeep(o[k]);
+      return out;
+    }
+    return o;
+  }
+  // Content equality ignoring the vestigial `seeded` flag (config.json is
+  // always seeded:true; a local-only rule is seeded:false — not a real diff).
+  function _ruleContentEqual(a, b) {
+    const strip = (r) => {
+      const c = Object.assign({}, r);
+      delete c.seeded;
+      return _sortDeep(c);
+    };
+    return JSON.stringify(strip(a)) === JSON.stringify(strip(b));
+  }
+  // 'factory'    — in config.json, identical
+  // 'edited'     — in config.json, content differs (local edit)
+  // 'local-only' — not in config.json
+  function _ruleStatus(rule) {
+    if (!rule || rule.type === 'terminal') return 'factory';
+    const base = _factoryRule(rule.name);
+    if (!base) return 'local-only';
+    return _ruleContentEqual(rule, base) ? 'factory' : 'edited';
   }
   function _seededOrderDirty() {
-    const baseSeeded = _baselineList().filter(b => b.seeded).map(b => b.name);
-    const curSeeded = rules.filter(r => r.seeded).map(r => r.name);
-    return JSON.stringify(curSeeded) !== JSON.stringify(baseSeeded);
+    const baseOrder = factoryRules.filter(b => b.type !== 'terminal').map(b => b.name);
+    const curOrder = rules.filter(r => r.type !== 'terminal' && _factoryHas(r.name))
+                          .map(r => r.name);
+    return JSON.stringify(curOrder)
+         !== JSON.stringify(baseOrder.filter(n => curOrder.indexOf(n) >= 0));
+  }
+  function _paintBadge(el, st) {
+    el.className = 'rule-origin-badge ' + st;
+    el.textContent = st === 'edited' ? '◆ edited'
+                   : st === 'local-only' ? '✚ local-only'
+                   : '● factory';
+    el.title = st === 'edited'
+        ? 'Differs from config.json — local edit not yet promoted'
+      : st === 'local-only'
+        ? 'Not in config.json — local-only rule'
+        : 'Matches config.json';
   }
 
   function refreshControlsVisibility() {
     if (isChecklist) return;   // checklist rows have no reset/dirty controls
-    // Build the baseline Map once per call — _isRuleDirtyAgainst is invoked
-    // per .rule-row PLUS once in the anyDirty rollup, so each commitData()
-    // keystroke would otherwise rebuild the same Map N+1 times.
-    const baselineMap = new Map();
-    _baselineList().forEach(b => baselineMap.set(b.name, b));
-    // Per-row reset buttons: hide when rule matches its baseline.
-    let anyDirty = false;
+    // Per row: repaint the origin badge, toggle the ⇪ promote button, and
+    // show the per-row reset button only when the rule differs from config.json.
+    let anyDirty = false;        // some rule is 'edited'
+    let anyPromotable = false;   // some rule is 'edited' or 'local-only'
     list.querySelectorAll('.rule-row').forEach(r => {
       const idx = parseInt(r.dataset.idx, 10);
       const rule = rules[idx];
       if (!rule) return;
-      const dirty = _isRuleDirtyAgainst(rule, baselineMap);
-      if (dirty) anyDirty = true;
-      const btn = r.querySelector(':scope > .row-header > .reset-link');
-      if (btn) btn.style.display = dirty ? '' : 'none';
+      const st = _ruleStatus(rule);
+      const promotable = st !== 'factory' && rule.type !== 'terminal';
+      if (st === 'edited') anyDirty = true;
+      if (promotable) anyPromotable = true;
+      const badge = r.querySelector('.rule-origin-badge');
+      if (badge) _paintBadge(badge, st);
+      const pb = r.querySelector('.promote-btn');
+      if (pb) pb.style.display = promotable ? '' : 'none';
+      const btn = r.querySelector('.reset-link');
+      if (btn) btn.style.display = (st === 'edited') ? '' : 'none';
     });
-    // List-wide controls: hide when nothing to reset.
+    // List-wide controls: hide when there is nothing to act on.
     const orderDirty = _seededOrderDirty();
     if (resetOrderBtn) {
       resetOrderBtn.style.display = orderDirty ? '' : 'none';
     }
     if (resetAllBtn) {
       resetAllBtn.style.display = (anyDirty || orderDirty) ? '' : 'none';
+    }
+    if (promoteAllBtn) {
+      promoteAllBtn.style.display = (anyPromotable || orderDirty) ? '' : 'none';
     }
   }
 
@@ -2664,21 +2778,16 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
   // rebuild the DOM — that would steal focus mid-keystroke and collapse
   // any other expanded rows. Structural changes (add/delete/reorder/reset/
   // toggle-enabled) DO rebuild because the visible row layout changes.
-  // Factory mode persists via opts.onChange (its own Save button →
-  // POST /config/factory-rules); local mode pushes into the global dirty
-  // overlay via setDirty so the page-level Save → /config/state picks it up.
-  function _commitSnapshot() {
-    const snap = JSON.parse(JSON.stringify(rules));
-    if (opts.factory) { if (opts.onChange) opts.onChange(snap); }
-    else setDirty(name, snap);
-  }
+  // Both push the whole rule list into the global dirty overlay via setDirty
+  // so the page-level Save → /config/state persists it to config.local.json.
+  // Promoting (a separate action) writes config.json instead.
   function commitData() {
     if (isChecklist) return;   // checklist mode is read-only — no setDirty
-    _commitSnapshot();
+    setDirty(name, JSON.parse(JSON.stringify(rules)));
     refreshControlsVisibility();
   }
   function commitFull() {
-    _commitSnapshot();
+    setDirty(name, JSON.parse(JSON.stringify(rules)));
     paintAll();
   }
 
@@ -2967,6 +3076,15 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
     pill.textContent = _typePill(rule.type);
     headLine1.appendChild(pill);
 
+    // Origin badge — factory / edited / local-only vs config.json. Repainted
+    // live by refreshControlsVisibility. Skipped for the terminal rule.
+    if (rule.type !== 'terminal') {
+      const originBadge = document.createElement('span');
+      originBadge.className = 'rule-origin-badge';
+      _paintBadge(originBadge, _ruleStatus(rule));
+      headLine1.appendChild(originBadge);
+    }
+
     const expandBtn = document.createElement('button');
     expandBtn.type = 'button';
     expandBtn.className = 'expand-btn';
@@ -2985,6 +3103,20 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
       _setExpandLabel();
     });
     headLine1.appendChild(expandBtn);
+
+    // ⇪ Promote — push this rule into the committed config.json. Shown only
+    // for rules that differ from config.json (refreshControlsVisibility
+    // toggles visibility); never for the terminal rule.
+    if (rule.type !== 'terminal') {
+      const promoteBtn = document.createElement('button');
+      promoteBtn.type = 'button';
+      promoteBtn.className = 'promote-btn';
+      promoteBtn.textContent = '⇪ promote';
+      promoteBtn.title = 'Promote this rule into the committed config.json';
+      promoteBtn.style.display = 'none';
+      promoteBtn.addEventListener('click', () => _promoteOne(rule));
+      headLine1.appendChild(promoteBtn);
+    }
 
     // ----- Line 2 (metadata): tag picker + user-editable toggle +
     // untagged badge. Terminal rules skip it entirely — they have no
@@ -3047,17 +3179,18 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
     // here so the closures capture `rule`/`idx`/`expandedNames`; the
     // button itself is appended to the body footer further down. ------
     const _destructiveBtns = [];
-    // Defaults mode edits the canonical factory list, so every non-terminal
-    // rule is deletable there; "↺ reset to default" only applies in local
-    // mode (in factory mode the rule IS the default — git is the undo).
-    const _canReset = rule.seeded && !opts.factory;
-    const _canDelete = rule.type !== 'terminal' && (opts.factory || !rule.seeded);
+    // A rule present in config.json (factory / edited) can be reset to its
+    // committed value; a local-only rule (not in config.json) can be deleted.
+    // Membership in config.json — not the `seeded` flag — is authoritative.
+    const _canReset = rule.type !== 'terminal' && _factoryHas(rule.name);
+    const _canDelete = rule.type !== 'terminal' && !_factoryHas(rule.name);
     if (_canReset) {
       const reset = document.createElement('button');
       reset.type = 'button';
       reset.className = 'reset-link';
       reset.textContent = '↺ reset to default';
-      reset.title = 'Restore this rule to its in-repo default';
+      reset.title = 'Discard the local edit — restore this rule to its config.json value';
+      reset.style.display = 'none';   // refreshControlsVisibility shows it when 'edited'
       reset.addEventListener('click', () => {
         const baseline = _baselineList().find(b => b.name === rule.name);
         if (!baseline) return;
@@ -3070,9 +3203,7 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
       del.type = 'button';
       del.className = 'delete-btn';
       del.textContent = '× delete';
-      del.title = opts.factory
-        ? 'Remove this rule from the factory defaults (config.json)'
-        : 'Remove this custom rule';
+      del.title = 'Remove this local-only rule';
       del.addEventListener('click', () => {
         expandedNames.delete(rule.name);
         rules.splice(idx, 1);
@@ -3231,60 +3362,64 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
 
   const addBtn = document.createElement('button');
   addBtn.type = 'button';
-  addBtn.textContent = opts.factory ? '+ Add rule' : '+ Add custom rule';
+  addBtn.textContent = '+ Add custom rule';
   addBtn.addEventListener('click', () => _openAddCustomDialog());
   ctrls.appendChild(addBtn);
+
+  // ⇪ Promote all — write every local change (edited + new rules) into the
+  // committed config.json. refreshControlsVisibility shows it only when
+  // something differs from config.json.
+  const promoteAllBtn = document.createElement('button');
+  promoteAllBtn.type = 'button';
+  promoteAllBtn.className = 'promote-all-btn';
+  promoteAllBtn.textContent = '⇪ Promote all changes to config.json';
+  promoteAllBtn.title = 'Write every local change into the committed config.json';
+  promoteAllBtn.style.display = 'none';
+  promoteAllBtn.addEventListener('click', () => _promoteAll());
+  ctrls.appendChild(promoteAllBtn);
 
   const resetOrderBtn = document.createElement('button');
   resetOrderBtn.type = 'button';
   resetOrderBtn.className = 'reset-link';
   resetOrderBtn.textContent = '↺ Reset order';
-  resetOrderBtn.title = 'Restore canonical seeded order; custom rules append before terminal';
+  resetOrderBtn.title = 'Restore config.json rule order; local-only rules append before terminal';
   resetOrderBtn.addEventListener('click', () => {
-    const baseline = fieldDef(name).default_value || [];
-    const baseOrder = baseline.map(b => b.name);
-    const seeded = [];
+    const baseOrder = factoryRules.map(b => b.name);
+    const factory = [];
     const customs = [];
     let terminal = null;
     rules.forEach(r => {
       if (r.type === 'terminal') terminal = r;
-      else if (r.seeded) seeded.push(r);
+      else if (_factoryHas(r.name)) factory.push(r);
       else customs.push(r);
     });
-    seeded.sort((a, b) => baseOrder.indexOf(a.name) - baseOrder.indexOf(b.name));
-    rules = [...seeded, ...customs];
+    factory.sort((a, b) => baseOrder.indexOf(a.name) - baseOrder.indexOf(b.name));
+    rules = [...factory, ...customs];
     if (terminal) rules.push(terminal);
     commitFull();
   });
-  // Reset controls are meaningless in factory mode (you are editing the
-  // defaults — git is the undo), so they are only wired up for local mode.
-  if (!opts.factory) ctrls.appendChild(resetOrderBtn);
+  ctrls.appendChild(resetOrderBtn);
 
   const resetAllBtn = document.createElement('button');
   resetAllBtn.type = 'button';
   resetAllBtn.className = 'reset-link';
-  resetAllBtn.textContent = '↺ Reset all to defaults';
-  const _seededCount = (fieldDef(name).default_value || [])
-    .filter(b => b && b.seeded && b.type !== 'terminal').length;
-  resetAllBtn.title = 'Restore the ' + _seededCount
-    + ' seeded rules to their in-repo defaults; custom rules untouched';
+  resetAllBtn.textContent = '↺ Reset all to config.json';
+  resetAllBtn.title = 'Discard every local edit — restore all rules to their config.json values';
   resetAllBtn.addEventListener('click', () => {
-    const baseline = fieldDef(name).default_value || [];
-    const customs = rules.filter(r => !r.seeded && r.type !== 'terminal');
+    const customs = rules.filter(r => !_factoryHas(r.name) && r.type !== 'terminal');
     const ok = confirm(
-      'Reset ' + _seededCount + ' seeded rules to their in-repo defaults.\n' +
-      (customs.length ? `Your ${customs.length} custom rule(s) will be kept at their current positions.\n\n` : '\n') +
+      'Discard every local edit and restore all rules to their config.json values.\n' +
+      (customs.length ? `Your ${customs.length} local-only rule(s) will be kept at their current positions.\n\n` : '\n') +
       'Continue?'
     );
     if (!ok) return;
-    // Replace seeded rules with baseline copy (order preserved by name).
-    const baseByName = new Map(baseline.map(b => [b.name, b]));
-    rules = rules.map(r => r.seeded || r.type === 'terminal'
-      ? JSON.parse(JSON.stringify(baseByName.get(r.name) || r))
+    // Replace each config.json-backed rule with its committed copy.
+    rules = rules.map(r => _factoryHas(r.name)
+      ? JSON.parse(JSON.stringify(_factoryRule(r.name)))
       : r);
     commitFull();
   });
-  if (!opts.factory) ctrls.appendChild(resetAllBtn);
+  ctrls.appendChild(resetAllBtn);
 
   wrap.appendChild(ctrls);
 
@@ -3336,11 +3471,11 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
       const slugSet = new Set(rules.map(r => r.name));
       const slug = _ensureUniqueSlug(_slugify(lbl), slugSet);
       const t = typeSel.value;
-      // In factory mode a new rule becomes a committed factory default, so
-      // it is seeded; in local mode it is a per-deployment custom rule.
+      // A newly-added rule is local-only (seeded:false) until promoted to
+      // config.json — save_factory_rules normalises seeded:true on promote.
       const newRule = {
         name: slug, label: lbl, type: t,
-        enabled: true, locked: false, seeded: !!opts.factory,
+        enabled: true, locked: false, seeded: false,
       };
       // Seed empty type-specific fields; the user fills them in via the
       // expanded body editor (auto-opened below). Empty patterns are
@@ -3377,152 +3512,252 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
     return wr;
   }
 
-  paintAll();
-  return wrap;
-}
-
-
-// PIPELINE_RULES field: a two-mode editor.
-//   "Local overrides" — edits the effective rules through the standard
-//      /config/state save flow (config.local.json). Unchanged behaviour.
-//   "Defaults"        — edits the committed factory defaults (config.json)
-//      directly via /config/factory-rules, so a fix to a broken default rule
-//      can be git-pushed to every deployment.
-function makePipelineRulesField(name, localRules) {
-  const wrap = document.createElement('div');
-  wrap.className = 'pipeline-field';
-
-  const modeBar = document.createElement('div');
-  modeBar.className = 'pipeline-mode-bar';
-  let mode = 'local';                       // 'local' | 'defaults'
-  const localBtn = document.createElement('button');
-  localBtn.type = 'button';
-  localBtn.textContent = 'Local overrides';
-  localBtn.title = "Edit this deployment's local override (config.local.json) "
-                 + '— gitignored, per-deployment.';
-  const defBtn = document.createElement('button');
-  defBtn.type = 'button';
-  defBtn.textContent = 'Defaults (config.json)';
-  defBtn.title = 'Edit the committed factory defaults (config.json) — '
-               + 'git-tracked; commit & push to ship a fix to every deployment.';
-  modeBar.appendChild(localBtn);
-  modeBar.appendChild(defBtn);
-  wrap.appendChild(modeBar);
-
-  // Local-mode editor — built eagerly, identical to the previous behaviour.
-  const localPane = document.createElement('div');
-  localPane.appendChild(makeRuleListEditor(name, localRules || [], 'full', {}));
-  wrap.appendChild(localPane);
-
-  // Defaults-mode editor — built lazily on first switch (one network round-trip).
-  const defPane = document.createElement('div');
-  defPane.style.display = 'none';
-  wrap.appendChild(defPane);
-  let defBuilt = false;
-
-  function _syncMode() {
-    localBtn.classList.toggle('active', mode === 'local');
-    defBtn.classList.toggle('active', mode === 'defaults');
-    localPane.style.display = mode === 'local' ? '' : 'none';
-    defPane.style.display = mode === 'defaults' ? '' : 'none';
+  // --- promote: write local rules up into the committed config.json ----
+  function _pipelineDirty() {
+    try { return Object.prototype.hasOwnProperty.call(dirty, name); }
+    catch (_) { return false; }
   }
-
-  async function _buildDefaultsPane() {
-    defPane.innerHTML = '<div class="help">Loading factory defaults…</div>';
-    let j;
+  function _toast(msg) {
+    const t = document.createElement('div');
+    t.className = 'rule-toast';
+    t.textContent = msg;
+    document.body.appendChild(t);
+    setTimeout(() => { if (t.parentNode) t.parentNode.removeChild(t); }, 4500);
+  }
+  // Lightweight modal: {title, bodyEl, buttons:[{label, primary, onClick(close)}]}.
+  function _modal(o) {
+    const backdrop = document.createElement('div');
+    backdrop.className = 'rule-modal-backdrop';
+    const panel = document.createElement('div');
+    panel.className = 'rule-modal';
+    const h = document.createElement('div');
+    h.className = 'rule-modal-title';
+    h.textContent = o.title || '';
+    panel.appendChild(h);
+    if (o.bodyEl) panel.appendChild(o.bodyEl);
+    const btnRow = document.createElement('div');
+    btnRow.className = 'rule-modal-buttons';
+    function close() {
+      if (backdrop.parentNode) backdrop.parentNode.removeChild(backdrop);
+    }
+    (o.buttons || []).forEach(b => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = b.label;
+      if (b.primary) btn.className = 'primary';
+      btn.addEventListener('click', () => {
+        if (b.onClick) b.onClick(close); else close();
+      });
+      btnRow.appendChild(btn);
+    });
+    panel.appendChild(btnRow);
+    backdrop.appendChild(panel);
+    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
+    document.body.appendChild(backdrop);
+    return close;
+  }
+  // Field-by-field diff between the rule being promoted and its config.json
+  // copy (or a "NEW" note when the rule is not in config.json yet).
+  function _ruleDiffEl(effRule, baseRule) {
+    const box = document.createElement('div');
+    box.className = 'promote-diff';
+    if (!baseRule) {
+      const p = document.createElement('div');
+      p.className = 'help';
+      p.textContent = 'NEW — this rule is not in config.json yet; it will be added.';
+      box.appendChild(p);
+      return box;
+    }
+    const keys = Array.from(new Set(
+      Object.keys(effRule).concat(Object.keys(baseRule)))).sort();
+    let any = false;
+    keys.forEach(k => {
+      if (k === 'seeded') return;
+      const ov = JSON.stringify(baseRule[k]);
+      const nv = JSON.stringify(effRule[k]);
+      if (ov === nv) return;
+      any = true;
+      const rowEl = document.createElement('div');
+      rowEl.className = 'promote-diff-row';
+      const kEl = document.createElement('div');
+      kEl.className = 'promote-diff-key'; kEl.textContent = k;
+      const oEl = document.createElement('div');
+      oEl.className = 'promote-diff-old'; oEl.textContent = ov;
+      const nEl = document.createElement('div');
+      nEl.className = 'promote-diff-new'; nEl.textContent = nv;
+      rowEl.appendChild(kEl); rowEl.appendChild(oEl); rowEl.appendChild(nEl);
+      box.appendChild(rowEl);
+    });
+    if (!any) {
+      const p = document.createElement('div');
+      p.className = 'help';
+      p.textContent = 'No differences — already identical to config.json.';
+      box.appendChild(p);
+    }
+    return box;
+  }
+  function _changeListEl(label, names) {
+    const d = document.createElement('div');
+    d.className = 'promote-change-line';
+    d.textContent = names.length
+      ? names.length + ' ' + label + ': ' + names.join(', ')
+      : '0 ' + label;
+    return d;
+  }
+  function _unsavedNoteEl() {
+    if (!_pipelineDirty()) return null;
+    const w = document.createElement('div');
+    w.className = 'promote-unsaved-note';
+    w.textContent = '⚠ You have unsaved local edits. Promote captures them into '
+      + 'config.json now; also use the page Save to apply them on THIS deployment '
+      + '(or clear the local override after a "promote all").';
+    return w;
+  }
+  // POST the full intended config.json array; refresh factoryRules + repaint.
+  async function _postFactory(arr) {
+    let resp;
     try {
-      const r = await api('GET', '/config/factory-rules');
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      j = await r.json();
+      resp = await api('POST', '/config/factory-rules', { PIPELINE_RULES: arr });
     } catch (e) {
-      defPane.innerHTML = '<div class="regex-status err">✗ could not load '
-        + 'config.json — ' + (e && e.message ? e.message : 'error') + '</div>';
-      defBuilt = false;            // allow a retry on next switch
+      alert('Could not reach the server.');
+      return null;
+    }
+    if (resp.status === 422) {
+      let msg = 'validation failed';
+      try {
+        const j = await resp.json();
+        msg = (j.errors || []).map(x => x.msg || x.message || x).join('; ') || msg;
+      } catch (_) {}
+      alert('config.json was not saved:\n' + msg);
+      return null;
+    }
+    if (!resp.ok) {
+      alert('config.json save failed (HTTP ' + resp.status + ').');
+      return null;
+    }
+    const out = await resp.json();
+    if (Array.isArray(out.rules)) factoryRules = out.rules;
+    paintAll();
+    return out;
+  }
+  async function _fetchFactory() {
+    const r = await api('GET', '/config/factory-rules');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return (await r.json()).PIPELINE_RULES || [];
+  }
+  async function _promoteOne(rule) {
+    if (!rule || rule.type === 'terminal') return;
+    let fresh;
+    try { fresh = await _fetchFactory(); }
+    catch (e) { alert('Could not load config.json.'); return; }
+    factoryRules = fresh;
+    refreshControlsVisibility();
+    const base = fresh.find(b => b.name === rule.name) || null;
+    const body = document.createElement('div');
+    const intro = document.createElement('div');
+    intro.className = 'help';
+    intro.textContent = base
+      ? 'This writes the rule into the committed config.json (git-tracked).'
+      : 'This adds the rule to the committed config.json (git-tracked).';
+    body.appendChild(intro);
+    body.appendChild(_ruleDiffEl(rule, base));
+    const note = _unsavedNoteEl();
+    if (note) body.appendChild(note);
+    _modal({
+      title: 'Promote “' + (rule.label || rule.name) + '” to config.json?',
+      bodyEl: body,
+      buttons: [
+        { label: 'Cancel' },
+        { label: 'Promote to config.json', primary: true, onClick: async (close) => {
+            const next = fresh.slice();
+            const i = next.findIndex(b => b.name === rule.name);
+            const promoted = JSON.parse(JSON.stringify(rule));
+            if (i >= 0) {
+              next[i] = promoted;
+            } else {
+              const tIdx = next.findIndex(b => b.type === 'terminal');
+              if (tIdx >= 0) next.splice(tIdx, 0, promoted);
+              else next.push(promoted);
+            }
+            close();
+            const out = await _postFactory(next);
+            if (out) _toast('Promoted to config.json — commit & push to ship it.');
+          } },
+      ],
+    });
+  }
+  async function _promoteAll() {
+    let fresh;
+    try { fresh = await _fetchFactory(); }
+    catch (e) { alert('Could not load config.json.'); return; }
+    factoryRules = fresh;
+    refreshControlsVisibility();
+    const factByName = new Map(fresh.map(b => [b.name, b]));
+    const effByName = new Map(rules.map(r => [r.name, r]));
+    const edited = [], added = [], removed = [];
+    rules.forEach(r => {
+      if (r.type === 'terminal') return;
+      const b = factByName.get(r.name);
+      if (!b) added.push(r.name);
+      else if (!_ruleContentEqual(r, b)) edited.push(r.name);
+    });
+    fresh.forEach(b => {
+      if (b.type !== 'terminal' && !effByName.has(b.name)) removed.push(b.name);
+    });
+    const body = document.createElement('div');
+    const summary = document.createElement('div');
+    summary.className = 'help';
+    summary.textContent = 'This overwrites config.json with your current rule list:';
+    body.appendChild(summary);
+    body.appendChild(_changeListEl('edited', edited));
+    body.appendChild(_changeListEl('added', added));
+    body.appendChild(_changeListEl('removed from config.json', removed));
+    const note = _unsavedNoteEl();
+    if (note) body.appendChild(note);
+    _modal({
+      title: 'Promote all changes to config.json?',
+      bodyEl: body,
+      buttons: [
+        { label: 'Cancel' },
+        { label: 'Promote all', primary: true, onClick: async (close) => {
+            close();
+            const out = await _postFactory(JSON.parse(JSON.stringify(rules)));
+            if (out) _afterPromoteAll(out);
+          } },
+      ],
+    });
+  }
+  function _afterPromoteAll(out) {
+    if (!out.shadowed_by_local) {
+      _toast('Promoted all rules to config.json — commit & push to ship it.');
       return;
     }
-    defPane.innerHTML = '';
-
-    const banner = document.createElement('div');
-    banner.className = 'pipeline-defaults-banner';
-    banner.innerHTML = '⚠ <strong>Editing factory defaults.</strong> '
-      + 'Saving writes the git-tracked <code>config.json</code> — commit &amp; '
-      + 'push to ship the change to every deployment.';
-    defPane.appendChild(banner);
-
-    let factoryRules = j.PIPELINE_RULES || [];
-
-    const saveRow = document.createElement('div');
-    saveRow.className = 'pipeline-defaults-saverow';
-    const saveBtn = document.createElement('button');
-    saveBtn.type = 'button';
-    saveBtn.textContent = 'Save defaults to config.json';
-    saveBtn.disabled = true;
-    const saveStatus = document.createElement('span');
-    saveStatus.className = 'help';
-
-    const editor = makeRuleListEditor(name, factoryRules, 'full', {
-      factory: true,
-      onChange: (snapshot) => {
-        factoryRules = snapshot;
-        saveBtn.disabled = false;
-        saveStatus.textContent = 'unsaved changes';
-      },
+    const body = document.createElement('div');
+    const p = document.createElement('div');
+    p.className = 'help';
+    p.textContent = 'config.json now holds your rules. This deployment still has a '
+      + 'local PIPELINE_RULES override that shadows config.json. Clear it so '
+      + 'config.json runs directly here? config.json is committable either way.';
+    body.appendChild(p);
+    _modal({
+      title: 'Promoted to config.json',
+      bodyEl: body,
+      buttons: [
+        { label: 'Keep local override' },
+        { label: 'Clear local override', primary: true, onClick: async (close) => {
+            let r;
+            try {
+              r = await api('POST', '/config/factory-rules/clear-local-override');
+            } catch (e) { alert('Could not reach the server.'); return; }
+            if (!r.ok) { alert('Clearing the local override failed.'); return; }
+            close();
+            location.reload();
+          } },
+      ],
     });
-    defPane.appendChild(editor);
-
-    saveBtn.addEventListener('click', async () => {
-      saveBtn.disabled = true;
-      saveStatus.textContent = 'saving…';
-      let resp;
-      try {
-        resp = await api('POST', '/config/factory-rules',
-                         { PIPELINE_RULES: factoryRules });
-      } catch (e) {
-        saveStatus.innerHTML = '<span class="err">✗ network error</span>';
-        saveBtn.disabled = false;
-        return;
-      }
-      if (resp.status === 422) {
-        let msg = 'validation failed';
-        try {
-          const e = await resp.json();
-          msg = (e.errors || []).map(x => x.msg || x.message || x).join('; ') || msg;
-        } catch (_) {}
-        saveStatus.innerHTML = '<span class="err">✗ ' + msg + '</span>';
-        saveBtn.disabled = false;
-        return;
-      }
-      if (!resp.ok) {
-        saveStatus.innerHTML = '<span class="err">✗ save failed (HTTP '
-          + resp.status + ')</span>';
-        saveBtn.disabled = false;
-        return;
-      }
-      const out = await resp.json();
-      if (out.shadowed_by_local) {
-        saveStatus.innerHTML = '<span style="color:var(--yellow)">✓ saved '
-          + out.saved + ' rules to config.json — but this deployment has a '
-          + 'local PIPELINE_RULES override, so the change is inactive here '
-          + 'until that override is cleared. Commit &amp; push to ship it.</span>';
-      } else {
-        saveStatus.innerHTML = '✓ saved ' + out.saved + ' rules to config.json '
-          + '— applied to the running service. Commit &amp; push to ship it.';
-      }
-    });
-
-    saveRow.appendChild(saveBtn);
-    saveRow.appendChild(saveStatus);
-    defPane.appendChild(saveRow);
   }
 
-  localBtn.addEventListener('click', () => { mode = 'local'; _syncMode(); });
-  defBtn.addEventListener('click', async () => {
-    mode = 'defaults';
-    _syncMode();
-    if (!defBuilt) { defBuilt = true; await _buildDefaultsPane(); }
-  });
-
-  _syncMode();
+  paintAll();
   return wrap;
 }
 

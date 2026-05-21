@@ -1266,9 +1266,15 @@ def save_factory_rules(rules: list[Any], path: str = FACTORY_PATH) -> list[dict[
     Unlike save_overrides() this is a WHOLE-FILE replace — the WebUI's
     "Defaults" mode always sends the full rule list, not a dirty diff.
 
+    Every rule is normalised to `seeded=True` — a rule living in the committed
+    factory file IS a factory default by definition; this keeps the editor's
+    seeded/custom distinction consistent and prevents a promoted local rule
+    from landing in config.json marked `seeded:false`.
+
     Returns the validated, coerced rule list. Raises ValidationError on bad
     input — the route handler converts that to a 422 response.
     """
+    rules = [{**r, "seeded": True} for r in rules]
     validated = AdminConfig.model_validate({"PIPELINE_RULES": rules})
     out_rules = validated.model_dump(exclude_none=True, mode="json")["PIPELINE_RULES"]
     _atomic_write_json(

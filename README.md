@@ -136,12 +136,26 @@ The 13 seeded defaults handle Swiss German orthography (`ß`→`ss`), Whisper no
 
 **Ordering invariants:** `dictation-map` multi-word phrases must precede their single-word components (the alternation regex is rebuilt longest-first, so the longest phrase wins); the `terminal` trim rule is always last.
 
-**Editing — two modes at `/config`** (Pipeline section):
+**Editing — the unified editor at `/config`** (Pipeline section). One rule list
+shows the **effective** pipeline (config.json overlaid by config.local.json). Edits
+save to `config.local.json` via the page Save (gitignored, per-deployment). Each
+rule carries an **origin badge**:
 
-- **Local overrides** — edits this deployment's `config.local.json` (gitignored, per-deployment). Per-row reset, reset-all, reset-order, and a full-pipeline test panel are included. Custom rules added here are local-only.
-- **Defaults (config.json)** — edits the committed factory rules directly. A fix to a broken default rule lands in `config.json`, which is git-tracked: `git commit && git push` ships it to every deployment. If a deployment also has a `config.local.json` `PIPELINE_RULES` override, that override still shadows the factory rules there until it is cleared.
+- `● factory` — matches `config.json`.
+- `◆ edited` — in `config.json` but locally edited; offers `↺ reset` (discard the
+  local edit) and `⇪ promote`.
+- `✚ local-only` — not in `config.json`; offers `× delete` and `⇪ promote`.
 
-Seeded rules cannot be deleted; uncheck `enabled` to disable. Custom rules (added via `+ Add custom rule`) are fully deletable. `config.json` is required — if it is missing or malformed the service fails fast at startup; restore it with `git checkout config.json`.
+**Promote** writes a rule (or, via *Promote all changes to config.json*, the whole
+list) into the committed **`config.json`** — a diff dialog confirms first. Since
+`config.json` is git-tracked, `git commit && git push` then ships the change to
+every deployment. After *Promote all* you're offered to **clear the local override**
+so `config.json` runs directly on this deployment too (otherwise the local snapshot
+keeps shadowing it).
+
+Factory rules cannot be deleted; uncheck `enabled` to disable. `config.json` is
+required — if it is missing or malformed the service fails fast at startup; restore
+it with `git checkout config.json`.
 
 JSON response notes: `text` is the post-processed joined transcript. `segments[].text` and `words[].word` carry **raw** Whisper output (no post-processing applied to per-segment / per-word fields — multi-word dictation phrases like `"neue Zeile"` only resolve cleanly on the joined text).
 
@@ -191,7 +205,7 @@ Other layers:
 - **Server-side validation**: every payload is validated against `config_store.AdminConfig` (Pydantic v2).
 - **Auto-restart**: when a "cold" setting changes (server port, log file, preload list, …), a confirmation modal asks whether to restart the service. WinSW relaunches the wrapper; the page polls `/v1/models` until back up.
 
-Edits land in **`config.local.json`** at the repo root (gitignored). See `config.local.example.json` for the schema. The one exception is the Pipeline section's **Defaults** mode, which edits the committed **`config.json`** instead (see [Post-processing pipeline](#post-processing-pipeline)).
+Edits land in **`config.local.json`** at the repo root (gitignored). See `config.local.example.json` for the schema. The one exception is the Pipeline section's **promote** action, which writes the committed **`config.json`** instead (see [Post-processing pipeline](#post-processing-pipeline)).
 
 ## Files
 

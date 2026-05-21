@@ -88,6 +88,21 @@ def test_note_round_trips():
             os.unlink(path)
 
 
+def test_save_normalizes_seeded():
+    """save_factory_rules forces seeded=True on every written rule — a rule in
+    the committed factory file is a factory default by definition."""
+    path = _tmp_path()
+    try:
+        rules = [_regex_rule("a", seeded=False), _regex_rule("b"), _terminal()]
+        saved = cs.save_factory_rules(rules, path=path)
+        assert all(r["seeded"] is True for r in saved), saved
+        loaded = cs.load_factory_rules(path=path)
+        assert all(r["seeded"] is True for r in loaded), loaded
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
+
+
 def test_bad_regex_rejected():
     """An uncompilable pattern is rejected before anything is written."""
     path = _tmp_path()
