@@ -1395,6 +1395,7 @@ async function api(method, path, body) {
   const r = await fetch(path, opts);
   if (r.status === 401) {
     sessionStorage.removeItem(TOKEN_KEY);
+    window.dispatchEvent(new Event('whisper:auth-changed'));
     showLogin('token rejected');
   }
   return r;
@@ -4156,6 +4157,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const t = $('login-token').value.trim();
     if (!t) return;
     sessionStorage.setItem(TOKEN_KEY, t);
+    window.dispatchEvent(new Event('whisper:auth-changed'));
     showApp();
     await loadState();
   });
@@ -4164,6 +4166,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
   $('logout-btn').addEventListener('click', () => {
     sessionStorage.removeItem(TOKEN_KEY);
+    window.dispatchEvent(new Event('whisper:auth-changed'));
     showLogin();
   });
   $('reload-btn').addEventListener('click', loadState);

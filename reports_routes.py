@@ -795,6 +795,10 @@ _REPORTS_HTML = """<!doctype html>
   }
   function setToken(v) {
     try { sessionStorage.setItem(TOKEN_KEY, v || ''); } catch(_) {}
+    // Notify the shared web_common chrome (_refreshAuthChrome in
+    // OPEN_MODE_BANNER_JS) so the nav-link visibility updates without a
+    // page reload.
+    try { window.dispatchEvent(new Event('whisper:auth-changed')); } catch(_) {}
   }
 
   function showTokenModal(onSaved) {

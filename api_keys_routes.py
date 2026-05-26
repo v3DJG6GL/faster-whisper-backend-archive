@@ -535,6 +535,11 @@ _API_KEYS_HTML = r"""<!doctype html>
   }
   function setToken(v) {
     try { sessionStorage.setItem(TOKEN_KEY, v || ''); } catch(_) {}
+    // Notify the shared web_common chrome (_refreshAuthChrome in
+    // OPEN_MODE_BANNER_JS) so the nav-link visibility updates without a
+    // page reload. Idempotent — safe to fire even if the value didn't
+    // change.
+    try { window.dispatchEvent(new Event('whisper:auth-changed')); } catch(_) {}
   }
 
   function authHeaders() {

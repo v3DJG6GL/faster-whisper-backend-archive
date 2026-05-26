@@ -858,6 +858,10 @@ function getToken() { return sessionStorage.getItem(TOKEN_KEY) || ''; }
 function setToken(t) {
   if (t) sessionStorage.setItem(TOKEN_KEY, t);
   else sessionStorage.removeItem(TOKEN_KEY);
+  // Notify the shared web_common chrome (_refreshAuthChrome in
+  // OPEN_MODE_BANNER_JS) so the nav-link visibility updates without a
+  // page reload.
+  try { window.dispatchEvent(new Event('whisper:auth-changed')); } catch(_) {}
 }
 
 async function api(method, path, body) {

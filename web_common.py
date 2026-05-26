@@ -436,76 +436,109 @@ OPEN_MODE_BANNER_JS = r"""
     window.__current_page_path = '';
   }
 
-  var TOKEN_KEY='whisper_api_key';
-  var key=null;
-  try { key=sessionStorage.getItem(TOKEN_KEY)||''; } catch(_){}
-  var h={Accept:'application/json'};
-  if(key) h['Authorization']='Bearer '+key;
-  fetch('/auth/whoami',{headers:h,cache:'no-store'})
-    .then(function(r){ return r.ok ? r.json() : null; })
-    .then(function(j){
-      if(!j) return;
-      // Cache the whoami payload so pages that want to consult
-      // permissions later (e.g. for inline scope hints) don't re-fetch.
-      try { window.__whoami = j; } catch(_) {}
+  var TOKEN_KEY = 'whisper_api_key';
+  var BANNER_ID = 'open-mode-banner';
+  var landingRenderedFor = null;   // page-load-only — once a no-access
+                                   // landing is rendered, subsequent
+                                   // refreshes (post-login) don't re-render.
 
-      // OPEN-mode warning banner — only when no admin key configured.
-      if (j.open_mode) {
-        var b=document.createElement('div');
-        b.setAttribute('role','alert');
-        b.style.cssText='background:#5a2424;color:#fff;padding:0.5rem 1rem;'
-          +'text-align:center;font-weight:600;font-size:0.95rem;'
-          +'position:sticky;top:0;z-index:20;';
-        b.innerHTML='⚠ No admin API key set — the server is in '
-          +'OPEN mode and anyone reachable can use it. '
-          +'<a href="/config/api-keys" style="color:#ffd1d1;text-decoration:underline">'
-          +'Generate the first admin key</a>.';
-        document.body.insertBefore(b, document.body.firstChild);
-      }
+  // Single source of truth for "what does the current bearer let me see?".
+  // Idempotent: clears nav chrome first, then re-applies based on a fresh
+  // /auth/whoami. Called once on page load AND on every `whisper:auth-changed`
+  // event dispatched by login/logout sites (admin_routes, api_keys_routes,
+  // quick_config_routes, reports_routes, captures_routes).
+  window._refreshAuthChrome = function() {
+    // Clear state before the fetch so logout (401 / removed token) leaves
+    // the chrome hidden by default. The old IIFE only ADDed classes — it
+    // had no way to recover from a transition admin → non-admin.
+    try { document.body.classList.remove('role-admin'); } catch(_) {}
+    try {
+      document.querySelectorAll('header a.page-link[data-page].allowed')
+        .forEach(function(a){ a.classList.remove('allowed'); });
+    } catch(_) {}
 
-      var isAdmin = !!j.is_admin;
-      var perms = (j.permissions && j.permissions.pages) || {};
-
-      // Single source of truth for `body.role-admin` — the body class
-      // reveals admin-only chrome (/config + /config/api-keys nav links,
-      // severity pills, in-page admin buttons). Pages used to add it
-      // unconditionally after a successful state fetch, which leaked
-      // admin chrome to non-admins on /stats and /logs and /reports.
-      if (isAdmin) document.body.classList.add('role-admin');
-
-      // Per-page nav-link visibility. The nav renders every link with
-      // class `.page-link` default-hidden; add `.allowed` per link the
-      // caller can reach. Admins pass on every link via is_admin.
-      document.querySelectorAll('header a.page-link[data-page]').forEach(
-        function(a) {
-          var page = a.getAttribute('data-page');
-          var scope = perms[page];
-          if (isAdmin || (scope && scope !== 'none')) {
-            a.classList.add('allowed');
-          }
+    var key = null;
+    try { key = sessionStorage.getItem(TOKEN_KEY) || ''; } catch(_) {}
+    var h = { Accept: 'application/json' };
+    if (key) h['Authorization'] = 'Bearer ' + key;
+    fetch('/auth/whoami', { headers: h, cache: 'no-store' })
+      .then(function(r){ return r.ok ? r.json() : null; })
+      .then(function(j){
+        if (!j) {
+          // 401 (locked-down + no/invalid bearer). Leave chrome cleared
+          // and drop the cached whoami so stale permissions don't linger.
+          try { delete window.__whoami; } catch(_) {}
+          return;
         }
-      );
+        // Cache the whoami payload so pages that want to consult
+        // permissions later (e.g. for inline scope hints) don't re-fetch.
+        try { window.__whoami = j; } catch(_) {}
 
-      // Auto-render the no-access landing when we know — from /auth/
-      // whoami — that the bearer is valid AND lacks permission for the
-      // current page. Skips:
-      //   - admin-only pages (page-key="__admin_only__") — those are
-      //     gated server-side by require_admin; the per-page load()
-      //     handler renders the landing in response to a 403 it gets
-      //     from the API. The central script can't infer "no access"
-      //     from permissions.pages alone for those.
-      //   - admins (handled above by the role-admin reveal).
-      var current = window.__current_page;
-      if (
-        current && current !== '__admin_only__'
-        && !isAdmin
-        && (!perms[current] || perms[current] === 'none')
-        && typeof _renderNoAccessLanding === 'function'
-      ) {
-        _renderNoAccessLanding({ page: current });
-      }
-    })
-    .catch(function(){});
+        // OPEN-mode warning banner — only when no admin key configured.
+        // Idempotent: the banner gets a stable id so re-runs don't stack.
+        if (j.open_mode && !document.getElementById(BANNER_ID)) {
+          var b = document.createElement('div');
+          b.id = BANNER_ID;
+          b.setAttribute('role','alert');
+          b.style.cssText = 'background:#5a2424;color:#fff;padding:0.5rem 1rem;'
+            + 'text-align:center;font-weight:600;font-size:0.95rem;'
+            + 'position:sticky;top:0;z-index:20;';
+          b.innerHTML = '⚠ No admin API key set — the server is in '
+            + 'OPEN mode and anyone reachable can use it. '
+            + '<a href="/config/api-keys" style="color:#ffd1d1;text-decoration:underline">'
+            + 'Generate the first admin key</a>.';
+          document.body.insertBefore(b, document.body.firstChild);
+        }
+
+        var isAdmin = !!j.is_admin;
+        var perms = (j.permissions && j.permissions.pages) || {};
+
+        // `body.role-admin` reveals admin-only chrome (/config +
+        // /config/api-keys nav links, severity pills, in-page admin
+        // buttons). Pages used to add it unconditionally after a successful
+        // state fetch, which leaked admin chrome to non-admins on /stats,
+        // /logs and /reports.
+        if (isAdmin) document.body.classList.add('role-admin');
+
+        // Per-page nav-link visibility. The nav renders every link with
+        // class `.page-link` default-hidden; add `.allowed` per link the
+        // caller can reach. Admins pass on every link via is_admin.
+        document.querySelectorAll('header a.page-link[data-page]').forEach(
+          function(a) {
+            var page = a.getAttribute('data-page');
+            var scope = perms[page];
+            if (isAdmin || (scope && scope !== 'none')) {
+              a.classList.add('allowed');
+            }
+          }
+        );
+
+        // No-access landing — page-load only. The landing replaces <main>
+        // content; re-rendering it on every refresh would clobber a page
+        // the user just successfully logged into. The per-page 403
+        // handlers (admin_routes loadState, quick_config_routes loadState)
+        // cover the "valid bearer, wrong scope" case after login.
+        var current = window.__current_page;
+        if (
+          landingRenderedFor === null
+          && current && current !== '__admin_only__'
+          && !isAdmin
+          && (!perms[current] || perms[current] === 'none')
+          && typeof _renderNoAccessLanding === 'function'
+        ) {
+          landingRenderedFor = current;
+          _renderNoAccessLanding({ page: current });
+        }
+      })
+      .catch(function(){});
+  };
+
+  // Refresh on every login/logout. Each token-mutating site dispatches
+  // `whisper:auth-changed` after writing sessionStorage.
+  window.addEventListener('whisper:auth-changed', window._refreshAuthChrome);
+
+  // Initial page-load pass — replaces the old IIFE body.
+  window._refreshAuthChrome();
 })();</script>
 """
 
