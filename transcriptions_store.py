@@ -42,7 +42,7 @@ from typing import Any
 
 logger = logging.getLogger("whisper-api")
 
-_lock = threading.Lock()
+_lock = threading.RLock()  # reentrant: record_trace/record_timing hold the lock and may call prune() which re-acquires it
 _conn: sqlite3.Connection | None = None
 _insert_counter = 0
 
