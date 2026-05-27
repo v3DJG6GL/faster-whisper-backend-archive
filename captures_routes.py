@@ -1379,6 +1379,13 @@ def _project_member_corrections(
     offset = 0
     for m in members:
         words = m.get("words") or []
+        # A wordless member has no global anchor to project chips onto.
+        # Without this skip the clamp below would collapse to `offset`,
+        # which is also the first word index of the NEXT member — the
+        # round-trip through _split_corrections_to_members would silently
+        # re-attribute the chip to that next member.
+        if not words:
+            continue
         for c in (m.get("corrections") or []):
             try:
                 idx = int(c["idx"]) + offset
