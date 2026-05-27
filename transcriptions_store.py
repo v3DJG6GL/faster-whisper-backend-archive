@@ -145,6 +145,10 @@ def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     d["audio_dur"] = audio
     d["proc_dur"] = proc
     d["words"] = d.get("words_count")
+    # /quick-config renderTrace + _buildReportForm read entry.raw / entry.final;
+    # the live SSE event double-keys both names, hydrated rows must match.
+    d["raw"] = d.get("raw_text")
+    d["final"] = d.get("final_text")
     return d
 
 
