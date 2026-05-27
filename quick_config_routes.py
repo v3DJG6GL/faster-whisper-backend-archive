@@ -513,7 +513,10 @@ async def stream_recent(
     def _visible(entry: dict[str, Any] | None) -> bool:
         if sees_all:
             return True
-        return bool(entry) and entry.get("user_id") == caller_uid
+        # caller_uid is already coerced from None to "" above; coerce the
+        # entry side too so a persisted row with user_id=NULL doesn't get
+        # silently excluded for a caller whose own user_id is missing.
+        return bool(entry) and (entry.get("user_id") or "") == caller_uid
 
     async def gen():
         q = quick_config_state.subscribe()
