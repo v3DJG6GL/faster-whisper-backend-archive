@@ -55,3 +55,4 @@ WhisperAPI.wrapper.log
 # Legacy NSSM era — install-service.ps1 -RemoveLocal cleans this up
 nssm.exe
 SIMPLIFY_NOTES.md
+CODE-REVIEW_NOTES.md
