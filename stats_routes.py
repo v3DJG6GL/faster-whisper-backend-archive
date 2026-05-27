@@ -268,37 +268,37 @@ _STATS_VIEWER_HTML = r"""<!doctype html>
 
 <div id="grid" class="grid">
  <div class="grid-stack">
-  <!-- GPU -->
+  <!-- GPU (one GridStack item; inner content swaps between "live" and "no NVML"
+       — a second hidden grid-stack-item would still occupy a cell and, under
+       float: true, shift to a free slot that overlaps the row below.) -->
   <div class="grid-stack-item" gs-id="gpu" gs-x="0" gs-y="0" gs-w="6" gs-h="9">
    <div class="grid-stack-item-content"><div id="card-gpu" class="card">
     <h3>GPU</h3>
-    <div id="gpu-name" class="val">—</div>
-    <div id="gpu-meta" class="meta"></div>
-    <div id="gpu-mem-bar" class="bar"><i style="width:0"></i></div>
-    <div id="gpu-meta2" class="meta"></div>
-    <div class="spark-wrap">
-      <div class="spark-head"><span class="spark-label">GPU util %</span>
-        <span id="gpu-util-now" class="spark-now">—</span></div>
-      <div id="gpu-spark-util" class="spark"></div>
+    <div id="gpu-content">
+     <div id="gpu-name" class="val">—</div>
+     <div id="gpu-meta" class="meta"></div>
+     <div id="gpu-mem-bar" class="bar"><i style="width:0"></i></div>
+     <div id="gpu-meta2" class="meta"></div>
+     <div class="spark-wrap">
+       <div class="spark-head"><span class="spark-label">GPU util %</span>
+         <span id="gpu-util-now" class="spark-now">—</span></div>
+       <div id="gpu-spark-util" class="spark"></div>
+     </div>
+     <div class="spark-wrap">
+       <div class="spark-head"><span class="spark-label">VRAM used %</span>
+         <span id="gpu-mem-now" class="spark-now">—</span></div>
+       <div id="gpu-spark-mem" class="spark"></div>
+     </div>
+     <div class="spark-wrap">
+       <div class="spark-head"><span class="spark-label">GPU temp °C</span>
+         <span id="gpu-temp-now" class="spark-now">—</span></div>
+       <div id="gpu-spark-temp" class="spark"></div>
+     </div>
     </div>
-    <div class="spark-wrap">
-      <div class="spark-head"><span class="spark-label">VRAM used %</span>
-        <span id="gpu-mem-now" class="spark-now">—</span></div>
-      <div id="gpu-spark-mem" class="spark"></div>
+    <div id="gpu-empty" class="hidden">
+     <div class="empty">NVML unavailable — running on CPU or pynvml not installed.</div>
+     <div id="gpu-error" class="meta"></div>
     </div>
-    <div class="spark-wrap">
-      <div class="spark-head"><span class="spark-label">GPU temp °C</span>
-        <span id="gpu-temp-now" class="spark-now">—</span></div>
-      <div id="gpu-spark-temp" class="spark"></div>
-    </div>
-   </div></div>
-  </div>
-
-  <div class="grid-stack-item hidden" gs-id="gpu-missing" gs-x="0" gs-y="0" gs-w="6" gs-h="3">
-   <div class="grid-stack-item-content"><div id="card-gpu-missing" class="card">
-    <h3>GPU</h3>
-    <div class="empty">NVML unavailable — running on CPU or pynvml not installed.</div>
-    <div id="gpu-error" class="meta"></div>
    </div></div>
   </div>
 
@@ -419,7 +419,7 @@ _STATS_VIEWER_HTML = r"""<!doctype html>
 // --- GridStack init: drag-to-reorder + click-to-resize tiles ---------------
 // Layout state persists in localStorage; [↺ layout] in the header clears it.
 // uPlot sparklines re-fit on resizestop via setSize().
-const GS_LAYOUT_KEY = 'whisper-stats-layout-v2';
+const GS_LAYOUT_KEY = 'whisper-stats-layout-v3';
 const grid = GridStack.init({
   column: 12,
   // String form so cells track --fs-base (the scale picker). At 100% scale,
@@ -619,9 +619,11 @@ function render(snap) {
 
   // --- GPU ---
   if (snap.gpu) {
-    // Toggle the GridStack wrapper (.grid-stack-item) so layout reflows.
-    $('card-gpu').closest('.grid-stack-item').classList.remove('hidden');
-    $('card-gpu-missing').closest('.grid-stack-item').classList.add('hidden');
+    // Swap inner content of the single GPU GridStack item (not the wrapper
+    // — a hidden grid-stack-item still occupies a cell and breaks the row
+    // below it under float: true).
+    $('gpu-content').classList.remove('hidden');
+    $('gpu-empty').classList.add('hidden');
     $('gpu-name').textContent = snap.gpu.name || 'GPU';
     $('gpu-meta').innerHTML =
       `<b>util</b> ${snap.gpu.util_pct ?? '—'}% &nbsp; ` +
@@ -643,8 +645,8 @@ function render(snap) {
     $('gpu-mem-now').textContent  = memPct.toFixed(0) + '%';
     $('gpu-temp-now').textContent = (snap.gpu.temp_c ?? 0).toFixed(0) + '°C';
   } else {
-    $('card-gpu').closest('.grid-stack-item').classList.add('hidden');
-    $('card-gpu-missing').closest('.grid-stack-item').classList.remove('hidden');
+    $('gpu-content').classList.add('hidden');
+    $('gpu-empty').classList.remove('hidden');
     $('gpu-error').textContent = snap.gpu_error || '';
   }
 
