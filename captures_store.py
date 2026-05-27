@@ -376,6 +376,13 @@ def create_capture(
         cid[:8], model or "?", float(duration_seconds or 0.0),
         len(words or []), int(wav_bytes),
     )
+    # Drop the proposer cache so the freshly-recorded clip is eligible on
+    # the next Auto-propose-merges call instead of waiting up to TTL_S.
+    try:
+        import captures_merge_proposer
+        captures_merge_proposer.invalidate(user_id)
+    except Exception:
+        pass
     return cid
 
 
