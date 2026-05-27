@@ -2025,7 +2025,14 @@ def _read_chain_window(active_path: str, skip: int, want: int) -> "tuple[list[st
     # newest→oldest. By construction the OLDEST line in the chain
     # window we've seen so far sits at collected[0].
     collected: list[str] = []
-    for path in _rotated_chain(active_path):
+    chain = _rotated_chain(active_path)
+    # When we break out of the file loop because `target` is satisfied
+    # without opening every file, older rotated files still on disk
+    # remain unread — `exhausted` must account for that or the caller
+    # ("Load older" UI) loses access to anything beyond the first file
+    # whenever its line count meets `target` exactly.
+    more_files_after_break = False
+    for i, path in enumerate(chain):
         try:
             with open(path, "rb") as f:
                 f.seek(0, io.SEEK_END)
@@ -2042,11 +2049,13 @@ def _read_chain_window(active_path: str, skip: int, want: int) -> "tuple[list[st
             continue
         collected = data.decode("utf-8", errors="replace").splitlines() + collected
         if len(collected) >= target:
+            more_files_after_break = (i + 1) < len(chain)
             break
     # Slice in newest-first frame so `skip` is unambiguous.
     newest_first = list(reversed(collected))
     window = newest_first[skip:skip + want]
-    exhausted = (skip + len(window)) >= len(newest_first)
+    exhausted = ((skip + len(window)) >= len(newest_first)
+                 and not more_files_after_break)
     next_skip = None if exhausted else skip + len(window)
     return list(reversed(window)), next_skip
 
