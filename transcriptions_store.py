@@ -147,8 +147,12 @@ def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     d["words"] = d.get("words_count")
     # /quick-config renderTrace + _buildReportForm read entry.raw / entry.final;
     # the live SSE event double-keys both names, hydrated rows must match.
-    d["raw"] = d.get("raw_text")
-    d["final"] = d.get("final_text")
+    # Error-path rows (record_timing without record_trace) leave the text
+    # columns NULL — coerce to '' so the JS string ops never see None.
+    d["raw"] = d.get("raw_text") or ""
+    d["final"] = d.get("final_text") or ""
+    d["username"] = d.get("username") or ""
+    d["language"] = d.get("language") or ""
     return d
 
 
