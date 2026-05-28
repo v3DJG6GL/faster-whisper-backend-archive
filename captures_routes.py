@@ -1534,9 +1534,19 @@ def _enrich_group(g: dict[str, Any]) -> dict[str, Any]:
     usernames = api_keys_store.get_usernames(
         [m.get("user_id") for m in members] + [g.get("user_id")]
     )
+    member_trims = g.get("member_trims") or {}
     for m in members:
         _refresh_final_if_stale(m)
         m["username"] = usernames.get(m.get("user_id"))
+        # Per-member trimmed duration so the expanded member list shows the
+        # length each clip actually contributes to the merged WAV (mirrors the
+        # singleton effective_duration_seconds field). Falls back to raw for
+        # legacy groups with no stored per-member trim map.
+        info = member_trims.get(m.get("id"))
+        if info and info.get("new_duration_ms") is not None:
+            m["effective_duration_seconds"] = float(info["new_duration_ms"]) / 1000.0
+        else:
+            m["effective_duration_seconds"] = float(m.get("duration_seconds") or 0.0)
     g["members"] = members
     g["username"] = usernames.get(g.get("user_id"))
     g["transcript"] = _build_default_transcript(
@@ -2724,6 +2734,12 @@ _CAPTURES_HTML = r"""<!doctype html>
     font-size: var(--fs-md); margin-top: 0.25rem;
     white-space: pre-wrap; word-wrap: break-word;
     user-select: text; cursor: text;
+  }
+  /* Final-result karaoke: words render inline (natural text flow); the active
+     word lights up in sync with the Corrections strip as audio plays. */
+  .cc-ground .word { display: inline; border-radius: 3px; }
+  .cc-ground .word.active {
+    background: var(--active-word-bg); color: var(--active-word-color);
   }
 
   .cc-notes textarea {
@@ -3925,21 +3941,7 @@ _CAPTURES_HTML = r"""<!doctype html>
         var e = state.words[i].end || 0;
         if (s <= t && t < e) { idx = i; break; }
       }
-      if (idx !== state.activeWordIdx) {
-        if (state.activeWordIdx >= 0) {
-          var prev = state.wordEls[state.activeWordIdx];
-          if (prev) prev.classList.remove('active');
-        }
-        state.activeWordIdx = idx;
-        if (idx >= 0) {
-          var cur = state.wordEls[idx];
-          if (cur) {
-            cur.classList.add('active');
-            // Keep the active word visible inside the strip.
-            cur.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-          }
-        }
-      }
+      _setActiveWord(state, idx);
     }
     audio.addEventListener('timeupdate', onTimeUpdate);
 
@@ -4393,17 +4395,72 @@ _CAPTURES_HTML = r"""<!doctype html>
     });
   }
 
+  // Render the Final-result preview as per-word spans (not plain text) so it
+  // gets the same word-level karaoke highlight as the Corrections strip. Base
+  // tokens are state.words (the merged/aligned words); index-based chip
+  // corrections collapse their covered range into a single span carrying the
+  // chip's `correct` text, and the wordToGround map (merged-word index → its
+  // span) lets _setActiveWord light the right span while audio plays. Only
+  // used by surfaces that opt in via state.karaokeGround (group + proposal
+  // preview); the single-capture card keeps its plain-text ground.
+  function _renderGroundSpans(state) {
+    var area = state.gtArea;
+    if (!area) return;
+    var words = state.words || [];
+    // First chip covering each word index (chips are word-indexed; idx_end
+    // optional). idx-less chips can't be placed positionally — they're shown
+    // in the Corrections list and skipped here (rare; word-click chips have idx).
+    var cover = new Array(words.length);
+    (state.corrections || []).forEach(function(c) {
+      if (typeof c.idx !== 'number' || !(c.correct || '').length) return;
+      var end = (typeof c.idx_end === 'number') ? c.idx_end : c.idx;
+      for (var j = c.idx; j <= end && j < words.length; j++) {
+        if (cover[j] == null) cover[j] = c;
+      }
+    });
+    area.innerHTML = '';
+    state.wordToGround = new Array(words.length);
+    var first = true;
+    var i = 0;
+    while (i < words.length) {
+      var chip = cover[i];
+      if (chip) {
+        var end = (typeof chip.idx_end === 'number') ? chip.idx_end : chip.idx;
+        if (end >= words.length) end = words.length - 1;
+        var sp = document.createElement('span');
+        sp.className = 'word';
+        sp.textContent = (first ? '' : ' ') + chip.correct;
+        area.appendChild(sp);
+        for (var k = i; k <= end; k++) state.wordToGround[k] = sp;
+        first = false;
+        i = end + 1;
+        continue;
+      }
+      var w = words[i];
+      if (w && w.removed) { state.wordToGround[i] = null; i++; continue; }
+      var txt = ((w && w.word) || '').trim();
+      if (!txt) { state.wordToGround[i] = null; i++; continue; }
+      var sp2 = document.createElement('span');
+      sp2.className = 'word';
+      sp2.textContent = (first ? '' : ' ') + txt;
+      area.appendChild(sp2);
+      state.wordToGround[i] = sp2;
+      first = false;
+      i++;
+    }
+  }
+
   function applyCorrectionsToGround(state) {
+    // Karaoke-enabled surfaces (group + proposal preview) render the ground as
+    // per-word spans; the single-capture card keeps the original plain-text
+    // substitution preview.
+    if (state.karaokeGround) { _renderGroundSpans(state); return; }
     // Substitute each chip's wrong text with its correct text in
-    // state.finalText. Walk corrections in `idx` order so multi-word
-    // spans get replaced as one unit. If a chip's `wrong` isn't found
-    // verbatim in the final text (regex special chars / whitespace
-    // drift), it's left alone.
+    // state.finalText. Walk corrections in `idx` order so multi-word spans get
+    // replaced as one unit. If a chip's `wrong` isn't found verbatim, leave it.
     //
-    // The GT element is now a read-only preview (textContent, not
-    // value) — markDirty stays off here because the user can only
-    // change GT *indirectly*, by editing a chip, which already
-    // markDirty'd on its own.
+    // The GT element is a read-only preview (textContent, not value) — markDirty
+    // stays off here because the user changes GT only indirectly via a chip.
     var ordered = state.corrections.slice().sort(function(a, b) {
       var ai = typeof a.idx === 'number' ? a.idx : 1e9;
       var bi = typeof b.idx === 'number' ? b.idx : 1e9;
@@ -4952,6 +5009,33 @@ _CAPTURES_HTML = r"""<!doctype html>
     return m + ':' + (sec < 10 ? '0' : '') + sec;
   }
 
+  // Karaoke highlight shared by every surface (single-capture, group expand,
+  // proposal preview): toggles `.active` on both the Corrections word-strip
+  // span AND the matching Final-result span (state.wordToGround), so the
+  // current word lights up in both places as audio plays. `idx` is an index
+  // into state.words; -1 clears.
+  function _setActiveWord(state, idx) {
+    if (state._activeWordIdx === idx) return;
+    var prev = state._activeWordIdx;
+    if (prev != null && prev >= 0) {
+      if (state.wordEls && state.wordEls[prev]) state.wordEls[prev].classList.remove('active');
+      if (state.wordToGround && state.wordToGround[prev]) {
+        state.wordToGround[prev].classList.remove('active');
+      }
+    }
+    state._activeWordIdx = idx;
+    if (idx >= 0) {
+      if (state.wordEls && state.wordEls[idx]) {
+        state.wordEls[idx].classList.add('active');
+        try { state.wordEls[idx].scrollIntoView({ block: 'nearest', inline: 'nearest' }); }
+        catch (_) {}
+      }
+      if (state.wordToGround && state.wordToGround[idx]) {
+        state.wordToGround[idx].classList.add('active');
+      }
+    }
+  }
+
   // -------------------------------------------------------------------
   // Word-strip keyboard navigation — cursor + arrow keys + type-to-edit
   // for chip corrections. Applied wherever a chip-correction word-strip
@@ -5210,7 +5294,6 @@ _CAPTURES_HTML = r"""<!doctype html>
   // to this panel's UI. Returns a teardown function that detaches the
   // listeners (called when switching to a different preview).
   function _bindPanelToAudio(audio, panel, words, wordEls) {
-    var activeIdx = -1;
     var scrub = panel._scrub;
     var timeEl = panel._time;
     var toggleBtn = panel._toggleBtn;
@@ -5229,15 +5312,13 @@ _CAPTURES_HTML = r"""<!doctype html>
         var e = words[i].end || s;
         if (s <= t && t < e) { idx = i; break; }
       }
-      if (idx !== activeIdx) {
-        if (activeIdx >= 0 && wordEls[activeIdx]) wordEls[activeIdx].classList.remove('active');
-        if (idx >= 0 && wordEls[idx]) wordEls[idx].classList.add('active');
-        activeIdx = idx;
-      }
+      // Highlight in both the Corrections strip and the Final-result spans.
+      if (panel._state) _setActiveWord(panel._state, idx);
     }
     function onLoaded() {
       totalEl.textContent = _fmtTime(audio.duration || 0);
       scrub.disabled = false;
+      if (toggleBtn && toggleBtn._setDurSeconds) toggleBtn._setDurSeconds(audio.duration);
     }
     function onPause() { toggleBtn._setIcon('▶'); }
     function onPlay()  { toggleBtn._setIcon('⏸'); }
@@ -5265,7 +5346,7 @@ _CAPTURES_HTML = r"""<!doctype html>
       audio.removeEventListener('play', onPlay);
       scrub.removeEventListener('input', onScrubInput);
       scrub.removeEventListener('change', onScrubChange);
-      if (activeIdx >= 0 && wordEls[activeIdx]) wordEls[activeIdx].classList.remove('active');
+      if (panel._state) _setActiveWord(panel._state, -1);
     };
   }
 
@@ -5286,6 +5367,14 @@ _CAPTURES_HTML = r"""<!doctype html>
       var d = durationFn();
       durEl.textContent = (typeof d === 'number' && isFinite(d))
         ? d.toFixed(1) + ' s' : '';
+    };
+    // Once the trimmed preview audio loads, show its real length instead of
+    // the (estimated) durationFn value — keeps "▶ X s" in sync with the
+    // scrubber total for every entry point (proposal cards + manual modal).
+    toggleBtn._setDurSeconds = function(s) {
+      if (typeof s === 'number' && isFinite(s) && s > 0) {
+        durEl.textContent = s.toFixed(1) + ' s';
+      }
     };
     toggleBtn._refreshDur();
 
@@ -5410,6 +5499,7 @@ _CAPTURES_HTML = r"""<!doctype html>
           wordEls: [],
           chipBox: chipBox,
           gtArea: gtArea,
+          karaokeGround: true,
           stripEl: stripEl,
           cursorIdx: -1,
           dirtyEl: null,
@@ -6124,6 +6214,7 @@ _CAPTURES_HTML = r"""<!doctype html>
           activeWordIdx: -1,
           chipBox: null,
           gtArea: ta,
+          karaokeGround: true,
           adminNotes: '',
           newStatus: 'new',
           dirty: false,
@@ -6158,20 +6249,7 @@ _CAPTURES_HTML = r"""<!doctype html>
             var e = groupState.words[i].end || 0;
             if (s <= t && t < e) { idx = i; break; }
           }
-          if (idx !== groupState.activeWordIdx) {
-            if (groupState.activeWordIdx >= 0) {
-              var prev = groupState.wordEls[groupState.activeWordIdx];
-              if (prev) prev.classList.remove('active');
-            }
-            groupState.activeWordIdx = idx;
-            if (idx >= 0) {
-              var cur = groupState.wordEls[idx];
-              if (cur) {
-                cur.classList.add('active');
-                cur.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-              }
-            }
-          }
+          _setActiveWord(groupState, idx);
         });
 
         // Chip list nests inside the same Corrections section so the
@@ -6411,8 +6489,11 @@ _CAPTURES_HTML = r"""<!doctype html>
           groupState.adminNotes = d.admin_notes || '';
           groupState.newStatus = d.status || 'new';
           groupState.wordEls = [];
-          groupState.activeWordIdx = -1;
-          ta.textContent = d.transcript || '';
+          groupState._activeWordIdx = -1;
+          // Render Final result as karaoke spans (from merged words + chips)
+          // instead of plain transcript text, so it highlights in sync with
+          // the Corrections strip as the merged audio plays.
+          applyCorrectionsToGround(groupState);
 
           // Per-member raw + post-processing reference rows.
           // "post-processing" line sources from the training-form text

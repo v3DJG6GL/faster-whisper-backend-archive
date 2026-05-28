@@ -252,5 +252,62 @@ def test_build_merged_words_legacy(monkeypatch):
     assert out[1]["start"] == pytest.approx(2.4)
 
 
+# --------------------------------------------------------------------------
+# Proposer trimmed durations + caching
+# --------------------------------------------------------------------------
+
+def test_proposer_trimmed_duration_and_caching(monkeypatch, tmp_path):
+    _install_fake_vad(monkeypatch)
+    import captures_merge_proposer as P
+    import captures_store
+
+    # 200ms sil | 600ms speech | 200ms sil → trimmed to speech ± 50ms pad.
+    pcm, _ = _pcm([("sil", 200), ("speech", 600), ("sil", 200)])
+    wav = tmp_path / "a.wav"
+    _write_wav(str(wav), pcm)
+    monkeypatch.setattr(captures_store, "abs_audio_path", lambda rel: str(wav))
+    monkeypatch.setattr(P.cfg, "CAPTURES_VAD_TRIM_ENABLED_FOR_GROUPS", True,
+                        raising=False)
+    monkeypatch.setattr(P.cfg, "CAPTURES_VAD_GROUP_EDGE_PAD_MS", 50, raising=False)
+    monkeypatch.setattr(P.cfg, "CAPTURES_VAD_GROUP_MAX_INTERNAL_GAP_MS", 300,
+                        raising=False)
+    P._TRIM_DUR_CACHE.clear()
+
+    row = {"id": "cap1", "audio_relpath": "x", "duration_seconds": 1.0}
+    d1 = P._trimmed_duration_s(row)
+    # speech 600ms + 2×50ms pad = 700ms, well under the raw 1.0s.
+    assert 0.65 <= d1 <= 0.75
+
+    # Second call must hit the cache — make read_pcm explode to prove it.
+    def _boom(_p):
+        raise AssertionError("read_pcm called on a cache hit")
+    monkeypatch.setattr(audio_merge, "read_pcm", _boom)
+    assert P._trimmed_duration_s(row) == d1
+
+
+def test_proposer_trim_disabled_returns_raw(monkeypatch):
+    import captures_merge_proposer as P
+    monkeypatch.setattr(P.cfg, "CAPTURES_VAD_TRIM_ENABLED_FOR_GROUPS", False,
+                        raising=False)
+    P._TRIM_DUR_CACHE.clear()
+    row = {"id": "c", "audio_relpath": "x", "duration_seconds": 3.5}
+    assert P._trimmed_duration_s(row) == 3.5
+
+
+def test_build_proposal_uses_trimmed_durations():
+    import captures_merge_proposer as P
+    members = [
+        {"id": "a", "created_ts": 1000.0, "duration_seconds": 2.0,
+         "_trim_dur_s": 1.2, "status": "", "text_for_training": "hello"},
+        {"id": "b", "created_ts": 1001.0, "duration_seconds": 2.0,
+         "_trim_dur_s": 1.0, "status": "", "text_for_training": "world"},
+    ]
+    prop = P._build_proposal(members, 0.3, 26.0, "de", "u1")
+    assert prop["member_previews"][0]["duration_s"] == 1.2
+    assert prop["member_previews"][1]["duration_s"] == 1.0
+    # total = trimmed sum (2.2) + one 0.3s gap.
+    assert abs(prop["total_duration_s"] - 2.5) < 1e-6
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))

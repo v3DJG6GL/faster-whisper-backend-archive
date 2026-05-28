@@ -49,6 +49,49 @@ _ALL_USERS = "__all__"
 # {cache_key: (generated_ts, [ProposedGroup, ...])}
 _CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
+# Per-capture trimmed-duration cache. Capture audio is immutable once written,
+# so a capture id maps to a stable trimmed duration; the file mtime + the two
+# trim-config values guard against the rare edit / config change. Kept separate
+# from _CACHE (proposals) so it survives the proposal TTL and is reused across
+# runs — the first run after a miss pays one VAD pass per eligible capture.
+# {capture_id: (mtime, edge_pad_ms, max_gap_ms, trimmed_seconds)}
+_TRIM_DUR_CACHE: dict[str, tuple[float, int, int, float]] = {}
+
+
+def _trimmed_duration_s(row: dict[str, Any]) -> float:
+    """Trimmed audio duration (seconds) a capture contributes to a merged
+    group. Mirrors what audio_merge.merge_wavs would cut per member. Falls back
+    to raw `duration_seconds` when group trimming is disabled, the audio can't
+    be read, or VAD is unavailable (matches audio_vad_trim's own fallback)."""
+    raw = float(row.get("duration_seconds") or 0.0)
+    if not getattr(cfg, "CAPTURES_VAD_TRIM_ENABLED_FOR_GROUPS", False):
+        return raw
+    cid = row.get("id") or ""
+    relpath = row.get("audio_relpath") or ""
+    if not cid or not relpath:
+        return raw
+    edge = int(getattr(cfg, "CAPTURES_VAD_GROUP_EDGE_PAD_MS", 50))
+    max_gap = int(getattr(cfg, "CAPTURES_VAD_GROUP_MAX_INTERNAL_GAP_MS", 300))
+    try:
+        import os
+        import audio_merge
+        import audio_vad_trim
+        abs_p = captures_store.abs_audio_path(relpath)
+        mtime = os.path.getmtime(abs_p)
+        hit = _TRIM_DUR_CACHE.get(cid)
+        if hit is not None and hit[0] == mtime and hit[1] == edge and hit[2] == max_gap:
+            return hit[3]
+        pcm, n = audio_merge.read_pcm(abs_p)
+        res = audio_vad_trim.trim_pcm_for_merge(
+            pcm, n, edge_pad_ms=edge, max_internal_gap_ms=max_gap,
+        )
+        dur_s = float(res.get("new_duration_ms") or 0) / 1000.0 or raw
+        _TRIM_DUR_CACHE[cid] = (mtime, edge, max_gap, dur_s)
+        return dur_s
+    except Exception as e:  # read/VAD failure → raw fallback
+        logger.debug("[proposer] trim-duration fallback for %s: %s", cid, e)
+        return raw
+
 
 def _bcp47_primary(lang: str | None) -> str:
     if not lang:
@@ -70,6 +113,13 @@ def _pick_text(row: dict[str, Any]) -> str:
     return ""
 
 
+def _dur(m: dict[str, Any]) -> float:
+    """Group-contribution duration of a member: the cached trimmed value when
+    the eligible row was annotated, else raw `duration_seconds`."""
+    v = m.get("_trim_dur_s")
+    return float(v) if v is not None else float(m.get("duration_seconds") or 0.0)
+
+
 def _ratio(a: str, b: str) -> float:
     if not a or not b:
         return 0.0
@@ -79,7 +129,10 @@ def _ratio(a: str, b: str) -> float:
 def _build_group_score(members: list[dict[str, Any]], gap_s: float, target_s: float) -> dict[str, float]:
     """Return per-component scores + composite for ranking."""
     n = len(members)
-    total_dur = sum(float(m["duration_seconds"]) for m in members) + gap_s * (n - 1)
+    # Packed audio uses TRIMMED durations (what the merged WAV actually is);
+    # wall span uses RAW duration since the recording occupied real wall-clock
+    # time before trimming.
+    total_dur = sum(_dur(m) for m in members) + gap_s * (n - 1)
     first_ts = float(members[0]["created_ts"])
     last = members[-1]
     last_end = float(last["created_ts"]) + float(last["duration_seconds"])
@@ -147,10 +200,10 @@ def _generate_candidates_for_bucket(
     for i in range(n):
         members: list[dict[str, Any]] = [bucket[i]]
         member_texts: list[str] = [texts[i]]
-        used_dur = float(bucket[i]["duration_seconds"])
+        used_dur = _dur(bucket[i])
         for j in range(i + 1, n):
             cand = bucket[j]
-            cand_dur = float(cand["duration_seconds"])
+            cand_dur = _dur(cand)
             # Adding j costs cand_dur + one gap (between prior member and j).
             tentative = used_dur + cand_dur + gap_s
             if tentative > hard_cap_s:
@@ -187,7 +240,7 @@ def _build_proposal(
                 # username is filled by the endpoint via api_keys_store.get_usernames
                 "username": None,
                 "created_ts": float(m["created_ts"]),
-                "duration_s": float(m["duration_seconds"]),
+                "duration_s": _dur(m),
                 "status": m.get("status") or "",
                 "preview": (_pick_text(m) or "")[:80],
             }
@@ -271,6 +324,13 @@ def propose_merges(
         user_id=effective_user_id,
     )
     eligible = [r for r in rows if _eligible(r, min_clip_s)]
+
+    # Annotate each survivor with its trimmed group-contribution duration once
+    # (cached across runs). All downstream packing + scoring + display reads go
+    # through _dur(), so a proposal's "packs to X s" reflects the real merged
+    # length and fill_score targets trimmed speech, not raw audio.
+    for r in eligible:
+        r["_trim_dur_s"] = _trimmed_duration_s(r)
 
     # Sort chronological ascending so session segmentation walks forward in time.
     eligible.sort(key=lambda r: float(r["created_ts"]))
