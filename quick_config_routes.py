@@ -2168,10 +2168,6 @@ document.getElementById('discard-btn').addEventListener('click', doDiscard);
 const _loadOlderBtn = document.getElementById('btn-load-older');
 if (_loadOlderBtn) _loadOlderBtn.addEventListener('click', loadOlder);
 
-// Keep cb:map entry dates fresh: timeTick re-queries [data-ts] every tick, so
-// it also picks up rows created by later renderCards() calls.
-timeTick('.map-date[data-ts]');
-
 load().then(() => {
   // Only open the SSE stream after the rules state has loaded — avoids
   // racing the token prompt with the EventSource connection.
@@ -2194,6 +2190,13 @@ load().then(() => {
 {{SCALE_PICKER_JS}}
 {{SEV_POLLER_JS}}
 {{TIME_HELPERS_JS}}
+
+<script>
+// Must run AFTER TIME_HELPERS_JS defines timeTick. Re-queries [data-ts] every
+// tick, so it also refreshes cb:map date cells created by later renderCards()
+// calls; the cells already carry static fmtWhen() text from _makeMapRow.
+timeTick('.map-date[data-ts]');
+</script>
 
 </body>
 </html>
