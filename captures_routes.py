@@ -1022,18 +1022,20 @@ def _build_merged_wav(
     member_ids: list[str],
     silence_ms: int,
     member_paths: list[str] | None = None,
-) -> tuple[int, dict[str, str], int, int]:
+) -> tuple[int, dict[str, str], dict[str, Any]]:
     """Resolve member audio paths (or accept pre-resolved ones), run the
-    merge, return (duration_ms, member_hash_map, lead_trim_ms,
-    trail_trim_ms). When `member_paths` is None, looks them up via
-    captures_store + validates each file exists. Caller must have validated
-    member_ids belong to the same user and total ≤28 s.
+    merge, return (duration_ms, member_hash_map, member_trims). When
+    `member_paths` is None, looks them up via captures_store + validates each
+    file exists. Caller must have validated member_ids belong to the same
+    user and total ≤28 s.
 
-    The trim offsets are non-zero only when CAPTURES_VAD_TRIM_ENABLED_FOR_GROUPS
-    auto-trims the merged WAV — they're needed by _build_merged_words to
-    keep per-member karaoke timestamps in sync with the trimmed audio."""
+    `member_trims` maps member_id → {lead_ms, new_duration_ms, segments} when
+    CAPTURES_VAD_TRIM_ENABLED_FOR_GROUPS trims each member; _build_merged_words
+    uses it to keep per-member karaoke timestamps in sync with the trimmed
+    audio. Empty/identity when trimming is disabled or VAD is unavailable."""
     import audio_merge
     import capture_groups_store
+    import config as cfg
 
     if member_paths is None:
         member_paths = []
@@ -1057,29 +1059,77 @@ def _build_merged_wav(
     dst_relpath = capture_groups_store._relpath_for(gid)
     dst_abs = capture_groups_store.abs_path_for(dst_relpath)
     try:
-        _bytes, n_samples, lead_trim_ms, trail_trim_ms = audio_merge.merge_wavs(
+        res = audio_merge.merge_wavs(
             member_paths, dst_abs, gap_ms=silence_ms,
+            trim=bool(getattr(cfg, "CAPTURES_VAD_TRIM_ENABLED_FOR_GROUPS", False)),
+            edge_pad_ms=int(getattr(cfg, "CAPTURES_VAD_GROUP_EDGE_PAD_MS", 50)),
+            max_internal_gap_ms=int(
+                getattr(cfg, "CAPTURES_VAD_GROUP_MAX_INTERNAL_GAP_MS", 300)),
         )
     except audio_merge.WavFormatError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
-    duration_ms = int(round(n_samples / 16.0))  # 16 samples/ms at 16 kHz
-    return duration_ms, hashes, lead_trim_ms, trail_trim_ms
+    duration_ms = int(res["duration_ms"])
+    # Re-key the order-parallel per-member trims onto member ids so
+    # _build_merged_words can look each member up regardless of ordering.
+    member_trims = {
+        mid: res["members"][i]
+        for i, mid in enumerate(member_ids)
+        if i < len(res["members"])
+    }
+    return duration_ms, hashes, member_trims
 
 
 def _merged_wav_patch(
     duration_ms: int, hashes: dict[str, str],
-    lead_trim_ms: int, trail_trim_ms: int,
+    member_trims: dict[str, Any],
 ) -> dict[str, Any]:
-    """Build the capture_groups patch fields from _build_merged_wav outputs."""
+    """Build the capture_groups patch fields from _build_merged_wav outputs.
+
+    merged_lead/trail_trim_ms are forced to 0 under per-member trimming (the
+    outer-edge offsets are now folded into the per-member segment maps); they
+    survive only so legacy groups without member_trims keep rendering."""
     return {
         "merged_duration_ms":   int(duration_ms),
         "member_hashes_json":   json.dumps(hashes, sort_keys=True),
-        "merged_lead_trim_ms":  int(lead_trim_ms or 0),
-        "merged_trail_trim_ms": int(trail_trim_ms or 0),
+        "merged_lead_trim_ms":  0,
+        "merged_trail_trim_ms": 0,
+        "member_trims_json":    json.dumps(member_trims, sort_keys=True),
         "is_stale":             0,
     }
+
+
+def _preview_member_trims(
+    member_ids: list[str], member_paths: list[str],
+) -> dict[str, Any]:
+    """Compute the same per-member trim map merge_wavs would produce, without
+    writing a merged WAV. Used by /preview-words so the karaoke overlay lines
+    up with the audio /preview-audio streams for the same payload. Returns {}
+    when group trimming is disabled (then _build_merged_words uses the legacy
+    full-duration timeline)."""
+    import config as cfg
+    if not getattr(cfg, "CAPTURES_VAD_TRIM_ENABLED_FOR_GROUPS", False):
+        return {}
+    import audio_merge
+    import audio_vad_trim
+    edge = int(getattr(cfg, "CAPTURES_VAD_GROUP_EDGE_PAD_MS", 50))
+    max_gap = int(getattr(cfg, "CAPTURES_VAD_GROUP_MAX_INTERNAL_GAP_MS", 300))
+    trims: dict[str, Any] = {}
+    for mid, p in zip(member_ids, member_paths):
+        try:
+            pcm, n = audio_merge.read_pcm(p)
+            res = audio_vad_trim.trim_pcm_for_merge(
+                pcm, n, edge_pad_ms=edge, max_internal_gap_ms=max_gap,
+            )
+        except Exception:
+            continue
+        trims[mid] = {
+            "lead_ms": int(res["lead_ms"]),
+            "new_duration_ms": int(res["new_duration_ms"]),
+            "segments": res["segments"],
+        }
+    return trims
 
 
 @router.post(
@@ -1110,7 +1160,7 @@ async def create_group_api(
     # known before the DB insert (mirrors captures_store).
     gid = _uuid.uuid4().hex
     transcript = _build_default_transcript(captures, payload.join_strategy)
-    duration_ms, hashes, lead_trim_ms, trail_trim_ms = _build_merged_wav(
+    duration_ms, hashes, member_trims = _build_merged_wav(
         gid=gid,
         member_paths=member_paths,
         member_ids=member_ids,
@@ -1138,8 +1188,7 @@ async def create_group_api(
             member_hash_map=hashes,
             duration_ms=duration_ms,
             language=group_language,
-            lead_trim_ms=lead_trim_ms,
-            trail_trim_ms=trail_trim_ms,
+            member_trims=member_trims,
         )
     except Exception:
         # Insert failed — roll back the WAV we just wrote so the
@@ -1179,11 +1228,16 @@ async def preview_merge_audio_api(
 
     # tempfile.NamedTemporaryFile(delete=False) so FileResponse can stream
     # the closed file; background unlink fires after the response finishes.
+    import config as cfg
     fd, tmp_path = tempfile.mkstemp(prefix="preview_merge_", suffix=".wav")
     os.close(fd)
     try:
         audio_merge.merge_wavs(
             member_paths, tmp_path, gap_ms=payload.silence_ms,
+            trim=bool(getattr(cfg, "CAPTURES_VAD_TRIM_ENABLED_FOR_GROUPS", False)),
+            edge_pad_ms=int(getattr(cfg, "CAPTURES_VAD_GROUP_EDGE_PAD_MS", 50)),
+            max_internal_gap_ms=int(
+                getattr(cfg, "CAPTURES_VAD_GROUP_MAX_INTERNAL_GAP_MS", 300)),
         )
     except audio_merge.WavFormatError as e:
         try: os.unlink(tmp_path)
@@ -1228,10 +1282,13 @@ async def preview_merge_words_api(
     Pure CPU; no rate-limit (bounded by ≤30 members × few hundred words +
     memoized per-word _postprocess_text). Same validation gates as the
     audio endpoint."""
-    captures, _owner, _member_paths, _total_audio_ms = (
+    captures, _owner, member_paths, _total_audio_ms = (
         _validate_merge_payload(payload.member_ids, payload.silence_ms, user)
     )
-    words = _build_merged_words(captures, payload.silence_ms)
+    words = _build_merged_words(
+        captures, payload.silence_ms,
+        member_trims=_preview_member_trims(payload.member_ids, member_paths),
+    )
     return JSONResponse({
         "words": words,
         "corrections": _project_member_corrections(captures),
@@ -1290,8 +1347,7 @@ def _insert_group_with_gid(
     member_hash_map: dict[str, str],
     duration_ms: int,
     language: str | None = None,
-    lead_trim_ms: int = 0,
-    trail_trim_ms: int = 0,
+    member_trims: dict[str, Any] | None = None,
 ) -> None:
     """Direct insert that honours a pre-allocated gid (needed because the
     audio file is written at the gid path before this call).
@@ -1312,16 +1368,16 @@ def _insert_group_with_gid(
                 "  merged_duration_ms, transcript,"
                 "  transcript_join_strategy, member_hashes_json,"
                 "  inter_segment_silence_ms, is_stale, is_locked,"
-                "  language, merged_lead_trim_ms, merged_trail_trim_ms)"
-                " VALUES (?,?,?,?,?,?,?,?,?,0,0,?,?,?)",
+                "  language, merged_lead_trim_ms, merged_trail_trim_ms,"
+                "  member_trims_json)"
+                " VALUES (?,?,?,?,?,?,?,?,?,0,0,?,0,0,?)",
                 (
                     gid, user_id, now, relpath, int(duration_ms),
                     transcript, join_strategy,
                     json.dumps(member_hash_map, sort_keys=True),
                     int(silence_ms),
                     language or None,
-                    int(lead_trim_ms or 0),
-                    int(trail_trim_ms or 0),
+                    json.dumps(member_trims or {}, sort_keys=True),
                 ),
             )
             for order, mid in enumerate(member_ids):
@@ -1489,6 +1545,7 @@ def _enrich_group(g: dict[str, Any]) -> dict[str, Any]:
     g["corrections"] = _project_member_corrections(members)
     g["merged_words"] = _build_merged_words(
         members, int(g["inter_segment_silence_ms"]),
+        member_trims=g.get("member_trims") or {},
         merged_lead_trim_ms=int(g.get("merged_lead_trim_ms") or 0),
         merged_duration_ms=int(g.get("merged_duration_ms") or 0),
     )
@@ -1686,78 +1743,160 @@ def _clone_word(w: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _remap_time_ms(tm: float, segments: list[list[int]]) -> float:
+    """Map an original member-time (ms) onto trimmed member-local time (ms)
+    via the per-member kept-speech `segments` list
+    ([orig_start_ms, orig_end_ms, new_start_ms], ascending). A time inside a
+    kept span maps linearly; a time in a dropped/collapsed silence region
+    snaps to the nearest span boundary (words live in speech, so this only
+    fires on the rare straddle/rounding case)."""
+    if not segments:
+        return tm
+    if tm <= segments[0][0]:
+        return float(segments[0][2])
+    for os_ms, oe_ms, ns_ms in segments:
+        if tm <= oe_ms:
+            if tm >= os_ms:
+                return float(ns_ms + (tm - os_ms))
+            return float(ns_ms)  # in collapsed gap before this span
+    last = segments[-1]
+    return float(last[2] + (last[1] - last[0]))  # past the last span
+
+
+def _emit_member_words(
+    merged: list[dict[str, Any]],
+    ws: list[dict[str, Any]],
+    *,
+    i: int,
+    member_offset_s: float,
+    eff_dur_s: float | None,
+    segments: list[list[int]] | None,
+) -> None:
+    """Append member i's aligned words to `merged`, placed on the merged
+    timeline. When `segments` is given, each word's original time is remapped
+    through the per-member trim map first (per-member trimming); otherwise the
+    legacy flat offset is used."""
+    for w in ws:
+        start = w.get("start")
+        end = w.get("end", start)
+        word = w.get("word", "")
+        if start is None or end is None:
+            continue
+        if segments is None:
+            s_new = float(start) + member_offset_s
+            e_new = float(end) + member_offset_s
+        else:
+            s_new = _remap_time_ms(float(start) * 1000.0, segments) / 1000.0 \
+                + member_offset_s
+            e_new = _remap_time_ms(float(end) * 1000.0, segments) / 1000.0 \
+                + member_offset_s
+        if e_new <= 0:
+            continue
+        if eff_dur_s is not None and s_new >= eff_dur_s:
+            continue
+        s_clamped = max(0.0, s_new)
+        e_clamped = e_new
+        if eff_dur_s is not None:
+            e_clamped = min(eff_dur_s, e_clamped)
+        entry = {
+            "word":       word,
+            "start":      s_clamped,
+            "end":        max(s_clamped, e_clamped),
+            "member_idx": i,
+        }
+        if w.get("raw_word"):
+            entry["raw_word"] = w["raw_word"]
+        if w.get("removed"):
+            entry["removed"] = True
+        merged.append(entry)
+
+
 def _build_merged_words(
     members: list[dict[str, Any]],
     silence_ms: int,
     *,
+    member_trims: dict[str, Any] | None = None,
     merged_lead_trim_ms: int = 0,
     merged_duration_ms: int | None = None,
 ) -> list[dict[str, Any]]:
     """Project each member's per-word timestamps onto the merged-audio
-    timeline. Member i starts at (Σ_{j<i} dur_j) + i × silence_s seconds —
-    i.e. cumulative member duration plus one silence gap PER preceding
-    member. start/end are returned in seconds (matches audio.currentTime
+    timeline. start/end are returned in seconds (matches audio.currentTime
     and the single-capture karaoke band's expectation).
 
-    When the merged WAV was VAD-trimmed at merge time, `merged_lead_trim_ms`
-    shifts produced times so the karaoke aligns with the trimmed audio
-    (trail trimming is captured via `merged_duration_ms` clamping):
-      - Subtract `merged_lead_trim_ms / 1000` from every word's start/end.
-      - Drop words whose interval falls entirely outside the trimmed
-        clip's [0, effective_duration_s] range; clamp partial overlaps.
-    Un-trimmed groups still run the same loop (offset has no lead term,
-    eff_dur_s == full duration), so no clamps/drops actually fire.
+    Two timelines, picked by whether `member_trims` is populated:
 
-    `get_members` strips heavy fields for the list view, so we re-fetch
-    each capture to get `words`. Each member's words then go through
-    `_align_words_to_final`, which runs `main._postprocess_text` per raw
-    word and LCS-aligns the result to `final` so the displayed text
-    matches what's in `final` / what gets exported. Cost is bounded —
-    ≤30 members, ≤a few hundred words total per ≤28 s group — and only
-    runs on expand."""
+    - Per-member trimming (new groups): each member was silence-trimmed
+      before concatenation, so member i starts at (Σ_{j<i} new_dur_j) +
+      i × silence_s, and each word's original time is remapped through that
+      member's kept-speech `segments` map. This is what keeps karaoke aligned
+      after the dead-air at member joins is removed.
+
+    - Legacy groups (member_trims empty): member i starts at (Σ_{j<i} dur_j) +
+      i × silence_s − merged_lead_trim_ms, using full member durations and the
+      single merged-WAV outer-edge offset — i.e. the original behaviour, so
+      pre-existing groups render exactly as before.
+
+    `get_members` strips heavy fields for the list view, so callers hydrate
+    `words` first. Each member's words go through `_align_words_to_final`
+    (LCS-align raw→final). Cost is bounded — ≤30 members, ≤a few hundred words
+    per ≤28 s group — and only runs on expand."""
     silence_s = max(0, int(silence_ms)) / 1000.0
-    lead_s = max(0, int(merged_lead_trim_ms or 0)) / 1000.0
     eff_dur_s: float | None = None
     if merged_duration_ms is not None:
-        # merged_duration_ms reflects the TRIMMED duration (we re-measure
-        # post-trim in audio_merge.merge_wavs), so use it directly.
         eff_dur_s = max(0.0, float(merged_duration_ms) / 1000.0)
     merged: list[dict[str, Any]] = []
+
+    use_per_member = bool(member_trims)
+    if use_per_member and eff_dur_s is None:
+        # Preview path: no stored merged duration — derive it from the
+        # per-member trimmed durations plus the inter-segment gaps.
+        n = len(members)
+        total_new_ms = 0.0
+        for m in members:
+            info = member_trims.get(m["id"]) if member_trims else None
+            if info and info.get("new_duration_ms") is not None:
+                total_new_ms += float(info["new_duration_ms"])
+            else:
+                total_new_ms += float(m.get("duration_seconds") or 0.0) * 1000.0
+        eff_dur_s = (total_new_ms + max(0, n - 1) * float(silence_ms)) / 1000.0
+
+    if use_per_member:
+        cum_ms = 0.0
+        for i, m in enumerate(members):
+            info = (member_trims or {}).get(m["id"])
+            if info and info.get("segments"):
+                segments = info["segments"]
+                new_dur_ms = float(info.get("new_duration_ms") or 0.0)
+            else:
+                # Member not in the trim map (shouldn't happen) → identity.
+                dur_ms = float(m.get("duration_seconds") or 0.0) * 1000.0
+                segments = [[0, int(dur_ms), 0]]
+                new_dur_ms = dur_ms
+            member_offset_s = cum_ms / 1000.0 + i * silence_s
+            ws = _align_words_to_final(
+                m.get("words") or [], m.get("final") or "",
+                model_name=m.get("model"),
+            )
+            _emit_member_words(
+                merged, ws, i=i, member_offset_s=member_offset_s,
+                eff_dur_s=eff_dur_s, segments=segments,
+            )
+            cum_ms += new_dur_ms
+        return merged
+
+    # Legacy path (no per-member trims): original flat-offset behaviour.
+    lead_s = max(0, int(merged_lead_trim_ms or 0)) / 1000.0
     cum = 0.0
     for i, m in enumerate(members):
-        offset = cum + i * silence_s - lead_s
+        member_offset_s = cum + i * silence_s - lead_s
         ws = _align_words_to_final(
-            m.get("words") or [],
-            m.get("final") or "",
+            m.get("words") or [], m.get("final") or "",
             model_name=m.get("model"),
         )
-        for w in ws:
-            start = w.get("start")
-            end = w.get("end", start)
-            word = w.get("word", "")
-            if start is None or end is None:
-                continue
-            s_new = float(start) + offset
-            e_new = float(end) + offset
-            if e_new <= 0:
-                continue
-            if eff_dur_s is not None and s_new >= eff_dur_s:
-                continue
-            s_clamped = max(0.0, s_new)
-            e_clamped = e_new
-            if eff_dur_s is not None:
-                e_clamped = min(eff_dur_s, e_clamped)
-            entry = {
-                "word":       word,
-                "start":      s_clamped,
-                "end":        max(s_clamped, e_clamped),
-                "member_idx": i,
-            }
-            if w.get("raw_word"):
-                entry["raw_word"] = w["raw_word"]
-            if w.get("removed"):
-                entry["removed"] = True
-            merged.append(entry)
+        _emit_member_words(
+            merged, ws, i=i, member_offset_s=member_offset_s,
+            eff_dur_s=eff_dur_s, segments=None,
+        )
         cum += float(m.get("duration_seconds") or 0.0)
     return merged
 
@@ -1844,12 +1983,12 @@ async def patch_group_api(
         # the same group) can't fire two merges writing to the same dst.
         members = _members()
         with _get_rebuild_lock(gid):
-            duration_ms, hashes, lead_trim_ms, trail_trim_ms = _build_merged_wav(
+            duration_ms, hashes, member_trims = _build_merged_wav(
                 gid=gid,
                 member_ids=[m["id"] for m in members],
                 silence_ms=int(patch["inter_segment_silence_ms"]),
             )
-        patch.update(_merged_wav_patch(duration_ms, hashes, lead_trim_ms, trail_trim_ms))
+        patch.update(_merged_wav_patch(duration_ms, hashes, member_trims))
 
     # Re-derive `transcript` from current members + chips ONLY when the
     # inputs that feed the derivation actually changed (corrections,
@@ -1891,13 +2030,13 @@ async def regenerate_group_api(
     _audit_cross_user_read(user, g, "group-regenerate", gid)
     members = capture_groups_store.get_members(gid)
     with _get_rebuild_lock(gid):
-        duration_ms, hashes, lead_trim_ms, trail_trim_ms = _build_merged_wav(
+        duration_ms, hashes, member_trims = _build_merged_wav(
             gid=gid,
             member_ids=[m["id"] for m in members],
             silence_ms=g["inter_segment_silence_ms"],
         )
         updated = capture_groups_store.update_group(
-            gid, _merged_wav_patch(duration_ms, hashes, lead_trim_ms, trail_trim_ms),
+            gid, _merged_wav_patch(duration_ms, hashes, member_trims),
         )
     return JSONResponse({"group": _enrich_group(updated)})
 
@@ -1992,13 +2131,13 @@ def _ensure_group_wav(g: dict[str, Any]) -> str:
             "[groups] gid=%s auto-rebuilding missing WAV from %d members",
             g["id"][:8], len(member_ids),
         )
-        duration_ms, hashes, lead_trim_ms, trail_trim_ms = _build_merged_wav(
+        duration_ms, hashes, member_trims = _build_merged_wav(
             gid=g["id"],
             member_ids=member_ids,
             silence_ms=int(g["inter_segment_silence_ms"]),
         )
         capture_groups_store.update_group(
-            g["id"], _merged_wav_patch(duration_ms, hashes, lead_trim_ms, trail_trim_ms),
+            g["id"], _merged_wav_patch(duration_ms, hashes, member_trims),
         )
     return abs_p
 

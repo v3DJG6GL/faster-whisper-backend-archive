@@ -72,7 +72,8 @@ CREATE TABLE IF NOT EXISTS capture_groups (
   admin_notes                 TEXT NOT NULL DEFAULT '',
   language                    TEXT,
   merged_lead_trim_ms         INTEGER NOT NULL DEFAULT 0,
-  merged_trail_trim_ms        INTEGER NOT NULL DEFAULT 0
+  merged_trail_trim_ms        INTEGER NOT NULL DEFAULT 0,
+  member_trims_json           TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS idx_capture_groups_user
   ON capture_groups(user_id, created_ts DESC);
@@ -103,6 +104,12 @@ _MIGRATIONS: tuple[str, ...] = (
     "INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE capture_groups ADD COLUMN merged_trail_trim_ms "
     "INTEGER NOT NULL DEFAULT 0",
+    # Per-member silence-trim map: {member_id: {lead_ms, new_duration_ms,
+    # segments:[[orig_start_ms, orig_end_ms, new_start_ms], ...]}}. Populated
+    # when a group is created/re-merged under per-member trimming; empty '{}'
+    # for legacy groups, which keep using merged_lead_trim_ms instead.
+    "ALTER TABLE capture_groups ADD COLUMN member_trims_json "
+    "TEXT NOT NULL DEFAULT '{}'",
 )
 
 _SCHEMA_POST_MIGRATIONS = """
@@ -229,6 +236,7 @@ def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "language":                    row["language"] or "",
         "merged_lead_trim_ms":         int(row["merged_lead_trim_ms"] or 0),
         "merged_trail_trim_ms":        int(row["merged_trail_trim_ms"] or 0),
+        "member_trims":                json.loads(row["member_trims_json"] or "{}"),
     }
 
 
@@ -297,8 +305,8 @@ def update_group(
     """Patch transcript / transcript_join_strategy /
     inter_segment_silence_ms / is_locked / is_stale /
     member_hashes_json / merged_duration_ms / status / admin_notes /
-    language / merged_lead_trim_ms / merged_trail_trim_ms. Returns the
-    updated row.
+    language / merged_lead_trim_ms / merged_trail_trim_ms /
+    member_trims_json. Returns the updated row.
 
     Chip state (the user-facing "corrections" list) is NOT on the
     group row — it's derived from members on every read. Patch chip
@@ -309,6 +317,7 @@ def update_group(
         "member_hashes_json", "merged_duration_ms",
         "status", "admin_notes", "language",
         "merged_lead_trim_ms", "merged_trail_trim_ms",
+        "member_trims_json",
     }
     sets: list[str] = []
     args: list[Any] = []

@@ -603,6 +603,17 @@ CAPTURES_PIPELINE_RULES_EXCLUDE: "set[str]" = {
 #   sample; original audio is preserved at audio_relpath either way).
 CAPTURES_VAD_TRIM_ENABLED_FOR_GROUPS = True
 CAPTURES_VAD_TRIM_MARGIN_MS = 300
+# Per-member group trim (CAPTURES_VAD_TRIM_ENABLED_FOR_GROUPS path): silence is
+# now trimmed from EVERY member before concatenation, not just the merged WAV's
+# outer edges. Without this, member i's trailing + the inter-segment gap +
+# member i+1's leading silence stacked into multi-second dead air at each join —
+# bad fine-tune data (silence-induced hallucination, wasted 30 s window).
+#   EDGE_PAD_MS        — silence kept on each member's outer edges (small pad so
+#                        tight VAD boundaries don't clip word onsets).
+#   MAX_INTERNAL_GAP_MS— internal silences inside a member are capped at this
+#                        (matches the inter-segment gap → uniform silence).
+CAPTURES_VAD_GROUP_EDGE_PAD_MS = 50
+CAPTURES_VAD_GROUP_MAX_INTERNAL_GAP_MS = 300
 
 
 # Auto-merge proposer (/captures "Auto-propose merges" panel) ---------------

@@ -74,18 +74,39 @@ def merge_wavs(
     dst_path: str,
     *,
     gap_ms: int = 300,
-) -> tuple[int, int, int, int]:
+    trim: bool = False,
+    edge_pad_ms: int = 50,
+    max_internal_gap_ms: int = 300,
+    threshold: float = 0.5,
+) -> dict:
     """Concatenate the given WAVs into a single PCM WAV at dst_path, with
     `gap_ms` of silence between each adjacent pair (no leading or
     trailing silence — the feature extractor zero-pads to 30 s anyway).
 
-    Returns `(bytes_written, n_samples, lead_trim_ms, trail_trim_ms)`.
+    When `trim` is set, each member's silence is trimmed *before*
+    concatenation (audio_vad_trim.trim_pcm_for_merge): outer edges down to
+    `edge_pad_ms`, internal gaps capped at `max_internal_gap_ms`. This is
+    what removes the multi-second dead air that used to stack up at member
+    joins (member i trailing + gap + member i+1 leading silence). The old
+    behaviour only trimmed the merged WAV's outer edges, so internal joins
+    were never cleaned.
 
-    The last two values are non-zero only when post-merge VAD trim
-    (cfg.CAPTURES_VAD_TRIM_ENABLED_FOR_GROUPS) ran and actually cut
-    silence. The route layer needs these to keep group word-level
-    timestamps in sync with the trimmed merged WAV — without them, the
-    karaoke band drifts for the first member's words.
+    Returns a dict:
+      {
+        "bytes":        int,           # size of the written WAV on disk
+        "n_samples":    int,           # total samples in the merged WAV
+        "duration_ms":  int,
+        "members": [                   # one entry per src_paths, in order
+          {"lead_ms": int, "new_duration_ms": int,
+           "segments": [[orig_start_ms, orig_end_ms, new_start_ms], ...]},
+          ...
+        ],
+      }
+
+    The per-member `segments` map is what the route layer persists
+    (member_trims_json) so group word-level karaoke timestamps stay in sync
+    with the trimmed audio. When `trim` is False (or VAD is unavailable) each
+    member carries an identity map over its full duration.
 
     Raises:
       WavFormatError: any source doesn't match (1ch, 16-bit, 16 kHz).
@@ -97,8 +118,17 @@ def merge_wavs(
     if gap_ms < 0:
         raise ValueError("gap_ms must be ≥ 0")
 
+    trimmer = None
+    if trim:
+        try:
+            import audio_vad_trim
+            trimmer = audio_vad_trim.trim_pcm_for_merge
+        except Exception as _e:  # pragma: no cover - import guard
+            logger.warning("[merge] per-member trim unavailable: %s", _e)
+
     pieces: list[bytes] = []
     total_samples = 0
+    members: list[dict] = []
     gap = silence_bytes(gap_ms)
     gap_samples = len(gap) // BYTES_PER_SAMPLE
 
@@ -106,6 +136,27 @@ def merge_wavs(
         pcm, n = read_pcm(sp)
         if n == 0:
             raise ValueError(f"source {sp} is empty")
+        if trimmer is not None:
+            res = trimmer(
+                pcm, n,
+                edge_pad_ms=edge_pad_ms,
+                max_internal_gap_ms=max_internal_gap_ms,
+                threshold=threshold,
+            )
+            pcm = res["pcm"]
+            n = res["new_n_samples"]
+            members.append({
+                "lead_ms": int(res["lead_ms"]),
+                "new_duration_ms": int(res["new_duration_ms"]),
+                "segments": res["segments"],
+            })
+        else:
+            dur_ms = int(round(n * 1000 / _REQ_RATE))
+            members.append({
+                "lead_ms": 0,
+                "new_duration_ms": dur_ms,
+                "segments": [[0, dur_ms, 0]],
+            })
         if i > 0:
             pieces.append(gap)
             total_samples += gap_samples
@@ -161,36 +212,16 @@ def merge_wavs(
             pass
         raise
 
-    # Optional: trim leading/trailing silence from the merged WAV via
-    # Silero VAD. Same disk path is overwritten (merged WAV is already
-    # derivative; the un-trimmed version isn't independently useful).
-    # On VAD unavailability or no-speech, we keep the merged-as-written
-    # WAV. After a successful trim we re-measure the sample count so
-    # capture_groups.merged_duration_ms reflects the trimmed length AND
-    # propagate the lead/trail offsets so the route layer can shift
-    # per-member word timestamps to match.
-    lead_trim_ms = 0
-    trail_trim_ms = 0
-    try:
-        import config as _cfg
-        if getattr(_cfg, "CAPTURES_VAD_TRIM_ENABLED_FOR_GROUPS", False):
-            import audio_vad_trim
-            margin_ms = int(getattr(_cfg, "CAPTURES_VAD_TRIM_MARGIN_MS", 300))
-            result = audio_vad_trim.trim_wav(
-                dst_path, dst_path, margin_ms=margin_ms,
-            )
-            if result and result.get("trimmed"):
-                lead_trim_ms = int(result.get("lead_ms") or 0)
-                trail_trim_ms = int(result.get("trail_ms") or 0)
-                # trim_wav returns post-trim duration; derive samples from
-                # that instead of re-opening the WAV we just wrote.
-                total_samples = int(
-                    int(result.get("new_duration_ms") or 0) * _REQ_RATE / 1000
-                )
-    except Exception as _ve:
-        logger.warning("[merge] VAD trim skipped: %s", _ve)
-
-    return os.path.getsize(dst_path), total_samples, lead_trim_ms, trail_trim_ms
+    # Silence trimming now happens per-member BEFORE concatenation (above),
+    # so the merged WAV needs no separate outer trim: member 0's leading and
+    # the last member's trailing silence were already cut, and internal joins
+    # carry only the bounded inter-segment gap.
+    return {
+        "bytes": os.path.getsize(dst_path),
+        "n_samples": total_samples,
+        "duration_ms": int(round(total_samples * 1000 / _REQ_RATE)),
+        "members": members,
+    }
 
 
 def hash_wav_pcm(src_path: str) -> str:

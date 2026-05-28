@@ -190,3 +190,150 @@ def trim_wav(
         "orig_duration_ms": orig_duration_ms,
         "new_duration_ms": new_duration_ms,
     }
+
+
+def _samples_to_ms(samples: int) -> int:
+    return int(round(samples * 1000 / _REQ_RATE))
+
+
+def trim_pcm_for_merge(
+    pcm: bytes,
+    n_samples: int,
+    *,
+    edge_pad_ms: int = 50,
+    max_internal_gap_ms: int = 300,
+    threshold: float = 0.5,
+) -> dict:
+    """Plan + apply a per-member silence trim for the group merge path.
+
+    Unlike `trim_wav` (singleton button: outer leading/trailing only), this
+    trims a member's outer edges down to `edge_pad_ms` AND collapses any
+    internal silence longer than `max_internal_gap_ms` down to that cap. The
+    result feeds `audio_merge.merge_wavs`, which then joins trimmed members
+    with the inter-segment gap — so all silence in the final clip is uniform
+    and bounded (the multi-second dead air at member joins is removed).
+
+    Operates on in-memory PCM only; the caller never touches the original
+    capture file on disk (so ungroup still restores raw audio).
+
+    Returns:
+      {
+        "trimmed":          bool,        # True iff any silence was removed
+        "pcm":              bytes,       # trimmed PCM (orig pcm when not trimmed)
+        "new_n_samples":    int,
+        "lead_ms":          int,         # leading silence removed (info)
+        "new_duration_ms":  int,
+        "segments": [[orig_start_ms, orig_end_ms, new_start_ms], ...],
+      }
+
+    `segments` is the piecewise time-map from original member time to trimmed
+    member-local time — one entry per kept speech span. The route layer uses
+    it to re-place per-word karaoke timestamps. When nothing is trimmed (VAD
+    unavailable, no speech, or a clip already tight) the map is the identity
+    span `[[0, dur_ms, 0]]` so callers can treat every member uniformly.
+    """
+    orig_duration_ms = _samples_to_ms(n_samples)
+
+    def _identity() -> dict:
+        return {
+            "trimmed": False,
+            "pcm": pcm,
+            "new_n_samples": n_samples,
+            "lead_ms": 0,
+            "new_duration_ms": orig_duration_ms,
+            "segments": [[0, orig_duration_ms, 0]],
+        }
+
+    if n_samples == 0:
+        return _identity()
+
+    try:
+        import numpy as np
+        from faster_whisper.vad import VadOptions, get_speech_timestamps
+    except ImportError as e:
+        logger.warning(
+            "[vad-trim] faster_whisper.vad unavailable (%s); skipping "
+            "per-member trim", e,
+        )
+        return _identity()
+
+    audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+    opts = VadOptions(
+        threshold=float(threshold),
+        min_silence_duration_ms=200,
+        speech_pad_ms=0,
+        min_speech_duration_ms=0,
+    )
+    speeches = get_speech_timestamps(audio, opts, sampling_rate=_REQ_RATE)
+    if not speeches:
+        return _identity()
+
+    pad = max(0, int(edge_pad_ms)) * _REQ_RATE // 1000
+    max_gap = max(0, int(max_internal_gap_ms)) * _REQ_RATE // 1000
+
+    # Build kept spans in ORIGINAL samples. Each speech segment is padded by
+    # `pad` on both sides, clamped to the clip and to neighbouring segments so
+    # spans never overlap. Between two kept spans we keep at most `max_gap`
+    # silence; leading/trailing silence beyond `pad` is dropped.
+    bsps = audio_merge.BYTES_PER_SAMPLE
+    out_chunks: list[bytes] = []
+    segments: list[list[int]] = []
+    new_pos = 0          # cursor in trimmed-output samples
+    prev_kept_end = 0    # original-sample end of the previous kept span
+
+    for seg in speeches:
+        s = max(0, int(seg["start"]) - pad)
+        e = min(n_samples, int(seg["end"]) + pad)
+        # Don't let this span's padded start swallow audio already emitted by
+        # the previous span (overlapping pads on close segments).
+        if s < prev_kept_end:
+            s = prev_kept_end
+        if e <= s:
+            continue
+
+        if not segments:
+            # Leading: drop everything before the first kept span.
+            gap_keep = 0
+        else:
+            orig_gap = s - prev_kept_end
+            gap_keep = min(orig_gap, max_gap)
+            if gap_keep > 0:
+                # Emit `gap_keep` silence taken from the original gap bytes.
+                out_chunks.append(pcm[prev_kept_end * bsps:
+                                      (prev_kept_end + gap_keep) * bsps])
+                new_pos += gap_keep
+
+        seg_start_new = new_pos
+        out_chunks.append(pcm[s * bsps:e * bsps])
+        span_len = e - s
+        new_pos += span_len
+        segments.append([_samples_to_ms(s), _samples_to_ms(e),
+                         _samples_to_ms(seg_start_new)])
+        prev_kept_end = e
+
+    if not segments:
+        return _identity()
+
+    out_pcm = b"".join(out_chunks)
+    new_n = new_pos
+    new_duration_ms = _samples_to_ms(new_n)
+    lead_ms = _samples_to_ms(max(0, int(speeches[0]["start"]) - pad))
+
+    # Nothing meaningfully removed (under ~50 ms total) → identity, so the
+    # merge keeps the original PCM and a clean identity map.
+    if (n_samples - new_n) < int(_REQ_RATE * 0.05):
+        return _identity()
+
+    logger.info(
+        "[vad-trim] member: %d→%d ms over %d span(s) (edge_pad=%d, max_gap=%d)",
+        orig_duration_ms, new_duration_ms, len(segments),
+        edge_pad_ms, max_internal_gap_ms,
+    )
+    return {
+        "trimmed": True,
+        "pcm": out_pcm,
+        "new_n_samples": new_n,
+        "lead_ms": lead_ms,
+        "new_duration_ms": new_duration_ms,
+        "segments": segments,
+    }
