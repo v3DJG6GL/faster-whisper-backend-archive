@@ -164,13 +164,17 @@ NAV_CSS = """
   --help: #8b949e;
 }
 html { font-size: var(--fs-base); color-scheme: dark; }
-header .navrow { display: flex; gap: 0.25rem; }
-header .navlink { padding: 0.1875rem 0.625rem; border-radius: 4px; color: var(--dim);
-  text-decoration: none; font-size: var(--fs-sm); border: 1px solid transparent;
-  flex-shrink: 0; white-space: nowrap; }
+header .navrow { display: flex; align-items: center; gap: 0.25rem;
+  flex-wrap: wrap; row-gap: 0.25rem; min-width: 0; }
+header .navlink { padding: 0.3rem 0.7rem; border-radius: 6px; color: var(--dim);
+  text-decoration: none; font-size: var(--fs-sm); line-height: 1.2;
+  border: 1px solid transparent; flex-shrink: 0; white-space: nowrap;
+  transition: background .12s ease, color .12s ease; }
 header .navlink:hover { background: #21262d; color: var(--fg); }
-header .navlink.active { color: var(--bold); background: #21262d;
-  border-color: var(--border); }
+/* Active page: accent text + subtle filled pill (redundant cue, not colour-
+   only — server also sets aria-current="page"). */
+header .navlink.active { color: var(--cyan); background: #1f2630;
+  border-color: var(--border); font-weight: 600; }
 header .sevpill { font-size: var(--fs-xs); padding: 0.125rem 0.5rem; border-radius: 4px;
   border: 1px solid var(--border); color: var(--dim); text-decoration: none;
   display: inline-flex; gap: 0.25rem; align-items: baseline;
@@ -194,75 +198,77 @@ header .scale-picker {
   appearance: none; -webkit-appearance: none;
   flex-shrink: 0;
 }
-/* ---- Responsive header ----
-   The header is a single flex row that, at narrow widths or scaled-up
-   --fs-base, would otherwise push its right-edge items (save, status)
-   off-screen. We let it wrap onto multiple rows and shrink the title
-   intrinsically, with container queries dropping low-priority labels
-   before resorting to wrap. Container size queries are evaluated in
-   rem against the actual rendered header width, so they respect the
-   --fs-base scale token (unlike @media). */
-/* Shared header layout — every page renders the same flex row with
-   title · nav · pills · spacer · scale-picker · page-specific buttons.
-   Page-local CSS used to redeclare these; consolidated here so a single
-   change keeps every admin page consistent. */
-header { position: sticky; top: 0; background: var(--panel);
-  border-bottom: 1px solid var(--border); z-index: 10; padding: 0; }
-header > .header-inner { display: flex; gap: 0.75rem; align-items: center;
-  max-width: 68.75rem; margin: 0 auto; width: 100%;
-  padding: 0.5rem 0.875rem; box-sizing: border-box; }
-header .title { font-weight: 600; color: var(--bold);
-  white-space: nowrap; flex-shrink: 0; }
+/* ---- Two-tier sticky header (Carbon/Primer "global bar + page toolbar") ----
+   Row 1 .header-inner = GLOBAL BAR, identical on every page:
+     brand · │ · nav links ............ severity pills · scale picker
+   Row 2 .subbar = PAGE TOOLBAR, page-specific controls (search/filter on the
+     left, actions on the right). Omitted entirely on pages with no page
+     actions, so the global bar never changes shape between pages.
+   Container queries read in rem against the rendered header width, so they
+   respect the --fs-base scale token (unlike @media). Page-local CSS styles
+   `header button` / `header .pill`, which still match inside the subbar. */
+header { position: sticky; top: 0; z-index: 10;
+  background: var(--panel); border-bottom: 1px solid var(--border);
+  container-type: inline-size; container-name: hdr; }
 
-header { container-type: inline-size; container-name: hdr; }
-header > .header-inner { flex-wrap: wrap; row-gap: 0.4rem; }
-/* Spacer collapses to zero on a wrapped row; on a single row it still
-   does its "push the action cluster right" job. */
-header .spacer { flex: 1 1 0; min-width: 0; }
-/* Title may shrink and ellipsise instead of forcing the row to grow.
-   max-width caps how much it can take before truncating so it doesn't
-   dominate small windows. Overrides the page-local `flex-shrink: 0`
-   rule because NAV_CSS is injected later in the cascade. */
-header .title {
-  flex-shrink: 1; min-width: 0; max-width: 22rem;
-  overflow: hidden; text-overflow: ellipsis;
-}
-/* Brand lockup inside the header title: skewed-waveform mark + monospace
-   wordmark (faster=dim/whisper=bold) + green prompt + backend + page slug.
-   Mirrors the standalone logo; the mark scales with --fs-base via em. */
-header .title { display: inline-flex; align-items: center; gap: 0.5rem; }
-header .brand-mark { width: 1.55em; height: 1.55em; flex-shrink: 0; display: block; }
+/* row 1 — global bar */
+header .header-inner { display: flex; align-items: center; gap: 0.75rem;
+  flex-wrap: wrap; row-gap: 0.4rem;
+  max-width: 68.75rem; margin: 0 auto; width: 100%;
+  padding: 0.55rem 1rem; box-sizing: border-box; }
+header .title { display: inline-flex; align-items: center; gap: 0.5rem;
+  font-weight: 600; color: var(--bold); white-space: nowrap;
+  flex-shrink: 1; min-width: 0; max-width: 22rem; overflow: hidden; }
+header .brand-mark { width: 1.6em; height: 1.6em; flex-shrink: 0; display: block; }
 header .brand-word { font-family: var(--font-mono); font-weight: 700;
   letter-spacing: 0; white-space: nowrap; }
 header .brand-word .bw-a { color: var(--dim);  font-weight: 400; }
 header .brand-word .bw-b { color: var(--bold); font-weight: 700; }
 header .brand-word .bw-sep { color: var(--green); font-weight: 700; margin: 0 0.28em; }
 header .brand-word .bw-c { color: var(--dim);  font-weight: 400; }
-header .brand-slug { color: var(--dim); font-weight: 400; white-space: nowrap;
-  margin-left: 0.15em; }
-/* Status pill is informational; let it shrink and ellipsise. */
-header #status {
-  flex-shrink: 1; min-width: 0; max-width: 12rem;
-  overflow: hidden; text-overflow: ellipsis;
-}
-/* Wrap-anchor: zero-size sentinel placed before the action cluster.
-   Hidden by default; at stage 3 it expands to flex-basis:100% to force
-   the actions onto their own row, keeping title+nav+pills clean. */
-header .wrap-anchor { flex-basis: 0; height: 0; display: none; }
-/* Stage 1 (≤ 60rem): drop sevpill text label, keep the count. */
+/* the requested clear separation between logo and nav */
+header .brand-sep { flex-shrink: 0; width: 1px; align-self: stretch;
+  margin: 0.15rem 0.35rem; background: var(--border); }
+/* spacer pushes the utility cluster to the right edge */
+header .spacer { flex: 1 1 0; min-width: 0.5rem; }
+/* right-side utility cluster: severity pills + scale picker (same everywhere) */
+header .hdr-right { display: flex; align-items: center; gap: 0.5rem; flex-shrink: 0; }
+header .sevpills { display: inline-flex; align-items: center; gap: 0.25rem; }
+/* Square icon buttons (logout / reload …) — same chrome as text buttons via
+   the page-local `header button` rule, just sized to the glyph. Labels live
+   in title + aria-label so the icon stays accessible. */
+header .icon-btn { display: inline-flex; align-items: center; justify-content: center;
+  padding: 0.3rem; line-height: 0; }
+header .icon-btn svg { width: 1.1em; height: 1.1em; display: block; }
+header .icon-btn:hover { color: var(--cyan); }
+header .icon-btn:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
+/* `.auth-action` (the sign-out button) is hidden until a bearer exists; the
+   author rule must beat `.icon-btn { display:inline-flex }` for [hidden]. */
+header .auth-action[hidden] { display: none; }
+
+/* row 2 — page subbar (inset tray, darker than the global bar) */
+header .subbar { display: flex; align-items: center; gap: 0.6rem;
+  flex-wrap: wrap; row-gap: 0.4rem;
+  max-width: 68.75rem; margin: 0 auto; width: 100%;
+  padding: 0.5rem 1rem; box-sizing: border-box;
+  background: var(--bg); border-top: 1px solid var(--border); }
+header .subbar-left  { display: flex; align-items: center; gap: 0.5rem;
+  flex: 1 1 auto; min-width: 0; }
+header .subbar-right { display: flex; align-items: center; gap: 0.5rem;
+  flex: 0 0 auto; margin-left: auto; flex-wrap: wrap; row-gap: 0.4rem;
+  justify-content: flex-end; }
+header .subbar #filter { flex: 1 1 auto; min-width: 8rem; max-width: 32rem; }
+header .subbar .sep { align-self: stretch; width: 1px; background: var(--border);
+  margin: 0.1rem 0.15rem; }
+
+/* responsive: shed the sevpill word labels, then tighten nav + drop divider */
 @container hdr (max-width: 60rem) {
   header .sevpill .lbl { display: none; }
   header .sevpill { padding: 0.125rem 0.4rem; }
 }
-/* Stage 2 (≤ 46rem): hide informational status pill, tighten nav. */
-@container hdr (max-width: 46rem) {
-  header #status { display: none; }
-  header .navlink { padding: 0.1875rem 0.4rem; }
-}
-/* Stage 3 (≤ 36rem): drop logout, force action cluster to its own row. */
-@container hdr (max-width: 36rem) {
-  header #logout-btn { display: none; }
-  header .wrap-anchor { display: block; flex-basis: 100%; }
+@container hdr (max-width: 40rem) {
+  header .navlink { padding: 0.25rem 0.5rem; }
+  header .brand-sep { display: none; }
 }
 
 /* ---- Admin-only nav elements ----
@@ -405,6 +411,39 @@ SCALE_PICKER_HTML = (
     '<option value="18">120%</option>'
     '<option value="20">130%</option>'
     '</select>'
+)
+
+
+# Global sign-out button — the {{LOGOUT}} fragment, rendered into every page's
+# right-hand header utility cluster. Auth is one shared bearer in sessionStorage
+# (`whisper_api_key`) across all pages, so a single logout works everywhere; the
+# click handler + visibility toggle live in OPEN_MODE_BANNER_JS. Starts `hidden`
+# (class .auth-action) and is revealed only while a bearer exists. Icon-only to
+# save space, but with an authoritative title + aria-label (outward door-arrow).
+LOGOUT_BTN_HTML = (
+    '<button id="logout-btn" class="icon-btn auth-action" type="button" '
+    'title="Sign out" aria-label="Sign out" hidden>'
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>'
+    '<polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>'
+    '</svg></button>'
+)
+
+
+# Global reload button — the {{RELOAD}} fragment, in every page's right-hand
+# header utility cluster (left of logout). Wired in OPEN_MODE_BANNER_JS: pages
+# that expose a soft refresh set `window._pageReload` (config/keys re-fetch
+# their data); everywhere else it falls back to a full location.reload().
+# Always visible (a refresh is meaningful regardless of auth state).
+RELOAD_BTN_HTML = (
+    '<button id="reload-btn" class="icon-btn" type="button" '
+    'title="Reload" aria-label="Reload">'
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    '<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>'
+    '<path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>'
+    '</svg></button>'
 )
 
 
@@ -557,6 +596,44 @@ OPEN_MODE_BANNER_JS = r"""
   // Refresh on every login/logout. Each token-mutating site dispatches
   // `whisper:auth-changed` after writing sessionStorage.
   window.addEventListener('whisper:auth-changed', window._refreshAuthChrome);
+
+  // ---- Global sign-out ----
+  // Every page renders #logout-btn (.auth-action) in the header utility
+  // cluster. Auth is one shared bearer, so a single handler logs out from
+  // anywhere: clear the token, announce the change, reload (which re-shows
+  // the login card on /config + /config/api-keys, or the no-access landing
+  // elsewhere). Visibility tracks token presence so the control is hidden
+  // when logged out / in open mode.
+  function _syncAuthActions() {
+    var hasTok = false;
+    try { hasTok = !!(sessionStorage.getItem(TOKEN_KEY) || ''); } catch(_) {}
+    document.querySelectorAll('.auth-action').forEach(function(el){
+      el.hidden = !hasTok;
+    });
+  }
+  var _logoutBtn = document.getElementById('logout-btn');
+  if (_logoutBtn) {
+    _logoutBtn.addEventListener('click', function(){
+      try { sessionStorage.removeItem(TOKEN_KEY); } catch(_) {}
+      window.dispatchEvent(new Event('whisper:auth-changed'));
+      location.reload();
+    });
+  }
+  window.addEventListener('whisper:auth-changed', _syncAuthActions);
+  _syncAuthActions();
+
+  // ---- Global reload ----
+  // Every page renders #reload-btn in the header utility cluster. Pages that
+  // can refresh in place set `window._pageReload` (e.g. /config + /config/api-
+  // keys re-fetch their data); elsewhere we do a full page reload. Read at
+  // click time so the page's init can register the hook after this runs.
+  var _reloadBtn = document.getElementById('reload-btn');
+  if (_reloadBtn) {
+    _reloadBtn.addEventListener('click', function(){
+      if (typeof window._pageReload === 'function') { window._pageReload(); }
+      else { location.reload(); }
+    });
+  }
 
   // Initial page-load pass — replaces the old IIFE body.
   window._refreshAuthChrome();
@@ -1259,11 +1336,9 @@ def _nav_items(current: str) -> list[tuple[str, str, bool]]:
 
 
 def nav_html(current: str) -> str:
-    """Render the nav row + severity pills as an HTML fragment.
-
-    Pills link to /logs?filter=<level> so a click jumps to the relevant log
-    rows. Counts of zero render dimmed; non-zero render colored ("hot")."""
-    counts = severity_counts()
+    """Render the primary nav links as the {{NAV}} fragment. The severity
+    pills are rendered separately by sev_pills_html() ({{SEV_PILLS}}) so they
+    can live in the header's right-hand utility cluster."""
     # Two visibility tracks:
     #
     #   - "admin-only" — config + api-keys + sev pills. These stay all-or-
@@ -1286,25 +1361,36 @@ def nav_html(current: str) -> str:
     parts: list[str] = ['<span class="navrow">']
     for label, href, active in _nav_items(current):
         classes = ["navlink"]
+        extra_attr = ""
         if active:
             classes.append("active")
-        extra_attr = ""
+            extra_attr += ' aria-current="page"'
         if label in admin_only_labels:
             classes.append("admin-only")
         elif label in page_link_labels:
             classes.append("page-link")
-            extra_attr = f' data-page="{page_link_labels[label]}"'
+            extra_attr += f' data-page="{page_link_labels[label]}"'
         parts.append(
             f'<a class="{" ".join(classes)}" href="{href}"{extra_attr}>'
             f'{label}</a>'
         )
     parts.append("</span>")
+    return "".join(parts)
 
-    # Stable IDs let the SEV_POLLER_JS /sev tick update just the .n inner span
-    # without rebuilding the link (preserves focus/click state). The initial
-    # counts rendered here are a "best effort at page load" — the client takes
-    # over immediately, so they're correct for the first render and live
-    # thereafter.
+
+def sev_pills_html() -> str:
+    """Render the three severity-count pills (warn/err/crit) as the
+    {{SEV_PILLS}} fragment, grouped in a `.sevpills` wrapper for the header's
+    right-hand utility cluster. Split out of nav_html so the pills sit with
+    the other status/utility chrome (scale picker) rather than beside the
+    nav links.
+
+    Stable IDs let SEV_POLLER_JS update just the `.n` inner span on each /sev
+    tick without rebuilding the link (preserves focus/click state). The counts
+    rendered here are best-effort at page load; the client takes over
+    immediately, so they're correct for the first render and live thereafter."""
+    counts = severity_counts()
+    parts: list[str] = ['<span class="sevpills">']
     for level, key in (("warn", "WARNING"), ("err", "ERROR"), ("crit", "CRITICAL")):
         n = counts[level]
         cls = f"sevpill admin-only {level} {'hot' if n else 'zero'}"
@@ -1315,12 +1401,14 @@ def nav_html(current: str) -> str:
             f'<span class="lbl">{level}</span> '
             f'<span class="n">{n}</span></a>'
         )
+    parts.append("</span>")
     return "".join(parts)
 
 
 def render_page(template: str, current: str) -> str:
     """Substitute placeholders in a page template:
-      - {{NAV}}                  → nav row + severity pills
+      - {{NAV}}                  → primary nav links (left of global bar)
+      - {{SEV_PILLS}}            → severity pills (right utility cluster)
       - {{NAV_CSS}}              → shared header/scale-token CSS
       - {{SCALE_PICKER}}         → scale dropdown (header)
       - {{SCALE_PICKER_JS}}      → wire-up script (end of body)
@@ -1352,10 +1440,13 @@ def render_page(template: str, current: str) -> str:
     return (
         template
         .replace("{{NAV}}", nav_html(current))
+        .replace("{{SEV_PILLS}}", sev_pills_html())
         .replace("{{NAV_CSS}}", NAV_CSS)
         .replace("{{LOG_VIEWER_INITIAL_LINES}}", str(_log_initial))
         .replace("{{LOG_VIEWER_DOM_MAX}}", str(_log_dom))
         .replace("{{SCALE_PICKER}}", SCALE_PICKER_HTML)
+        .replace("{{RELOAD}}", RELOAD_BTN_HTML)
+        .replace("{{LOGOUT}}", LOGOUT_BTN_HTML)
         .replace("{{SCALE_PICKER_JS}}", SCALE_PICKER_JS)
         .replace(
             "{{SEV_POLLER_JS}}",
@@ -1457,18 +1548,16 @@ def _header_brand_for(current: str) -> str:
     """Build the branded header lockup substituted into every page's
     <span class="title"> via {{HEADER_BRAND}} (HTML — kept separate from
     the plain-text {{HEADER_TITLE}} used inside <title>). Renders the
-    waveform mark + compact wordmark `fasterwhisper › backend` + the page
-    slug. `current` values map via _HEADER_SLUG_BY_CURRENT; unknown ones
-    render the wordmark alone."""
-    slug = _HEADER_SLUG_BY_CURRENT.get(current, "")
-    slug_html = f'<span class="brand-slug">· {slug}</span>' if slug else ""
+    waveform mark + compact wordmark `fasterwhisper › backend`. The current
+    page is conveyed by the active nav link (aria-current), so the brand no
+    longer repeats it as a slug. `current` is unused but kept for a uniform
+    {{...}}-builder signature."""
     return (
         f"{_BRAND_MARK_SVG}"
         '<span class="brand-word">'
         '<span class="bw-a">faster</span><span class="bw-b">whisper</span>'
         '<span class="bw-sep">&gt;</span><span class="bw-c">backend</span>'
         "</span>"
-        f"{slug_html}"
     )
 
 

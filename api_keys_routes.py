@@ -449,15 +449,15 @@ _API_KEYS_HTML = r"""<!doctype html>
   reach it can use it. Generate the first admin key below.
 </div>
 
-<header><div class="header-inner">
-  <span class="title">{{HEADER_BRAND}}</span>
-  {{NAV}}
-  <span class="spacer"></span>
-  <span class="wrap-anchor"></span>
-  {{SCALE_PICKER}}
-  <button id="logout-btn" title="forget API key in this tab">logout</button>
-  <button id="reload-btn">reload</button>
-</div></header>
+<header>
+  <div class="header-inner">
+    <span class="title">{{HEADER_BRAND}}</span>
+    <span class="brand-sep" aria-hidden="true"></span>
+    {{NAV}}
+    <span class="spacer"></span>
+    <span class="hdr-right">{{SEV_PILLS}}{{SCALE_PICKER}}{{RELOAD}}{{LOGOUT}}</span>
+  </div>
+</header>
 
 <main>
   <div class="card">
@@ -1111,11 +1111,9 @@ _API_KEYS_HTML = r"""<!doctype html>
       .catch(function(e) { showToast(String(e.message || e), 'err'); });
   };
 
-  document.getElementById('reload-btn').onclick = load;
-  document.getElementById('logout-btn').onclick = function() {
-    setToken('');
-    location.reload();
-  };
+  // #logout-btn + #reload-btn are wired globally in OPEN_MODE_BANNER_JS;
+  // expose this page's soft refresh (re-fetch key list) as the reload hook.
+  window._pageReload = load;
 
   load();
 })();

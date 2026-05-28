@@ -3307,9 +3307,10 @@ _CAPTURES_HTML = r"""<!doctype html>
 <header>
   <div class="header-inner">
     <span class="title">{{HEADER_BRAND}}</span>
+    <span class="brand-sep" aria-hidden="true"></span>
     {{NAV}}
     <span class="spacer"></span>
-    {{SCALE_PICKER}}
+    <span class="hdr-right">{{SEV_PILLS}}{{SCALE_PICKER}}{{RELOAD}}{{LOGOUT}}</span>
   </div>
 </header>
 

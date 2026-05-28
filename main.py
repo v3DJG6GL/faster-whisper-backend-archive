@@ -2197,21 +2197,30 @@ _LOG_VIEWER_HTML = """<!doctype html>
   {{NAV_CSS}}
 </style></head>
 <body>
-<header><div class="header-inner">
-  <span class="title">{{HEADER_BRAND}}</span>
-  {{NAV}}
-  <input id="filter" type="text" placeholder="filter (case-insensitive substring)…">
-  <span class="log-zoom" title="zoom log content only">
-    <button id="log-zoom-out" type="button" aria-label="decrease log size">−</button>
-    <span id="log-zoom-pct">100%</span>
-    <button id="log-zoom-in" type="button" aria-label="increase log size">+</button>
-  </span>
-  <span class="wrap-anchor"></span>
-  {{SCALE_PICKER}}
-  <button id="pauseBtn">pause</button>
-  <button id="clearBtn">clear</button>
-  <span id="status" class="pill live">live</span>
-</div></header>
+<header>
+  <div class="header-inner">
+    <span class="title">{{HEADER_BRAND}}</span>
+    <span class="brand-sep" aria-hidden="true"></span>
+    {{NAV}}
+    <span class="spacer"></span>
+    <span class="hdr-right">{{SEV_PILLS}}{{SCALE_PICKER}}{{RELOAD}}{{LOGOUT}}</span>
+  </div>
+  <div class="subbar">
+    <div class="subbar-left">
+      <input id="filter" type="text" placeholder="filter (case-insensitive substring)…">
+    </div>
+    <div class="subbar-right">
+      <span class="log-zoom" title="zoom log content only">
+        <button id="log-zoom-out" type="button" aria-label="decrease log size">−</button>
+        <span id="log-zoom-pct">100%</span>
+        <button id="log-zoom-in" type="button" aria-label="increase log size">+</button>
+      </span>
+      <button id="pauseBtn">pause</button>
+      <button id="clearBtn">clear</button>
+      <span id="status" class="pill live">live</span>
+    </div>
+  </div>
+</header>
 <div id="load-older-row">
   <button id="loadOlderBtn" type="button" style="display:none;">Load older</button>
 </div>

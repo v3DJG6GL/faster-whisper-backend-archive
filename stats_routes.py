@@ -256,15 +256,21 @@ _STATS_VIEWER_HTML = r"""<!doctype html>
   }
 </style></head>
 <body>
-<header><div class="header-inner">
-  <span class="title">{{HEADER_BRAND}}</span>
-  {{NAV}}
-  <span class="spacer"></span>
-  <span class="wrap-anchor"></span>
-  {{SCALE_PICKER}}
-  <button id="reset-layout-btn" title="reset stats tile layout to defaults">↺ layout</button>
-  <span id="status" class="pill live">live</span>
-</div></header>
+<header>
+  <div class="header-inner">
+    <span class="title">{{HEADER_BRAND}}</span>
+    <span class="brand-sep" aria-hidden="true"></span>
+    {{NAV}}
+    <span class="spacer"></span>
+    <span class="hdr-right">{{SEV_PILLS}}{{SCALE_PICKER}}{{RELOAD}}{{LOGOUT}}</span>
+  </div>
+  <div class="subbar">
+    <div class="subbar-right">
+      <button id="reset-layout-btn" title="reset stats tile layout to defaults">↺ layout</button>
+      <span id="status" class="pill live">live</span>
+    </div>
+  </div>
+</header>
 
 <div id="grid" class="grid">
  <div class="grid-stack">

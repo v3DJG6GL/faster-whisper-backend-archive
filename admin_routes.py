@@ -1333,19 +1333,23 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
 </div>
 
 <div id="app-wrap" style="display:none">
-  <header><div class="header-inner">
-    <span class="title">{{HEADER_BRAND}}</span>
-    {{NAV}}
-    <span class="spacer"></span>
-    <span class="wrap-anchor"></span>
-    {{SCALE_PICKER}}
-    <button id="logout-btn" title="forget token in this tab">logout</button>
-    <button id="reload-btn">reload</button>
-    <button id="restart-btn" title="restart the WhisperAPI Windows Service">restart</button>
-    <button id="discard-btn" title="discard all unsaved changes" disabled>discard</button>
-    <button id="save-btn" class="primary" disabled>save</button>
-    <span id="status" class="pill">loading…</span>
-  </div></header>
+  <header>
+    <div class="header-inner">
+      <span class="title">{{HEADER_BRAND}}</span>
+      <span class="brand-sep" aria-hidden="true"></span>
+      {{NAV}}
+      <span class="spacer"></span>
+      <span class="hdr-right">{{SEV_PILLS}}{{SCALE_PICKER}}{{RELOAD}}{{LOGOUT}}</span>
+    </div>
+    <div class="subbar">
+      <div class="subbar-right">
+        <button id="restart-btn" title="restart the WhisperAPI Windows Service">restart</button>
+        <button id="discard-btn" title="discard all unsaved changes" disabled>discard</button>
+        <button id="save-btn" class="primary" disabled>save</button>
+        <span id="status" class="pill">loading…</span>
+      </div>
+    </div>
+  </header>
   <main id="main"></main>
 </div>
 
@@ -4197,12 +4201,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('login-token').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') $('login-btn').click();
   });
-  $('logout-btn').addEventListener('click', () => {
-    sessionStorage.removeItem(TOKEN_KEY);
-    window.dispatchEvent(new Event('whisper:auth-changed'));
-    showLogin();
-  });
-  $('reload-btn').addEventListener('click', loadState);
+  // #logout-btn + #reload-btn are wired globally in OPEN_MODE_BANNER_JS;
+  // expose this page's soft refresh (re-fetch config) as the reload hook.
+  window._pageReload = loadState;
   $('save-btn').addEventListener('click', save);
   $('discard-btn').addEventListener('click', () => {
     if (Object.keys(dirty).length === 0) return;

@@ -837,12 +837,17 @@ _QUICK_CONFIG_HTML = r"""<!doctype html>
 <header>
   <div class="header-inner">
     <span class="title">{{HEADER_BRAND}}</span>
+    <span class="brand-sep" aria-hidden="true"></span>
     {{NAV}}
     <span class="spacer"></span>
-    {{SCALE_PICKER}}
-    <button id="discard-btn" disabled>discard</button>
-    <button id="save-btn" class="primary" disabled>save</button>
-    <span id="status">loading…</span>
+    <span class="hdr-right">{{SEV_PILLS}}{{SCALE_PICKER}}{{RELOAD}}{{LOGOUT}}</span>
+  </div>
+  <div class="subbar">
+    <div class="subbar-right">
+      <button id="discard-btn" disabled>discard</button>
+      <button id="save-btn" class="primary" disabled>save</button>
+      <span id="status">loading…</span>
+    </div>
   </div>
 </header>
 
