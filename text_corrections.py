@@ -67,8 +67,8 @@ def three_way_merge_corrections(
       baseline — chips the client loaded with its GET (snapshot at T=0).
       edited   — chips the client wants after the user's edits (T=save).
       current  — chips currently in the DB (post any concurrent writes
-                 that landed between T=0 and T=save, e.g. report cascade
-                 or another admin saving from another tab).
+                 that landed between T=0 and T=save, e.g. another admin
+                 saving the same capture/group from another tab).
 
     Algorithm:
       Start from `current` (post-concurrent state). Then for each chip

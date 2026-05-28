@@ -139,8 +139,9 @@ class PatchCaptureIn(BaseModel):
     # Snapshot of `corrections` the client loaded with this capture.
     # When provided alongside `corrections`, the server applies a
     # three-way merge against the current DB state so a concurrent
-    # write (report cascade, another admin in another tab) doesn't
-    # get clobbered by the user's save. Omitted → legacy replace.
+    # write (another admin in another tab, or a group save touching this
+    # member) doesn't get clobbered by the user's save. Omitted → legacy
+    # replace.
     baseline_corrections: list[CorrectionIn] | None = None
     admin_notes: str | None = None
 
@@ -509,7 +510,8 @@ async def patch_capture_api(
         if payload.baseline_corrections is not None:
             # Three-way merge: apply the user's deltas to the current
             # DB state, not just replace. Protects against concurrent
-            # report cascades and cross-tab admin saves.
+            # cross-tab admin saves (and the same member edited from its
+            # group view).
             current = row.get("corrections") or []
             baseline = [c.model_dump() for c in payload.baseline_corrections]
             edited = text_corrections.three_way_merge_corrections(
@@ -1567,10 +1569,10 @@ def _enrich_group(g: dict[str, Any]) -> dict[str, Any]:
     member state.
 
     Source of truth for chips is each MEMBER's `corrections` list. With
-    every read going through this function, report cascades and direct
-    member-chip edits on /captures flow through to the group's
-    Corrections section automatically — no in-DB chip storage needed
-    at the group level."""
+    every read going through this function, member-chip edits on /captures
+    (the member's own singleton card, or another admin tab) flow through
+    to the group's Corrections section automatically — no in-DB chip
+    storage needed at the group level."""
     import capture_groups_store
     members = capture_groups_store.get_members(g["id"])
     _hydrate_members(members)
@@ -2032,9 +2034,9 @@ async def patch_group_api(
         # When the client also sends `baseline_corrections` (a snapshot
         # of what it loaded), apply a three-way merge against the
         # current member-projected chips BEFORE the split — that way a
-        # concurrent report cascade or cross-tab admin save isn't
-        # clobbered by the user's payload, and the user's deltas
-        # (additions, removals, edits) are applied on top.
+        # concurrent cross-tab admin save (or a member edited from its
+        # singleton /captures card) isn't clobbered by the user's payload,
+        # and the user's deltas (additions, removals, edits) apply on top.
         members_now = _members()
         edited = [c.model_dump() for c in payload.corrections]
         if payload.baseline_corrections is not None:
@@ -4621,8 +4623,8 @@ _CAPTURES_HTML = r"""<!doctype html>
         corrections: corrections,
         // Snapshot the server returned with the original GET. Lets the
         // server three-way-merge our edits against any concurrent
-        // writes (report cascade, another admin in another tab) so
-        // those changes survive.
+        // writes (another admin in another tab, or a group save touching
+        // this member) so those changes survive.
         baseline_corrections: state.baselineCorrections || [],
         admin_notes: state.adminNotes,
       };
@@ -6618,7 +6620,8 @@ _CAPTURES_HTML = r"""<!doctype html>
           // Frozen snapshot of the server's chip set at THIS moment.
           // Sent back with the next PATCH so the server can apply the
           // user's deltas on top of any concurrent member-chip writes
-          // (report cascades, cross-tab admin saves).
+          // (cross-tab admin saves, or a member edited from its singleton
+          // /captures card).
           groupState.baselineCorrections =
             JSON.parse(JSON.stringify(d.corrections || []));
           groupState.finalText = d.transcript || '';
