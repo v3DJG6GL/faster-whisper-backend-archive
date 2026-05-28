@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="static/logo.svg" alt="faster-whisper-backend logo" width="88" height="88">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="static/logo-lockup-dark.svg">
+    <img src="static/logo-lockup-light.svg" alt="faster-whisper-backend" width="420">
+  </picture>
 </p>
 
 # faster-whisper-backend
@@ -213,12 +216,22 @@ Edits land in **`config.local.json`** at the repo root (gitignored). See `config
 
 ## Brand
 
-The mark is an **audio waveform skewed forward** — *whisper* (the equalizer bars) meets *faster* (the rightward lean reads as motion / fast-forward) — on a rounded terminal-dark tile. The wordmark is a monospace lockup, `faster` (dim) + `whisper` (bold), with a green `>` prompt marking this as the **backend** service, distinct from the upstream [faster-whisper](https://github.com/SYSTRAN/faster-whisper) library it wraps.
+The mark is an **audio waveform skewed forward** — *whisper* (the equalizer bars) meets *faster* (the rightward lean reads as motion / fast-forward) — on a rounded terminal-dark tile. The wordmark is a monospace lockup, `faster` (dim) + `whisper` (bold), with a green `>` prompt marking this as the **backend** service, distinct from the upstream [faster-whisper](https://github.com/SYSTRAN/faster-whisper) library it wraps. The palette mirrors the WebUI's GitHub-dark theme — cyan `#79c0ff` → green `#7ee787` on `#0d1117`.
 
-The palette mirrors the WebUI's GitHub-dark theme — cyan `#79c0ff` → green `#7ee787` on `#0d1117`, monospace wordmark. The same mark is the favicon and sits in the sticky header of every admin page. Assets live in `static/`:
+**Lockups & variants** — each designed to work on dark *and* light backgrounds:
+
+- **Primary lockup** — mark + stacked wordmark (`fasterwhisper` over `> BACKEND`); the hero above.
+- **Compact** — single line, `[mark] fasterwhisper > backend`, for headers and tight spaces. The admin WebUI's sticky header uses this form.
+- **Icon only** — the waveform tile alone (favicon, app tile, anything ≤ ~80 px).
+- **Monochrome** — single-colour, tile-less bars for one-colour or print contexts.
+
+**Type spec:** monospace throughout; hierarchy carried by weight + value (no rainbow of colours); the green `>` is the wordmark's only accent so the colour lives in the mark; the `BACKEND` sub-label is tracked caps at ~50 % cap-height. The same mark is the favicon and sits in the sticky header of every admin page.
+
+Assets (`static/`):
 
 | File | Use |
 | --- | --- |
+| `logo-lockup-dark.svg` / `logo-lockup-light.svg` | primary lockup, theme-adaptive (used in this README) |
 | `logo.svg` | full icon mark (scalable) |
 | `favicon.svg` | simplified 3-bar mark for small sizes |
 | `favicon.ico`, `favicon-16.png`, `favicon-32.png`, `apple-touch-icon.png` | raster fallbacks (Safari / legacy) |
