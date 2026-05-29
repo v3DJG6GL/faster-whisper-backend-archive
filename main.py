@@ -141,7 +141,15 @@ from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request, Dep
 # (no admin key in DB) it returns the synthetic admin so the operator can
 # bootstrap; in locked-down mode it 401s on missing/invalid bearer.
 from auth import Permissions, get_current_user as _get_current_user_dep
-from faster_whisper import WhisperModel
+
+# faster_whisper pulls the heavy native stack (ctranslate2/onnxruntime/av). It is
+# imported lazily at first model load (see _get_or_load_model) so this module
+# stays importable for tests/tooling/template rendering on a box without the CUDA
+# stack installed. TYPE_CHECKING keeps the WhisperModel annotation resolvable for
+# type checkers without importing it at runtime.
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from faster_whisper import WhisperModel
 
 
 # =============================================================================
@@ -1029,7 +1037,10 @@ async def _ensure_ct2_model(name: str) -> str:
     return output_dir
 
 
-async def _get_or_load_model(name: str) -> WhisperModel:
+async def _get_or_load_model(name: str) -> "WhisperModel":
+    # Lazy import (see the TYPE_CHECKING note up top): only when a model is
+    # actually loaded do we need the native faster_whisper stack.
+    from faster_whisper import WhisperModel  # noqa: F401  (used in executor lambdas below)
     cached = _loaded_models.get(name)
     if cached is not None:
         # Tolerate the race against _drop_loaded_model from _idle_evictor
