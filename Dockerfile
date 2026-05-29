@@ -4,7 +4,7 @@
 #
 # GPU: build a derived image that also `pip install -r requirements-gpu.txt` and
 # run with `--gpus all` on an NVIDIA host (see README).
-FROM python:3.13-slim
+FROM python:3.14-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
