@@ -1,0 +1,45 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "customManagers:dockerfileVersions",
+    "customManagers:githubActionsVersions",
+    ":semanticCommits",
+    ":dependencyDashboard"
+  ],
+  "timezone": "Etc/UTC",
+  "labels": ["dependencies"],
+  "rangeStrategy": "bump",
+  "automerge": true,
+  "automergeStrategy": "squash",
+  "platformAutomerge": true,
+  "packageRules": [
+    {
+      "description": "Group all GitHub Actions bumps into one PR.",
+      "matchManagers": ["github-actions"],
+      "groupName": "github-actions"
+    },
+    {
+      "description": "Group the Python runtime + dev requirements (base / gpu / convert / dev) into one PR.",
+      "matchManagers": ["pip_requirements"],
+      "groupName": "python deps"
+    },
+    {
+      "description": "NVIDIA CUDA wheels: never cross the pinned major. main.py's Windows DLL preloader hardcodes cublas64_12 / cudnn64_9, so a major bump (cublas 13.x, cudnn 10.x) would silently break GPU inference. The <13 / <10 caps in requirements-gpu.txt already block this; this makes the intent explicit.",
+      "matchManagers": ["pip_requirements"],
+      "matchPackageNames": ["nvidia-cublas-cu12", "nvidia-cudnn-cu12"],
+      "matchUpdateTypes": ["major"],
+      "enabled": false
+    },
+    {
+      "description": "Major bumps require manual review — surface as checkboxes on the Dependency Dashboard, do not open the PR automatically, do not auto-merge. Minor/patch still flow through automerge gated by all-ci.",
+      "matchUpdateTypes": ["major"],
+      "automerge": false,
+      "dependencyDashboardApproval": true
+    }
+  ],
+  "vulnerabilityAlerts": {
+    "labels": ["security"],
+    "automerge": false
+  }
+}

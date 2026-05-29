@@ -29,3 +29,19 @@ jobs:
 
       - name: Run tests
         run: pytest -q
+
+  # Single, stable status check to require in the branch ruleset. Matrix legs
+  # ("tests (ubuntu-latest)", "tests (windows-latest)") expand/rename over time;
+  # this gate aggregates them so the required check name never changes. It fails
+  # unless EVERY matrix leg succeeded — so auto-merge (Renovate / GitHub) only
+  # proceeds when the whole suite is green on all platforms.
+  all-ci:
+    name: all-ci
+    if: always()
+    needs: [test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all test matrix legs to succeed
+        run: |
+          echo "test job aggregate result: ${{ needs.test.result }}"
+          test "${{ needs.test.result }}" = "success"
