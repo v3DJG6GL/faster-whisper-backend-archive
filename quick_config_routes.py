@@ -219,6 +219,44 @@ async def get_state(
     }
 
 
+@router.get(
+    "/usage",
+    dependencies=[
+        Depends(require_admin_host),
+        Depends(require_page("quick_config")),
+    ],
+)
+async def get_my_usage(
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    """The caller's OWN transcription usage (today + lifetime) for the
+    personal banner in the /quick-config subbar. Self-scoped: reads only the
+    authenticated user's user_id, so no admin scope is needed and no other
+    user's numbers are ever returned. Best-effort — any failure yields zeros
+    so the page never breaks.
+
+    'today' follows the UTC day boundary (usage_store buckets by UTC
+    epoch-day); for CET that flips ~01:00–02:00 local. Acceptable at the
+    rollup's day grain."""
+    zero = {"requests": 0, "errors": 0, "words": 0, "audio_s": 0.0}
+    uid = user.get("user_id") or ""
+    today = dict(zero)
+    total = dict(zero)
+    if uid:
+        try:
+            import usage_store
+            total = usage_store.totals_for_user(uid)
+            today = usage_store.totals_for_user(
+                uid, start_day=usage_store.today_epoch_day())
+        except Exception:
+            today, total = dict(zero), dict(zero)
+    return {
+        "username": user.get("username") or "",
+        "today": today,
+        "total": total,
+    }
+
+
 @router.post(
     "/state",
     dependencies=[
@@ -586,6 +624,18 @@ _QUICK_CONFIG_HTML = r"""<!doctype html>
   /* header / .header-inner / .title / page-toolbar controls (buttons,
      pills, the #status text) are all centralized in NAV_CSS. */
   main { padding: 1rem; max-width: 60rem; margin: 0 auto; }
+  /* Personal self-usage banner in the subbar's empty middle. Grows to fill,
+     truncates on narrow screens; the subbar's own flex-wrap drops it to its
+     own line when space is tight. */
+  header .subbar .qc-usage { flex: 1 1 auto; min-width: 0; text-align: center;
+    font-size: var(--fs-sm); color: var(--dim); white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; }
+  header .subbar .qc-usage:empty { display: none; }
+  .qc-usage .u-name { color: var(--bold); font-weight: 600; }
+  .qc-usage .u-sep { color: var(--dim); margin: 0 0.5rem; }
+  .qc-usage .u-num { font-family: var(--font-mono); }
+  .qc-usage .u-today { color: var(--cyan); }
+  .qc-usage .u-total { color: var(--fg); }
   .card { background: var(--panel); border: 1px solid var(--border);
     border-radius: 4px; padding: 0.75rem 1rem; margin-bottom: 0.75rem; }
   .card h3 { margin: 0 0 0.25rem 0; font-size: var(--fs-lg); color: var(--bold);
@@ -868,6 +918,7 @@ _QUICK_CONFIG_HTML = r"""<!doctype html>
   </div>
   <div class="subbar">
     <span class="subbar-title">Quick config</span>
+    <div class="qc-usage" id="qc-usage"></div>
     <div class="subbar-right">
       <button id="discard-btn" disabled>discard</button>
       <button id="save-btn" class="primary" disabled>save</button>
@@ -1975,6 +2026,51 @@ async function load() {
   syncReportedBadges();
   renderCards();
   updateButtons();
+  loadMyUsage();   // fire-and-forget; populates the subbar self-usage banner
+}
+
+// --- personal self-usage banner (subbar middle) ---------------------------
+function _uCount(n) {
+  n = Number(n || 0);
+  if (n >= 1e9) return (n / 1e9).toFixed(1).replace(/\.0$/, '') + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1).replace(/\.0$/, '') + 'k';
+  return String(Math.round(n));
+}
+function _uDur(sec) {
+  sec = Number(sec || 0);
+  if (sec < 60) return sec.toFixed(sec < 10 ? 1 : 0) + 's';
+  if (sec < 3600) return (sec / 60).toFixed(1).replace(/\.0$/, '') + 'm';
+  if (sec < 86400) return (sec / 3600).toFixed(1).replace(/\.0$/, '') + 'h';
+  return (sec / 86400).toFixed(1).replace(/\.0$/, '') + 'd';
+}
+function _uEsc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+async function loadMyUsage() {
+  const el = document.getElementById('qc-usage');
+  if (!el) return;
+  try {
+    const r = await api('GET', '/quick-config/usage');
+    if (!r.ok) { el.innerHTML = ''; return; }
+    const j = await r.json();
+    const name = '<span class="u-name">' + _uEsc(j.username || 'there') + '</span>';
+    const today = j.today || {}, total = j.total || {};
+    if (!total.requests) {
+      el.innerHTML = 'Hi ' + name + '<span class="u-sep">·</span>no transcriptions yet';
+      return;
+    }
+    const seg = (cls, n) =>
+      '<span class="u-num ' + cls + '">' + _uCount(n.words) + '</span> words '
+      + '<span class="u-num ' + cls + '">' + _uDur(n.audio_s) + '</span> audio';
+    el.innerHTML = 'Hi ' + name
+      + '<span class="u-sep">·</span>today ' + seg('u-today', today)
+      + '<span class="u-sep">·</span>total ' + seg('u-total', total);
+  } catch (_) {
+    el.innerHTML = '';
+  }
 }
 
 async function doSave() {

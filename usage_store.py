@@ -185,6 +185,33 @@ def totals_by_user(
     return {r["user_id"]: dict(r) for r in cur.fetchall()}
 
 
+def totals_for_user(
+    user_id: str,
+    *,
+    start_day: int | None = None,
+    end_day: int | None = None,
+) -> dict[str, Any]:
+    """Summed usage for one user over an optional [start_day, end_day] window.
+    Returns a zeros dict when the user has no rows (uses idx_usage_user_day).
+    Backs the per-user self-usage banner on /quick-config."""
+    conn = _require_conn()
+    where, params = _window_clause(start_day, end_day)
+    where = (where + " AND user_id = ?") if where else " WHERE user_id = ?"
+    params.append(user_id)
+    row = conn.execute(
+        "SELECT SUM(requests) AS requests, SUM(errors) AS errors,"
+        " SUM(words) AS words, SUM(audio_s) AS audio_s"
+        " FROM usage_daily" + where,
+        params,
+    ).fetchone()
+    return {
+        "requests": int((row["requests"] if row else 0) or 0),
+        "errors": int((row["errors"] if row else 0) or 0),
+        "words": int((row["words"] if row else 0) or 0),
+        "audio_s": float((row["audio_s"] if row else 0.0) or 0.0),
+    }
+
+
 def series(
     *,
     start_day: int | None = None,
