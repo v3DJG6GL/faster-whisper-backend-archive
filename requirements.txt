@@ -24,7 +24,7 @@ faster-whisper>=1.2.1
 # Auto-loads a local .env file at startup (config.py). Optional at runtime:
 # config.py guards the import, so a missing python-dotenv just disables .env
 # loading — real environment variables still work.
-python-dotenv>=1.0
+python-dotenv>=1.2.2
 
 # Admin /config + /stats observability. nvidia-ml-py is the canonical 2025+
 # NVML binding (the legacy `pynvml` PyPI package is now a deprecated shim that
