@@ -107,12 +107,16 @@ def test_coerce_override_value_types():
 
 def test_per_model_env_scanner_end_to_end(monkeypatch):
     # WHISPER_MODEL_OVERRIDE__<encoded id>__<FIELD> populates MODEL_OVERRIDES.
+    # NOTE: the encoded id is UPPERCASE on purpose. Windows normalises
+    # os.environ keys to uppercase, so a lowercase id in the var NAME would not
+    # round-trip there; an uppercase id is case-stable on every platform and
+    # still exercises the right-to-left "__" boundary scanner + _decode_model_id.
     monkeypatch.setenv(
-        "WHISPER_MODEL_OVERRIDE__org__SLASH__name__DOT__ct2__BEAM_SIZE", "7"
+        "WHISPER_MODEL_OVERRIDE__ORG__SLASH__NAME__DOT__CT2__BEAM_SIZE", "7"
     )
     try:
         importlib.reload(config)
-        assert config.MODEL_OVERRIDES.get("org/name.ct2", {}).get("BEAM_SIZE") == 7
+        assert config.MODEL_OVERRIDES.get("ORG/NAME.CT2", {}).get("BEAM_SIZE") == 7
     finally:
         monkeypatch.undo()
         importlib.reload(config)  # restore from the clean environment
