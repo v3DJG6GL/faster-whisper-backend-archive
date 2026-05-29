@@ -322,8 +322,8 @@ def test_proposer_trimmed_duration_and_caching(monkeypatch, tmp_path):
     monkeypatch.setattr(captures_store, "abs_audio_path", lambda rel: str(wav))
     monkeypatch.setattr(P.cfg, "CAPTURES_VAD_TRIM_ENABLED_FOR_GROUPS", True,
                         raising=False)
-    monkeypatch.setattr(P.cfg, "CAPTURES_VAD_GROUP_EDGE_PAD_MS", 50, raising=False)
-    monkeypatch.setattr(P.cfg, "CAPTURES_VAD_GROUP_MAX_INTERNAL_GAP_MS", 300,
+    monkeypatch.setattr(P.cfg, "CAPTURES_VAD_MARGIN_GROUP_EDGE_MS", 50, raising=False)
+    monkeypatch.setattr(P.cfg, "CAPTURES_VAD_MARGIN_GROUP_INTERNAL_MS", 300,
                         raising=False)
     P._TRIM_DUR_CACHE.clear()
 

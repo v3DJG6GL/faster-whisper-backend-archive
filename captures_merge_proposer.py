@@ -73,8 +73,8 @@ def trimmed_duration_s(row: dict[str, Any]) -> float:
     relpath = row.get("audio_relpath") or ""
     if not cid or not relpath:
         return raw
-    edge = int(getattr(cfg, "CAPTURES_VAD_GROUP_EDGE_PAD_MS", 50))
-    max_gap = int(getattr(cfg, "CAPTURES_VAD_GROUP_MAX_INTERNAL_GAP_MS", 300))
+    edge = int(getattr(cfg, "CAPTURES_VAD_MARGIN_GROUP_EDGE_MS", 300))
+    max_gap = int(getattr(cfg, "CAPTURES_VAD_MARGIN_GROUP_INTERNAL_MS", 300))
     try:
         import os
         import audio_merge

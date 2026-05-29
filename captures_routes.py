@@ -620,7 +620,7 @@ async def trim_capture_audio_api(
     dst_rel = f"{base}.trimmed{ext or '.wav'}"
     dst_abs = captures_store.abs_audio_path(dst_rel)
 
-    margin = int(getattr(cfg, "CAPTURES_VAD_TRIM_MARGIN_MS", 300))
+    margin = int(getattr(cfg, "CAPTURES_VAD_MARGIN_SINGLETON_MS", 300))
     try:
         result = audio_vad_trim.trim_wav(src_abs, dst_abs, margin_ms=margin)
     except Exception as e:
@@ -1076,9 +1076,9 @@ def _build_merged_wav(
         res = audio_merge.merge_wavs(
             member_paths, dst_abs, gap_ms=silence_ms,
             trim=bool(getattr(cfg, "CAPTURES_VAD_TRIM_ENABLED_FOR_GROUPS", False)),
-            edge_pad_ms=int(getattr(cfg, "CAPTURES_VAD_GROUP_EDGE_PAD_MS", 50)),
+            edge_pad_ms=int(getattr(cfg, "CAPTURES_VAD_MARGIN_GROUP_EDGE_MS", 300)),
             max_internal_gap_ms=int(
-                getattr(cfg, "CAPTURES_VAD_GROUP_MAX_INTERNAL_GAP_MS", 300)),
+                getattr(cfg, "CAPTURES_VAD_MARGIN_GROUP_INTERNAL_MS", 300)),
         )
     except audio_merge.WavFormatError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
@@ -1127,8 +1127,8 @@ def _preview_member_trims(
         return {}
     import audio_merge
     import audio_vad_trim
-    edge = int(getattr(cfg, "CAPTURES_VAD_GROUP_EDGE_PAD_MS", 50))
-    max_gap = int(getattr(cfg, "CAPTURES_VAD_GROUP_MAX_INTERNAL_GAP_MS", 300))
+    edge = int(getattr(cfg, "CAPTURES_VAD_MARGIN_GROUP_EDGE_MS", 300))
+    max_gap = int(getattr(cfg, "CAPTURES_VAD_MARGIN_GROUP_INTERNAL_MS", 300))
     trims: dict[str, Any] = {}
     for mid, p in zip(member_ids, member_paths):
         try:
@@ -1249,9 +1249,9 @@ async def preview_merge_audio_api(
         audio_merge.merge_wavs(
             member_paths, tmp_path, gap_ms=payload.silence_ms,
             trim=bool(getattr(cfg, "CAPTURES_VAD_TRIM_ENABLED_FOR_GROUPS", False)),
-            edge_pad_ms=int(getattr(cfg, "CAPTURES_VAD_GROUP_EDGE_PAD_MS", 50)),
+            edge_pad_ms=int(getattr(cfg, "CAPTURES_VAD_MARGIN_GROUP_EDGE_MS", 300)),
             max_internal_gap_ms=int(
-                getattr(cfg, "CAPTURES_VAD_GROUP_MAX_INTERNAL_GAP_MS", 300)),
+                getattr(cfg, "CAPTURES_VAD_MARGIN_GROUP_INTERNAL_MS", 300)),
         )
     except audio_merge.WavFormatError as e:
         try: os.unlink(tmp_path)

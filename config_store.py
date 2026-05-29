@@ -137,9 +137,9 @@ ENV_VAR_MAPPING: dict[str, str] = {
     # Captures: pipeline exclude + VAD trim
     "CAPTURES_PIPELINE_RULES_EXCLUDE": "WHISPER_CAPTURES_PIPELINE_RULES_EXCLUDE",
     "CAPTURES_VAD_TRIM_ENABLED_FOR_GROUPS": "WHISPER_CAPTURES_VAD_TRIM_ENABLED_FOR_GROUPS",
-    "CAPTURES_VAD_TRIM_MARGIN_MS": "WHISPER_CAPTURES_VAD_TRIM_MARGIN_MS",
-    "CAPTURES_VAD_GROUP_EDGE_PAD_MS": "WHISPER_CAPTURES_VAD_GROUP_EDGE_PAD_MS",
-    "CAPTURES_VAD_GROUP_MAX_INTERNAL_GAP_MS": "WHISPER_CAPTURES_VAD_GROUP_MAX_INTERNAL_GAP_MS",
+    "CAPTURES_VAD_MARGIN_SINGLETON_MS": "WHISPER_CAPTURES_VAD_MARGIN_SINGLETON_MS",
+    "CAPTURES_VAD_MARGIN_GROUP_EDGE_MS": "WHISPER_CAPTURES_VAD_MARGIN_GROUP_EDGE_MS",
+    "CAPTURES_VAD_MARGIN_GROUP_INTERNAL_MS": "WHISPER_CAPTURES_VAD_MARGIN_GROUP_INTERNAL_MS",
     # Structured fields — supplied as a JSON string (config.py parses+validates).
     # The per-model WHISPER_MODEL_OVERRIDE__<id>__<FIELD> convention still works
     # and merges on top of WHISPER_MODEL_OVERRIDES.
@@ -583,22 +583,22 @@ FIELD_DESCRIPTIONS: dict[str, str] = {
     "CAPTURES_VAD_TRIM_ENABLED_FOR_GROUPS":
         "When True, EVERY member of a group is silence-trimmed via Silero "
         "VAD before merge_wavs() concatenates them: outer edges down to "
-        "CAPTURES_VAD_GROUP_EDGE_PAD_MS and internal gaps capped at "
-        "CAPTURES_VAD_GROUP_MAX_INTERNAL_GAP_MS. Removes the multi-second "
+        "CAPTURES_VAD_MARGIN_GROUP_EDGE_MS and internal gaps capped at "
+        "CAPTURES_VAD_MARGIN_GROUP_INTERNAL_MS. Removes the multi-second "
         "dead air that used to stack up at member joins (member i trailing "
         "+ gap + member i+1 leading silence). Applies to newly created / "
         "re-merged groups; mitigates the hallucination failure mode in "
         "arXiv:2505.12969 (Calm-Whisper).",
-    "CAPTURES_VAD_TRIM_MARGIN_MS":
+    "CAPTURES_VAD_MARGIN_SINGLETON_MS":
         "Silence preserved on either side of detected speech for the "
         "singleton /captures \"Trim silence\" button (leading/trailing "
         "only). Default 300 ms. Group per-member trimming uses "
-        "CAPTURES_VAD_GROUP_EDGE_PAD_MS instead.",
-    "CAPTURES_VAD_GROUP_EDGE_PAD_MS":
-        "Per-member group trim: silence kept on each member's outer edges. "
-        "Small pad (default 50 ms) so tight VAD boundaries don't clip word "
-        "onsets. Bump if you hear clipped starts/ends in merged groups.",
-    "CAPTURES_VAD_GROUP_MAX_INTERNAL_GAP_MS":
+        "CAPTURES_VAD_MARGIN_GROUP_EDGE_MS instead.",
+    "CAPTURES_VAD_MARGIN_GROUP_EDGE_MS":
+        "Per-member group trim: silence kept on each member's outer edges "
+        "(default 300 ms) so tight VAD boundaries don't clip word onsets. "
+        "Lower for tighter merges; raise if you hear clipped starts/ends.",
+    "CAPTURES_VAD_MARGIN_GROUP_INTERNAL_MS":
         "Per-member group trim: internal silences inside a member are "
         "collapsed down to at most this many ms (default 300, matching the "
         "inter-segment gap so all silence in the merged clip is uniform).",
@@ -1023,9 +1023,9 @@ class AdminConfig(BaseModel):
         Field(max_length=64),
     ] | None = _F("CAPTURES_PIPELINE_RULES_EXCLUDE")
     CAPTURES_VAD_TRIM_ENABLED_FOR_GROUPS: bool | None = _F("CAPTURES_VAD_TRIM_ENABLED_FOR_GROUPS")
-    CAPTURES_VAD_TRIM_MARGIN_MS: Annotated[int, Field(ge=0, le=2000)] | None = _F("CAPTURES_VAD_TRIM_MARGIN_MS")
-    CAPTURES_VAD_GROUP_EDGE_PAD_MS: Annotated[int, Field(ge=0, le=2000)] | None = _F("CAPTURES_VAD_GROUP_EDGE_PAD_MS")
-    CAPTURES_VAD_GROUP_MAX_INTERNAL_GAP_MS: Annotated[int, Field(ge=0, le=2000)] | None = _F("CAPTURES_VAD_GROUP_MAX_INTERNAL_GAP_MS")
+    CAPTURES_VAD_MARGIN_SINGLETON_MS: Annotated[int, Field(ge=0, le=2000)] | None = _F("CAPTURES_VAD_MARGIN_SINGLETON_MS")
+    CAPTURES_VAD_MARGIN_GROUP_EDGE_MS: Annotated[int, Field(ge=0, le=2000)] | None = _F("CAPTURES_VAD_MARGIN_GROUP_EDGE_MS")
+    CAPTURES_VAD_MARGIN_GROUP_INTERNAL_MS: Annotated[int, Field(ge=0, le=2000)] | None = _F("CAPTURES_VAD_MARGIN_GROUP_INTERNAL_MS")
 
     @field_validator("LOG_FILE")
     @classmethod
