@@ -3,7 +3,9 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
+  workflow_dispatch:
 
 jobs:
   test:
@@ -57,3 +59,62 @@ jobs:
         run: |
           echo "test job aggregate result: ${{ needs.test.result }}"
           test "${{ needs.test.result }}" = "success"
+
+  # Build (and, off PRs, publish) the container image — only AFTER the test
+  # gate is green. `needs: [all-ci]` means this job is skipped whenever the
+  # suite fails, so a broken build never reaches ghcr.io. PRs build the image
+  # to validate the Dockerfile but do not push (forks lack packages: write and
+  # we don't want PRs clobbering published tags); push to main / a v* tag
+  # publishes.
+  build:
+    name: build image
+    needs: [all-ci]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Compute image name (ghcr requires lowercase)
+        id: img
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/faster-whisper-backend" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Buildx
+        # Retried: booting BuildKit pulls moby/buildkit from Docker Hub, which
+        # occasionally flakes on anonymous-pull rate limits.
+        uses: Wandalen/wretry.action@v3
+        with:
+          action: docker/setup-buildx-action@v4
+          attempt_limit: 3
+          attempt_delay: 15000
+
+      - name: Log in to GHCR
+        # Skipped for pull requests from forks, which cannot push packages.
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ steps.img.outputs.name }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=tag
+            type=sha,format=short
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
