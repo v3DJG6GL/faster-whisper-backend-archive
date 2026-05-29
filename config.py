@@ -12,7 +12,20 @@ Conventions:
 - Public symbols (no leading underscore) are intended to be edited.
 - Algorithm code (regex compilation, pipeline functions) lives in main.py.
 """
+import json
 import os
+
+# Load a local .env file (if present) before any os.environ reads below, so a
+# `cp .env.example .env` works for bare `python main.py` as well as Docker.
+# load_dotenv does NOT override variables already set in the real environment,
+# so an exported env var / docker-compose `environment:` still wins over .env.
+# Guarded: the app must still import if python-dotenv isn't installed.
+try:
+    from dotenv import load_dotenv as _load_dotenv
+
+    _load_dotenv()
+except ImportError:
+    pass
 
 
 # Directory holding this config file — used to anchor default paths for the
@@ -696,6 +709,12 @@ except ImportError:
 # Anything below here lets the env var win over the in-file default. Touch
 # only if you want to change the override syntax itself.
 
+# Collects "couldn't parse WHISPER_X=..." messages encountered while applying
+# env overrides at import time. main.py drains this AFTER logging is configured
+# (config.py runs too early to log), so a typo like WHISPER_BEAM_SIZE=ten is
+# surfaced as a warning rather than silently ignored. See main.py startup.
+_ENV_WARNINGS: list[str] = []
+
 def _truthy(s: str) -> bool:
     return s.strip().lower() in ("1", "true", "yes", "on")
 
@@ -706,6 +725,7 @@ def _env_int(name: str, current: int) -> int:
     try:
         return int(raw)
     except ValueError:
+        _ENV_WARNINGS.append(f"{name}={raw!r} is not a valid integer; keeping {current!r}")
         return current
 
 def _env_float(name: str, current: float) -> float:
@@ -715,6 +735,20 @@ def _env_float(name: str, current: float) -> float:
     try:
         return float(raw)
     except ValueError:
+        _ENV_WARNINGS.append(f"{name}={raw!r} is not a valid number; keeping {current!r}")
+        return current
+
+def _env_float_or_none(name: str, current: "float | None") -> "float | None":
+    """Like _env_float but an explicit empty string means None (disable)."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return current
+    if not raw.strip():
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        _ENV_WARNINGS.append(f"{name}={raw!r} is not a valid number; keeping {current!r}")
         return current
 
 def _env_bool(name: str, current: bool) -> bool:
@@ -748,86 +782,27 @@ def _env_csv_list(name: str, current: list[str]) -> list[str]:
         return current
     return [s.strip() for s in raw.split(",") if s.strip()]
 
-DEFAULT_MODEL = _env_str_passthrough("WHISPER_DEFAULT_MODEL", DEFAULT_MODEL)
+# --- Secrets: *_FILE indirection -------------------------------------------
+# For sensitive values, allow `WHISPER_<NAME>_FILE=/path` (Docker/K8s secrets,
+# kept out of `docker inspect` / /proc/<pid>/environ). If the *_FILE form is set
+# and the plain var is not, read+strip the file into os.environ so the normal
+# readers below (and the per-model loop) pick it up uniformly.
+for _secret in ("WHISPER_BOOTSTRAP_ADMIN_KEY", "WHISPER_USE_AUTH_TOKEN"):
+    _path = os.environ.get(_secret + "_FILE")
+    if _path and not os.environ.get(_secret):
+        try:
+            with open(_path, encoding="utf-8") as _fh:
+                os.environ[_secret] = _fh.read().strip()
+        except OSError as _exc:
+            _ENV_WARNINGS.append(f"{_secret}_FILE={_path!r} could not be read: {_exc}")
 
-_env_allowed = os.environ.get("WHISPER_ALLOWED_MODELS")
-if _env_allowed is not None:
-    ALLOWED_MODELS = {s.strip() for s in _env_allowed.split(",") if s.strip()}
 
-MAX_LOADED_MODELS = _env_int("WHISPER_MAX_LOADED_MODELS", MAX_LOADED_MODELS)
-MODEL_IDLE_TIMEOUT_S = _env_int("WHISPER_MODEL_IDLE_TIMEOUT_S", MODEL_IDLE_TIMEOUT_S)
-
-PRELOAD_MODELS = _env_csv_list("WHISPER_PRELOAD_MODELS", PRELOAD_MODELS)
-
-DEFAULT_PROMPT = _env_str_or_none("WHISPER_DEFAULT_PROMPT", DEFAULT_PROMPT)
-
-TRACE_ENABLED = _env_bool("WHISPER_TRACE", TRACE_ENABLED)
-
-LOG_FILE = _env_str_passthrough("WHISPER_LOG_FILE", LOG_FILE)
-LOG_VIEWER_INITIAL_LINES = _env_int(
-    "WHISPER_LOG_VIEWER_INITIAL_LINES", LOG_VIEWER_INITIAL_LINES)
-LOG_VIEWER_DOM_MAX = _env_int(
-    "WHISPER_LOG_VIEWER_DOM_MAX", LOG_VIEWER_DOM_MAX)
-
+# --- Non-AdminConfig constants (no WebUI row → not in ENV_VAR_MAPPING) -------
 ADMIN_UI_ENABLED = _env_bool("WHISPER_ADMIN_UI", ADMIN_UI_ENABLED)
-
-# --- API key auth -----------------------------------------------------------
 API_KEYS_DB = _env_str("WHISPER_API_KEYS_DB", API_KEYS_DB)
 BOOTSTRAP_ADMIN_KEY = _env_str("WHISPER_BOOTSTRAP_ADMIN_KEY", BOOTSTRAP_ADMIN_KEY)
-
-# Comma-separated CIDR/IP allowlists for /config and /stats. Empty string is
-# treated as "no override" (use the in-file / local.json value).
-ADMIN_ALLOWED_HOSTS = _env_csv_list("WHISPER_ADMIN_ALLOWED_HOSTS", ADMIN_ALLOWED_HOSTS) or ADMIN_ALLOWED_HOSTS
-STATS_ALLOWED_HOSTS = _env_csv_list("WHISPER_STATS_ALLOWED_HOSTS", STATS_ALLOWED_HOSTS) or STATS_ALLOWED_HOSTS
-
-
-# --- Reports store --------------------------------------------------------
-REPORTS_DB = _env_str("WHISPER_REPORTS_DB", REPORTS_DB)
-
-REPORTS_MAX = _env_int("WHISPER_REPORTS_MAX", REPORTS_MAX)
-REPORTS_RETENTION_DAYS = _env_int("WHISPER_REPORTS_RETENTION_DAYS", REPORTS_RETENTION_DAYS)
-REPORTS_ALLOW_USER_SUBMIT = _env_bool("WHISPER_REPORTS_ALLOW_USER_SUBMIT", REPORTS_ALLOW_USER_SUBMIT)
-
-
-# --- Recent transcriptions store ------------------------------------------
-RECENT_TRANSCRIPTIONS_DB = _env_str(
-    "WHISPER_RECENT_TRANSCRIPTIONS_DB", RECENT_TRANSCRIPTIONS_DB)
-RECENT_TRANSCRIPTIONS_MAX = _env_int(
-    "WHISPER_RECENT_TRANSCRIPTIONS_MAX", RECENT_TRANSCRIPTIONS_MAX)
-RECENT_TRANSCRIPTIONS_TTL_DAYS = _env_int(
-    "WHISPER_RECENT_TRANSCRIPTIONS_TTL_DAYS", RECENT_TRANSCRIPTIONS_TTL_DAYS)
-RECENT_TRANSCRIPTIONS_PAGE_SIZE = _env_int(
-    "WHISPER_RECENT_TRANSCRIPTIONS_PAGE_SIZE", RECENT_TRANSCRIPTIONS_PAGE_SIZE)
-RECENT_TRANSCRIPTIONS_PRUNE_EVERY = _env_int(
-    "WHISPER_RECENT_TRANSCRIPTIONS_PRUNE_EVERY", RECENT_TRANSCRIPTIONS_PRUNE_EVERY)
-STATS_RECENT_TX_DISPLAY = _env_int(
-    "WHISPER_STATS_RECENT_TX_DISPLAY", STATS_RECENT_TX_DISPLAY)
-
-
-# --- Usage rollup store ---------------------------------------------------
 USAGE_DB = _env_str("WHISPER_USAGE_DB", USAGE_DB)
 USAGE_RETENTION_DAYS = _env_int("WHISPER_USAGE_RETENTION_DAYS", USAGE_RETENTION_DAYS)
-
-
-# --- Captures (fine-tuning data store) ------------------------------------
-
-CAPTURE_RECORDINGS_ENABLED = _env_bool("WHISPER_CAPTURE_RECORDINGS_ENABLED", CAPTURE_RECORDINGS_ENABLED)
-
-CAPTURES_DB = _env_str("WHISPER_CAPTURES_DB", CAPTURES_DB)
-CAPTURES_DIR = _env_str("WHISPER_CAPTURES_DIR", CAPTURES_DIR)
-
-CAPTURES_MAX = _env_int("WHISPER_CAPTURES_MAX", CAPTURES_MAX)
-CAPTURES_MAX_MB = _env_int("WHISPER_CAPTURES_MAX_MB", CAPTURES_MAX_MB)
-CAPTURES_RETENTION_DAYS = _env_int("WHISPER_CAPTURES_RETENTION_DAYS", CAPTURES_RETENTION_DAYS)
-CAPTURE_RECORDINGS_SAMPLE_RATE = _env_float(
-    "WHISPER_CAPTURE_RECORDINGS_SAMPLE_RATE", CAPTURE_RECORDINGS_SAMPLE_RATE)
-CAPTURE_RECORDINGS_MIN_DURATION_SEC = _env_float(
-    "WHISPER_CAPTURE_RECORDINGS_MIN_DURATION_SEC", CAPTURE_RECORDINGS_MIN_DURATION_SEC)
-CAPTURE_RECORDINGS_MAX_DURATION_SEC = _env_float(
-    "WHISPER_CAPTURE_RECORDINGS_MAX_DURATION_SEC", CAPTURE_RECORDINGS_MAX_DURATION_SEC)
-CAPTURE_RECORDINGS_AUDIO_BYTES_HARD_LIMIT = _env_int(
-    "WHISPER_CAPTURE_RECORDINGS_AUDIO_BYTES_HARD_LIMIT", CAPTURE_RECORDINGS_AUDIO_BYTES_HARD_LIMIT)
-
 CAPTURES_PROPOSER_SESSION_GAP_S = _env_int(
     "WHISPER_CAPTURES_PROPOSER_SESSION_GAP_S", CAPTURES_PROPOSER_SESSION_GAP_S)
 CAPTURES_PROPOSER_MIN_CLIP_S = _env_float(
@@ -842,65 +817,116 @@ CAPTURES_PROPOSER_CACHE_TTL_S = _env_int(
     "WHISPER_CAPTURES_PROPOSER_CACHE_TTL_S", CAPTURES_PROPOSER_CACHE_TTL_S)
 
 
-# --- Advanced decode params -------------------------------------------------
+# --- Schema-driven env application for every AdminConfig field ---------------
+# ENV_VAR_MAPPING (config_store.py) is the single source of truth for which
+# AdminConfig field maps to which WHISPER_* var; the WebUI badges / greys out a
+# field iff its var is set. Here we apply each mapped var to the matching module
+# constant, coercing by the field's pydantic annotation so a new field becomes
+# env-configurable automatically (a test asserts the mapping stays complete).
+#
+# A few fields need bespoke handling and are skipped by the generic loop:
+#   _ENV_SPECIAL_CASES — set/list-with-keep-current / custom-default semantics
+#   _ENV_JSON_FIELDS    — structured values supplied as a JSON string
+# and a handful of string fields override the default empty-string behaviour
+# (the generic default for str is "empty → keep current").
+_ENV_SPECIAL_CASES = {
+    "ALLOWED_MODELS", "ADMIN_ALLOWED_HOSTS", "STATS_ALLOWED_HOSTS",
+    "CAPTURES_PIPELINE_RULES_EXCLUDE", "CONVERT_QUANTIZATION",
+}
+_ENV_JSON_FIELDS = {"PIPELINE_RULES", "MODEL_OVERRIDES"}
+_ENV_READER_OVERRIDES = {
+    # empty string CLEARS the value to None (disable the feature)
+    "DEFAULT_PROMPT": "str_or_none", "DEFAULT_HOTWORDS": "str_or_none",
+    "TEMPERATURE": "str_or_none", "SUPPRESS_TOKENS": "str_or_none",
+    "SUPPRESS_CHARS": "str_or_none", "DOWNLOAD_ROOT": "str_or_none",
+    "USE_AUTH_TOKEN": "str_or_none", "CONVERTED_MODELS_DIR": "str_or_none",
+    # empty string is PRESERVED as a literal value (e.g. "" prefix/suffix, or
+    # DEFAULT_LANGUAGE="" meaning auto-detect)
+    "DEFAULT_MODEL": "passthrough", "LOG_FILE": "passthrough",
+    "PREPEND_PUNCTUATIONS": "passthrough", "APPEND_PUNCTUATIONS": "passthrough",
+    "OUTPUT_PREFIX": "passthrough", "OUTPUT_SUFFIX": "passthrough",
+    "DEFAULT_LANGUAGE": "passthrough",
+    # Optional thresholds where an empty string disables the check (→ None)
+    "NO_SPEECH_THRESHOLD": "float_or_none", "LOG_PROB_THRESHOLD": "float_or_none",
+    "COMPRESSION_RATIO_THRESHOLD": "float_or_none",
+    "HALLUCINATION_SILENCE_THRESHOLD": "float_or_none",
+}
+_ENV_READER_FUNCS = {
+    "int": _env_int, "float": _env_float, "float_or_none": _env_float_or_none,
+    "bool": _env_bool, "str": _env_str, "str_or_none": _env_str_or_none,
+    "passthrough": _env_str_passthrough, "csv_list": _env_csv_list,
+}
 
-DEFAULT_HOTWORDS = _env_str_or_none("WHISPER_DEFAULT_HOTWORDS", DEFAULT_HOTWORDS)
-TEMPERATURE = _env_str_or_none("WHISPER_TEMPERATURE", TEMPERATURE)
 
-PATIENCE = _env_float("WHISPER_PATIENCE", PATIENCE)
-LENGTH_PENALTY = _env_float("WHISPER_LENGTH_PENALTY", LENGTH_PENALTY)
-REPETITION_PENALTY = _env_float("WHISPER_REPETITION_PENALTY", REPETITION_PENALTY)
-NO_REPEAT_NGRAM_SIZE = _env_int("WHISPER_NO_REPEAT_NGRAM_SIZE", NO_REPEAT_NGRAM_SIZE)
-PROMPT_RESET_ON_TEMPERATURE = _env_float(
-    "WHISPER_PROMPT_RESET_ON_TEMPERATURE", PROMPT_RESET_ON_TEMPERATURE)
-
-
-# --- Language detection -----------------------------------------------------
-
-MULTILINGUAL = _env_bool("WHISPER_MULTILINGUAL", MULTILINGUAL)
-LANGUAGE_DETECTION_THRESHOLD = _env_float(
-    "WHISPER_LANGUAGE_DETECTION_THRESHOLD", LANGUAGE_DETECTION_THRESHOLD)
-LANGUAGE_DETECTION_SEGMENTS = _env_int(
-    "WHISPER_LANGUAGE_DETECTION_SEGMENTS", LANGUAGE_DETECTION_SEGMENTS)
-
-
-# --- Anti-hallucination & token control -------------------------------------
-
-HALLUCINATION_SILENCE_THRESHOLD = _env_float(
-    "WHISPER_HALLUCINATION_SILENCE_THRESHOLD", HALLUCINATION_SILENCE_THRESHOLD)
-SUPPRESS_BLANK = _env_bool("WHISPER_SUPPRESS_BLANK", SUPPRESS_BLANK)
-
-SUPPRESS_TOKENS = _env_str_or_none("WHISPER_SUPPRESS_TOKENS", SUPPRESS_TOKENS)
-SUPPRESS_CHARS = _env_str_or_none("WHISPER_SUPPRESS_CHARS", SUPPRESS_CHARS)
-PREPEND_PUNCTUATIONS = _env_str_passthrough("WHISPER_PREPEND_PUNCTUATIONS", PREPEND_PUNCTUATIONS)
-APPEND_PUNCTUATIONS = _env_str_passthrough("WHISPER_APPEND_PUNCTUATIONS", APPEND_PUNCTUATIONS)
+def _env_reader_kind(field: str, current) -> str:
+    """Pick the reader for a field. Explicit overrides win; otherwise infer
+    from the current (post-local.json) value's Python type so a newly added
+    field is handled without touching this file."""
+    if field in _ENV_READER_OVERRIDES:
+        return _ENV_READER_OVERRIDES[field]
+    if isinstance(current, bool):  # bool before int (bool is an int subclass)
+        return "bool"
+    if isinstance(current, int):
+        return "int"
+    if isinstance(current, float):
+        return "float"
+    if isinstance(current, (list, set, frozenset)):
+        return "csv_list"
+    if current is None:
+        return "str_or_none"
+    return "str"  # plain string: empty → keep current (safe default)
 
 
-# --- Output wrappers --------------------------------------------------------
+try:
+    from config_store import AdminConfig as _AdminConfig
+    from config_store import ENV_VAR_MAPPING as _ENV_VAR_MAPPING
 
-OUTPUT_PREFIX = _env_str_passthrough("WHISPER_OUTPUT_PREFIX", OUTPUT_PREFIX)
-OUTPUT_SUFFIX = _env_str_passthrough("WHISPER_OUTPUT_SUFFIX", OUTPUT_SUFFIX)
+    for _field, _env in _ENV_VAR_MAPPING.items():
+        if _field in _ENV_SPECIAL_CASES or _field in _ENV_JSON_FIELDS:
+            continue
+        _cur = globals()[_field]
+        globals()[_field] = _ENV_READER_FUNCS[_env_reader_kind(_field, _cur)](_env, _cur)
+
+    # --- JSON-encoded structured fields (escape hatch) ----------------------
+    for _field in _ENV_JSON_FIELDS:
+        _raw = os.environ.get(_ENV_VAR_MAPPING[_field])
+        if _raw is None or not _raw.strip():
+            continue
+        try:
+            _parsed = json.loads(_raw)
+            # Validate then dump back to plain dicts/lists so the runtime shape
+            # matches config.local.json (load_overrides uses the same dump).
+            _validated = _AdminConfig.model_validate({_field: _parsed})
+            globals()[_field] = _validated.model_dump(exclude_none=True)[_field]
+        except Exception as _exc:  # noqa: BLE001 — never fail import over bad env
+            _ENV_WARNINGS.append(
+                f"{_ENV_VAR_MAPPING[_field]} is not valid JSON for {_field}: {_exc}")
+except ImportError:
+    # pydantic / config_store unavailable — fall back to bare in-file defaults.
+    pass
 
 
-# --- Load-time, hardware ----------------------------------------------------
+# --- Special-case readers (preserve exact legacy semantics) -----------------
+# ALLOWED_MODELS: CSV → set; explicit "" means an empty set ("any model passes").
+_env_allowed = os.environ.get("WHISPER_ALLOWED_MODELS")
+if _env_allowed is not None:
+    ALLOWED_MODELS = {s.strip() for s in _env_allowed.split(",") if s.strip()}
 
-DOWNLOAD_ROOT = _env_str_or_none("WHISPER_DOWNLOAD_ROOT", DOWNLOAD_ROOT)
+# CAPTURES_PIPELINE_RULES_EXCLUDE is stored/used as a set of rule slugs.
+_env_cap_excl = os.environ.get("WHISPER_CAPTURES_PIPELINE_RULES_EXCLUDE")
+if _env_cap_excl is not None:
+    CAPTURES_PIPELINE_RULES_EXCLUDE = {
+        s.strip() for s in _env_cap_excl.split(",") if s.strip()}
 
-LOCAL_FILES_ONLY = _env_bool("WHISPER_LOCAL_FILES_ONLY", LOCAL_FILES_ONLY)
+# Allowlists: empty string is treated as "no override" (keep in-file/local.json)
+# so the loopback-only default can't be wiped by an empty env var.
+ADMIN_ALLOWED_HOSTS = _env_csv_list("WHISPER_ADMIN_ALLOWED_HOSTS", ADMIN_ALLOWED_HOSTS) or ADMIN_ALLOWED_HOSTS
+STATS_ALLOWED_HOSTS = _env_csv_list("WHISPER_STATS_ALLOWED_HOSTS", STATS_ALLOWED_HOSTS) or STATS_ALLOWED_HOSTS
 
-USE_AUTH_TOKEN = _env_str_or_none("WHISPER_USE_AUTH_TOKEN", USE_AUTH_TOKEN)
-
-AUTO_CONVERT_HF_MODELS = _env_bool("WHISPER_AUTO_CONVERT_HF_MODELS", AUTO_CONVERT_HF_MODELS)
-
+# CONVERT_QUANTIZATION: explicit "" falls back to the library default float16.
 _env_convert_quant = os.environ.get("WHISPER_CONVERT_QUANTIZATION")
 if _env_convert_quant is not None:
     CONVERT_QUANTIZATION = _env_convert_quant or "float16"
-
-CONVERTED_MODELS_DIR = _env_str_or_none("WHISPER_CONVERTED_MODELS_DIR", CONVERTED_MODELS_DIR)
-
-CPU_THREADS = _env_int("WHISPER_CPU_THREADS", CPU_THREADS)
-NUM_WORKERS = _env_int("WHISPER_NUM_WORKERS", NUM_WORKERS)
-DEVICE_INDEX = _env_int("WHISPER_DEVICE_INDEX", DEVICE_INDEX)
 
 
 # --- Per-model overrides via env (WHISPER_MODEL_OVERRIDE__<id>__<FIELD>) ----

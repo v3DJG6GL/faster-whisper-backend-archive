@@ -71,6 +71,11 @@ _root.addHandler(SeverityCounter())
 
 logger = logging.getLogger("whisper-api")
 
+# Surface any env-var coercion problems collected while config.py was imported
+# (it runs before logging is configured, so it just stashes messages).
+for _msg in getattr(cfg, "_ENV_WARNINGS", ()):
+    logger.warning("config env override ignored: %s", _msg)
+
 
 # =============================================================================
 # Hugging Face token propagation
