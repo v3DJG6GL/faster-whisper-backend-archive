@@ -336,12 +336,11 @@ _STATS_VIEWER_HTML = r"""<!doctype html>
   .err-strip .seg.hot b { color: var(--red); }
   .empty { color: var(--dim); font-style: italic; }
   .hidden { display: none !important; }
-  /* Usage-over-time section — a standalone full-width panel below the
-     GridStack tiles (kept out of the draggable grid so its chart + table
-     don't fight the tile layout). */
-  .usage-wrap { padding: 0 0.875rem 1.25rem; max-width: 68.75rem;
-    margin: 0 auto; box-sizing: border-box; }
-  .usage-card { height: auto; overflow: visible; }
+  /* Usage-over-time tile — a full-width GridStack item. The card fills the
+     whole tile (height:100%) and the chart flexes to absorb any slack, so the
+     tile is never taller than the card (no dead clickable space below) and
+     resizing the tile grows/shrinks the chart. */
+  .usage-card { height: 100%; }
   .usage-toolbar { display: flex; flex-wrap: wrap; align-items: baseline;
     gap: 0.4rem 0.9rem; margin-bottom: 0.5rem; }
   .usage-toolbar h3 { margin: 0; }
@@ -359,7 +358,8 @@ _STATS_VIEWER_HTML = r"""<!doctype html>
   .seg-ctrl button:hover { color: var(--fg); }
   .seg-ctrl button.active { background: var(--panel); color: var(--cyan);
     font-weight: 600; }
-  .usage-chart { width: 100%; height: 14rem; min-width: 0; position: relative; }
+  .usage-chart { width: 100%; flex: 1 1 auto; min-height: 9rem; min-width: 0;
+    position: relative; }
   .usage-plot { width: 100%; height: 100%; min-width: 0; }
   .usage-note { color: var(--dim); font-size: var(--fs-xs);
     margin: 0.15rem 0 0.5rem; }
@@ -557,22 +557,9 @@ _STATS_VIEWER_HTML = r"""<!doctype html>
    </div></div>
   </div>
 
-  <!-- Recent transcriptions -->
-  <div class="grid-stack-item" gs-id="recent" gs-x="0" gs-y="21" gs-w="12" gs-h="6">
-   <div class="grid-stack-item-content"><div class="card">
-    <h3>Recent transcriptions (last <span id="rt-n">0</span>)</h3>
-    <table class="tbl"><thead><tr>
-      <th>when</th><th>model</th>
-      <th class="num">audio</th><th class="num">wall</th><th class="num">RTF</th>
-      <th class="num">words</th><th>status</th>
-    </tr></thead><tbody id="rt-rows"><tr><td colspan="7" class="empty">— no requests yet —</td></tr></tbody></table>
-   </div></div>
-  </div>
- </div>
-</div>
-
-<div class="usage-wrap">
-  <div class="card usage-card">
+  <!-- Usage over time -->
+  <div class="grid-stack-item" gs-id="usage" gs-x="0" gs-y="21" gs-w="12" gs-h="9">
+   <div class="grid-stack-item-content"><div class="card usage-card">
     <div class="usage-toolbar">
       <h3>Usage over time</h3>
       <span class="spacer"></span>
@@ -617,7 +604,20 @@ _STATS_VIEWER_HTML = r"""<!doctype html>
     </tr></thead><tbody id="usage-board-rows">
       <tr><td colspan="6" class="empty">— loading —</td></tr>
     </tbody></table>
+   </div></div>
   </div>
+  <!-- Recent transcriptions -->
+  <div class="grid-stack-item" gs-id="recent" gs-x="0" gs-y="30" gs-w="12" gs-h="6">
+   <div class="grid-stack-item-content"><div class="card">
+    <h3>Recent transcriptions (last <span id="rt-n">0</span>)</h3>
+    <table class="tbl"><thead><tr>
+      <th>when</th><th>model</th>
+      <th class="num">audio</th><th class="num">wall</th><th class="num">RTF</th>
+      <th class="num">words</th><th>status</th>
+    </tr></thead><tbody id="rt-rows"><tr><td colspan="7" class="empty">— no requests yet —</td></tr></tbody></table>
+   </div></div>
+  </div>
+ </div>
 </div>
 
 <script>
@@ -627,7 +627,7 @@ _STATS_VIEWER_HTML = r"""<!doctype html>
 // --- GridStack init: drag-to-reorder + click-to-resize tiles ---------------
 // Layout state persists in localStorage; [↺ layout] in the header clears it.
 // uPlot sparklines re-fit on resizestop via setSize().
-const GS_LAYOUT_KEY = 'whisper-stats-layout-v3';
+const GS_LAYOUT_KEY = 'whisper-stats-layout-v5';
 const grid = GridStack.init({
   column: 12,
   // String form so cells track --fs-base (the scale picker). At 100% scale,
