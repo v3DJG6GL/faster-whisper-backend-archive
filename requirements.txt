@@ -16,16 +16,16 @@
 #   # GPU (NVIDIA, Windows or Linux):  pip install -r requirements-gpu.txt
 #   # Running the tests:               pip install -r requirements-dev.txt
 
-fastapi>=0.125
-uvicorn[standard]>=0.38
-python-multipart>=0.0.21
-faster-whisper>=1.2
+fastapi>=0.136.3
+uvicorn[standard]>=0.48.0
+python-multipart>=0.0.29
+faster-whisper>=1.2.1
 
 # Admin /config + /stats observability. nvidia-ml-py is the canonical 2025+
 # NVML binding (the legacy `pynvml` PyPI package is now a deprecated shim that
 # re-exports from nvidia-ml-py). It is pure-Python and optional at runtime —
 # system_stats.py degrades gracefully when import fails or no NVIDIA GPU is
 # present (AMD GPU / CPU dev box / macOS).
-nvidia-ml-py>=12.560
-psutil>=6.0
-pydantic>=2.0
+nvidia-ml-py>=12.575.51
+psutil>=6.1.1
+pydantic>=2.13.4

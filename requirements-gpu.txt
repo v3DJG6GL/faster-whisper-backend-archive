@@ -8,5 +8,5 @@
 # the cudnn_*64_9.dll family) require cudnn 9.x. Bumping the major would
 # silently break GPU inference (silent CPU fallback). On Linux these provide
 # the matching .so libraries that ctranslate2 loads at runtime.
-nvidia-cublas-cu12>=12,<13
-nvidia-cudnn-cu12>=9,<10
+nvidia-cublas-cu12>=12.9.2.10,<13
+nvidia-cudnn-cu12>=9.22.0.52,<10

@@ -4,19 +4,19 @@
 # auto HF→CT2 conversion at runtime.
 
 # CT2's TransformersConverter loads the HF checkpoint via transformers.
-transformers>=4.40
+transformers>=4.57.6
 
 # transformers' from_pretrained() needs torch for tensor materialisation.
 # CPU-only is fine — conversion never touches CUDA.
-torch>=2.0
+torch>=2.12.0
 
 # Enables `low_cpu_mem_usage=True` and sharded loading; cuts peak RAM ~half.
-accelerate>=0.30
+accelerate>=0.34.2
 
 # huggingface_hub is already a transitive dep of faster-whisper, but listed
 # explicitly so the version pin is auditable here.
-huggingface_hub>=0.23
+huggingface_hub>=0.36.2
 
 # filelock is also already a transitive (via huggingface_hub); listed for
 # the same reason — we use it directly for cross-worker conversion locking.
-filelock>=3.13
+filelock>=3.29.0
