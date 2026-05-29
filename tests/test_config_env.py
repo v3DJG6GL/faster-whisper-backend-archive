@@ -255,11 +255,14 @@ def test_json_model_overrides_env(monkeypatch):
         _reload_with_env(
             monkeypatch,
             WHISPER_MODEL_OVERRIDES='{"large-v2": {"BEAM_SIZE": 4}}',
-            WHISPER_MODEL_OVERRIDE__large__DOT__v3__BEAM_SIZE="7",
+            # Uppercase id on purpose: Windows normalises os.environ keys to
+            # uppercase, so a lowercase id in the var NAME wouldn't round-trip
+            # there (same reason as test_per_model_env_scanner_end_to_end).
+            WHISPER_MODEL_OVERRIDE__LARGE__DOT__V3__BEAM_SIZE="7",
         )
         assert config.MODEL_OVERRIDES["large-v2"] == {"BEAM_SIZE": 4}
         assert isinstance(config.MODEL_OVERRIDES["large-v2"], dict)
-        assert config.MODEL_OVERRIDES["large.v3"]["BEAM_SIZE"] == 7
+        assert config.MODEL_OVERRIDES["LARGE.V3"]["BEAM_SIZE"] == 7
     finally:
         monkeypatch.undo()
         importlib.reload(config)
