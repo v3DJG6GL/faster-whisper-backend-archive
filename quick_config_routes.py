@@ -227,6 +227,7 @@ async def get_state(
     ],
 )
 async def get_my_usage(
+    tz_midnight: float | None = None,
     user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
     """The caller's OWN transcription usage (today + lifetime) for the
@@ -235,8 +236,10 @@ async def get_my_usage(
     user's numbers are ever returned. Best-effort — any failure yields zeros
     so the page never breaks.
 
-    'today' is the server-LOCAL calendar day (usage_store buckets by
-    epoch_day_for(ts) in local time), so it rolls over at local midnight."""
+    'today' resets at the VIEWER's local midnight: the browser passes
+    `tz_midnight` (epoch seconds of its local 00:00), and we sum the UTC hours
+    since then. When the param is absent/invalid we fall back to the server's
+    local day."""
     zero = {"requests": 0, "errors": 0, "words": 0, "audio_s": 0.0}
     uid = user.get("user_id") or ""
     today = dict(zero)
@@ -244,9 +247,12 @@ async def get_my_usage(
     if uid:
         try:
             import usage_store
+            if tz_midnight and tz_midnight > 0:
+                start_hour = usage_store.hour_for_ts(float(tz_midnight))
+            else:
+                start_hour = usage_store.local_day_start_hour()
             total = usage_store.totals_for_user(uid)
-            today = usage_store.totals_for_user(
-                uid, start_day=usage_store.today_epoch_day())
+            today = usage_store.totals_for_user(uid, start_hour=start_hour)
         except Exception:
             today, total = dict(zero), dict(zero)
     return {
@@ -2052,7 +2058,11 @@ async function loadMyUsage() {
   const el = document.getElementById('qc-usage');
   if (!el) return;
   try {
-    const r = await api('GET', '/quick-config/usage');
+    // Pass this browser's local midnight (epoch seconds) so "today" resets at
+    // the viewer's own midnight, not the server's.
+    var _mid = new Date(); _mid.setHours(0, 0, 0, 0);
+    var tzMidnight = Math.floor(_mid.getTime() / 1000);
+    const r = await api('GET', '/quick-config/usage?tz_midnight=' + tzMidnight);
     if (!r.ok) { el.innerHTML = ''; return; }
     const j = await r.json();
     const name = '<span class="u-name">' + _uEsc(j.username || 'there') + '</span>';

@@ -34,6 +34,12 @@ _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 class _StripAnsiFormatter(logging.Formatter):
+    # Emit file timestamps in UTC (ISO-8601 with a trailing 'Z'). The log file
+    # is then unambiguous regardless of the server's timezone; the /logs web
+    # viewer converts each line to the reader's local time (like every other
+    # timestamp surface). gmtime is a class attribute so it applies to asctime.
+    converter = time.gmtime
+
     def format(self, record: logging.LogRecord) -> str:
         return _ANSI_ESCAPE_RE.sub("", super().format(record))
 
@@ -54,7 +60,7 @@ _file_handler = logging.handlers.RotatingFileHandler(
 )
 _file_handler.setFormatter(_StripAnsiFormatter(
     "%(asctime)s %(levelname)s %(name)s %(message)s",
-    datefmt="%H:%M:%S | %Y.%m.%d",
+    datefmt="%Y-%m-%dT%H:%M:%SZ",   # UTC (converter=gmtime); viewer localizes
 ))
 _root.addHandler(_file_handler)
 
@@ -2182,6 +2188,7 @@ _LOG_VIEWER_HTML = """<!doctype html>
     border-radius: 4px; font: inherit; cursor: pointer; }
   #loadOlderBtn:hover:not([disabled]) { background: var(--panel); }
   #loadOlderBtn[disabled] { opacity: 0.5; cursor: default; }
+  .tz-hint { color: var(--dim); font-size: var(--fs-xs); cursor: help; }
   .line.hidden { display: none; }
   .line.rule    { color: var(--dim); }
   .line.title   { color: var(--bold); font-weight: 600; }
@@ -2216,6 +2223,7 @@ _LOG_VIEWER_HTML = """<!doctype html>
         <span id="log-zoom-pct">100%</span>
         <button id="log-zoom-in" type="button" aria-label="increase log size">+</button>
       </span>
+      <span class="tz-hint" title="log timestamps are stored in UTC and shown here in your browser's local timezone">local time</span>
       <button id="pauseBtn">pause</button>
       <button id="clearBtn">clear</button>
       <span id="status" class="pill live">live</span>
@@ -2262,6 +2270,19 @@ _LOG_VIEWER_HTML = """<!doctype html>
       el.classList.remove('hidden');
     }
   }
+  function _p2(n) { return (n < 10 ? '0' : '') + n; }
+  // Log lines start with a UTC ISO-8601 'Z' timestamp; show it in the reader's
+  // local time as 'YYYY-MM-DD HH:MM:SS'. Lines that don't start with that token
+  // (continuation/traceback lines, or pre-UTC rotated lines) pass through as-is.
+  function localizeLogTs(line) {
+    const m = line.match(/^(\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z)\\s/);
+    if (!m) return line;
+    const d = new Date(m[1]);
+    if (isNaN(d.getTime())) return line;
+    const local = d.getFullYear() + '-' + _p2(d.getMonth() + 1) + '-' + _p2(d.getDate())
+      + ' ' + _p2(d.getHours()) + ':' + _p2(d.getMinutes()) + ':' + _p2(d.getSeconds());
+    return local + line.slice(m[1].length);
+  }
   // DOM cap for live-tail appends only. The "Load older" path bypasses
   // this so the user can scroll back through arbitrarily many rotated
   // lines without their click silently dropping the freshest content.
@@ -2278,7 +2299,7 @@ _LOG_VIEWER_HTML = """<!doctype html>
     const el = document.createElement('span');
     const cls = classify(line);
     el.className = 'line ' + cls;
-    el.textContent = line + '\\n';
+    el.textContent = localizeLogTs(line) + '\\n';
     applyFilter(el);
     log.appendChild(el);
     while (log.childElementCount > _LOG_DOM_MAX) log.firstChild.remove();
@@ -2337,7 +2358,7 @@ _LOG_VIEWER_HTML = """<!doctype html>
         for (const line of lines) {
           const el = document.createElement('span');
           el.className = 'line ' + classify(line);
-          el.textContent = line + '\\n';
+          el.textContent = localizeLogTs(line) + '\\n';
           applyFilter(el);
           frag.appendChild(el);
         }

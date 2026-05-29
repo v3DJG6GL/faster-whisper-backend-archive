@@ -488,17 +488,19 @@ STATS_RECENT_TX_DISPLAY = 20
 # =============================================================================
 # Per-key / per-user usage rollup
 # =============================================================================
-# Durable daily rollup (one row per key per day) backing the per-user/per-key
-# usage numbers on /api-keys and the usage-over-time section on /stats. Kept
-# separate from RECENT_TRANSCRIPTIONS because that store prunes to a rolling
-# window and so can't back lifetime totals. See usage_store.py.
+# Durable hourly rollup (one row per key per UTC hour) backing the per-user/
+# per-key usage numbers on /api-keys, the usage-over-time section on /stats, and
+# the per-user "today" banner on /quick-config. Hourly UTC buckets let "today"
+# be reckoned in any timezone (the viewer's for the banner, the server's for the
+# dashboards). Kept separate from RECENT_TRANSCRIPTIONS because that store prunes
+# to a rolling window and so can't back lifetime totals. See usage_store.py.
 
 # DB file path. Default sits next to config.local.json. SQLite uses three
 # runtime files (.sqlite3, -wal, -shm); .gitignore matches all three.
 USAGE_DB = os.path.join(_REPO_DIR, "usage.local.sqlite3")
 
 # Auto-delete rollup rows older than this many days. 0 = unbounded (the
-# default): the rollup is at most one row per active key per day, so it
+# default): the rollup is at most one row per active key per hour, so it
 # stays tiny and lifetime totals stay complete. Set >0 only if you want a
 # bounded retention window.
 USAGE_RETENTION_DAYS = 0

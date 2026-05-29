@@ -197,13 +197,15 @@ async def usage_api(days: int = 0) -> JSONResponse:
     one of that user's keys plus any pre-feature backfilled usage; per-key
     totals cover only real keys (backfill has no key id)."""
     import usage_store
-    start_day = None
+    # Window in UTC epoch-hours; the N-day window is reckoned in the server's
+    # local timezone (admin/operator perspective). days=0 => lifetime.
+    start_hour = None
     if days and days > 0:
-        start_day = usage_store.today_epoch_day() - int(days) + 1
-    by_user = usage_store.totals_by_user(start_day=start_day)
+        start_hour = usage_store.local_day_start_hour(days_ago=int(days) - 1)
+    by_user = usage_store.totals_by_user(start_hour=start_hour)
     by_key = {
         r["key_id"]: r
-        for r in usage_store.totals_by_key(start_day=start_day)
+        for r in usage_store.totals_by_key(start_hour=start_hour)
     }
     return JSONResponse({"by_user": by_user, "by_key": by_key, "days": days})
 

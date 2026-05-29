@@ -139,19 +139,21 @@ async def stats_usage(
     by = "key" if by == "key" else "user"
     if metric not in ("requests", "errors", "words", "audio_s"):
         metric = "audio_s"
-    start_day: int | None = None
+    # Window in UTC epoch-hours; days reckoned in the SERVER-local timezone
+    # (the operator's perspective). days<=0 = lifetime (no lower bound).
+    start_hour: int | None = None
     if days and days > 0:
-        start_day = usage_store.today_epoch_day() - int(days) + 1
+        start_hour = usage_store.local_day_start_hour(days_ago=int(days) - 1)
 
     # Global series gives the shared x-axis (every bucket with any usage) and
     # the per-bucket totals used to derive the "others" line.
-    series_global = usage_store.series(start_day=start_day, bucket=bucket)
+    series_global = usage_store.series(start_hour=start_hour, bucket=bucket)
     day_axis = [int(p["day"]) for p in series_global]
     axis_index = {d: i for i, d in enumerate(day_axis)}
     n = len(day_axis)
 
     board = usage_store.leaderboard(
-        start_day=start_day, by=by, metric=metric, limit=50,
+        start_hour=start_hour, by=by, metric=metric, limit=50,
     )
 
     # Resolve display names + a stable `id` server-side (the /stats client has
@@ -178,7 +180,7 @@ async def stats_usage(
     sum_top = [0.0] * n
     for r in board[:K]:
         kwargs = {"user_id": r["id"]} if by == "user" else {"key_id": r["id"]}
-        s = usage_store.series(start_day=start_day, bucket=bucket, **kwargs)
+        s = usage_store.series(start_hour=start_hour, bucket=bucket, **kwargs)
         vals: list[float] = [0] * n
         for p in s:
             i = axis_index.get(int(p["day"]))
