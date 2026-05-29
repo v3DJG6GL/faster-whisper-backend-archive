@@ -21,24 +21,69 @@ Self-hosted [faster-whisper](https://github.com/SYSTRAN/faster-whisper) API with
 - Live system overview at `/stats` (loaded models + VRAM, GPU/CPU/RAM, request latency, recent transcriptions, sparklines — works fully offline, no CDN)
 - Optional admin WebUI at `/config` for editing all settings without redeploying (off by default; allowlist + bearer-token gated)
 - Cross-page nav with severity pills (WARN/ERR/CRIT in the last 60 s) on every page
-- Runs as a Windows Service (auto-start on boot)
+- Runs anywhere: Windows Service, Linux systemd, Docker, or bare `python main.py`
 
 ## Requirements
 
-- Windows 10/11
-- NVIDIA GPU + driver supporting CUDA 12.x (WSL2 driver works)
 - Python 3.13
+- Linux, macOS, or Windows 10/11
+- **GPU (optional)**: NVIDIA GPU + driver supporting CUDA 12.x (WSL2 driver works).
+  Without a GPU the server runs on CPU via the bundled CTranslate2 — no extra setup.
+
+The base install is CPU-only and cross-platform. GPU acceleration is additive:
+`pip install -r requirements-gpu.txt` on an NVIDIA host.
 
 ## Install
 
-```powershell
-# Clone and run the installer. It auto-elevates via UAC, bootstraps the
-# Python venv, installs requirements, downloads WinSW, and registers the
-# Windows Service in one go.
-.\install-service.ps1
+### Linux / macOS (development)
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt            # CPU, all platforms
+# pip install -r requirements-gpu.txt      # add NVIDIA CUDA wheels (GPU box)
+python main.py                             # serves on http://0.0.0.0:8000
 ```
 
-First service start downloads the `large-v2` model (~1.5 GB) to `%USERPROFILE%\.cache\huggingface\hub\`.
+### Linux (production, systemd)
+
+```bash
+./install-service.sh        # CPU   (auto-elevates via sudo, creates venv,
+./install-service.sh --gpu  # GPU    installs deps, writes + starts the unit)
+# manage: systemctl status|restart whisper-api ; journalctl -u whisper-api -f
+# remove: ./uninstall-service.sh
+```
+
+### Docker (any OS)
+
+```bash
+docker compose up --build   # serves on http://localhost:8000; state in volumes
+```
+
+For GPU in Docker, build a derived image that also installs `requirements-gpu.txt`
+and run with `--gpus all` on an NVIDIA host.
+
+### Windows (production, service)
+
+```powershell
+# Auto-elevates via UAC, bootstraps the venv, installs requirements, downloads
+# WinSW, and registers the Windows Service in one go.
+.\install-service.ps1
+# On a GPU box, also: venv\Scripts\python -m pip install -r requirements-gpu.txt
+```
+
+First server start downloads the `large-v2` model (~1.5 GB) to the HuggingFace
+cache (`~/.cache/huggingface/hub/`, or `%USERPROFILE%\.cache\huggingface\hub\`
+on Windows; override with `WHISPER_DOWNLOAD_ROOT`).
+
+## Running the tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest -q
+```
+
+CI runs the suite on Linux and Windows for every push (`.github/workflows/ci.yml`).
 
 ## Usage
 
@@ -56,7 +101,7 @@ print(r.text)
 
 ## Configuration
 
-Most knobs live in **`config.py`** at the repo root — models, default prompt, server host/port, log paths, faster-whisper transcribe defaults. The **text post-processing pipeline rules** (dictation map, German non-noun list, regex tidy rules) live in a separate committed file, **`config.json`** — see [Post-processing pipeline](#post-processing-pipeline). Edit either file directly to change behavior, then `Restart-Service WhisperAPI` to pick up the changes. The algorithm code in `main.py` doesn't need to be touched.
+Most knobs live in **`config.py`** at the repo root — models, default prompt, server host/port, log paths, faster-whisper transcribe defaults. The **text post-processing pipeline rules** (dictation map, German non-noun list, regex tidy rules) live in a separate committed file, **`config.json`** — see [Post-processing pipeline](#post-processing-pipeline). Edit either file directly to change behavior, then restart the service (`systemctl restart whisper-api` / `Restart-Service WhisperAPI` / the `/config` restart button) to pick up the changes. The algorithm code in `main.py` doesn't need to be touched.
 
 Layers of overrides, **env wins over file wins over in-repo default**:
 
@@ -118,6 +163,17 @@ First-use of any new model triggers a one-time download (~600 MB to ~1.5 GB depe
 
 ## Service control
 
+Linux (systemd):
+
+```bash
+sudo systemctl restart whisper-api       # after editing main.py / config
+sudo systemctl stop    whisper-api
+systemctl status       whisper-api
+./uninstall-service.sh                   # remove the service
+```
+
+Windows (service):
+
 ```powershell
 Restart-Service WhisperAPI               # after editing main.py
 Stop-Service    WhisperAPI
@@ -125,6 +181,10 @@ Get-Service     WhisperAPI
 .\uninstall-service.ps1                  # remove the service
 .\uninstall-service.ps1 -RemoveLocal     # also delete logs/, WhisperAPI.exe / .xml, any legacy nssm.exe
 ```
+
+Docker: `docker compose restart` / `docker compose down`. Any deployment can also
+self-restart from the admin UI (`/config` → **restart**) — it re-execs the process
+on Linux/macOS and uses WinSW on Windows.
 
 `Get-Content -Wait logs\whisper.log` to tail logs in a terminal, or open `http://localhost:8000/logs`.
 
@@ -187,7 +247,7 @@ The nav row at the top of every page (logs ↔ stats ↔ config) also surfaces t
 
 A second WebUI at `/config` lets you edit any setting from `config.py` from the browser, with hot-reload for safe knobs (transcribe params, dictation map, prompt) and an automatic service restart for cold ones (server port, log file, preload list).
 
-**Off by default.** Set `ADMIN_UI_ENABLED = True` in `config.py` (or `WHISPER_ADMIN_UI=1` env var), then `Restart-Service WhisperAPI`. The `/config` page opens at `http://localhost:8000/config` from the server itself or any host in `ADMIN_ALLOWED_HOSTS`.
+**Off by default.** Set `ADMIN_UI_ENABLED = True` in `config.py` (or `WHISPER_ADMIN_UI=1` env var), then restart the service. The `/config` page opens at `http://localhost:8000/config` from the server itself or any host in `ADMIN_ALLOWED_HOSTS`.
 
 ### Authentication: per-user API keys
 
@@ -262,9 +322,17 @@ config.local.json          Runtime overrides written by the admin UI (gitignored
 config.local.example.json  Example overrides file
 test.py                    Manual test client (vowen.ai compatibility)
 install-service.ps1        Windows Service installer (WinSW-based, self-elevating, auto-bootstraps venv)
-uninstall-service.ps1      Service uninstaller
-requirements.txt           Direct deps; transitive resolved by pip
+uninstall-service.ps1      Windows Service uninstaller
+install-service.sh         Linux systemd installer (self-elevating, auto-bootstraps venv); --gpu adds CUDA wheels
+uninstall-service.sh       Linux systemd uninstaller
+Dockerfile / .dockerignore / docker-compose.yml
+                           CPU container image + compose (named volumes for state); run on any OS
+requirements.txt           Base (CPU, cross-platform) deps; transitive resolved by pip
+requirements-gpu.txt       NVIDIA CUDA wheels (opt-in, additive)
+requirements-dev.txt       Test deps (pytest)
+pytest.ini                 Test discovery config (pytest -q from repo root)
+.github/workflows/ci.yml   CI: runs the test suite on Linux + Windows
 static/                    Brand assets (logo.svg, favicon.*) + vendored uPlot/GridStack (offline /stats)
-.gitignore
+.gitignore / .gitattributes
 logs/                      Created at first run; rotates at 10 MB × 10 files
 ```

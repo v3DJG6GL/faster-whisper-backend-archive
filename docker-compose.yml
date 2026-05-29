@@ -1,0 +1,30 @@
+# CPU deployment. `docker compose up` builds the image and serves on :8000.
+# Runtime state is kept in named volumes so it survives `down`/`up` and image
+# rebuilds. For GPU, see the README (derived image + `gpus: all`).
+services:
+  whisper-api:
+    build: .
+    image: faster-whisper-backend
+    ports:
+      - "8000:8000"
+    environment:
+      # Pin the runtime state under /data (volumes below) instead of the repo
+      # dir, so the image stays stateless.
+      WHISPER_API_KEYS_DB: /data/api_keys.local.sqlite3
+      WHISPER_REPORTS_DB: /data/reports.local.sqlite3
+      WHISPER_RECENT_TRANSCRIPTIONS_DB: /data/recent_transcriptions.local.sqlite3
+      WHISPER_USAGE_DB: /data/usage.local.sqlite3
+      WHISPER_CAPTURES_DB: /data/captures.local.sqlite3
+      WHISPER_CAPTURES_DIR: /data/captures
+      WHISPER_LOG_FILE: /data/logs/whisper.log
+      WHISPER_DOWNLOAD_ROOT: /models
+      # Optional: paste a key to bootstrap the first admin without the UI.
+      # WHISPER_BOOTSTRAP_ADMIN_KEY: ""
+    volumes:
+      - whisper-data:/data
+      - whisper-models:/models
+    restart: unless-stopped
+
+volumes:
+  whisper-data:
+  whisper-models:

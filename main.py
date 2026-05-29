@@ -959,8 +959,12 @@ def _convert_blocking(model_id: str, output_dir: str, quantization: str) -> None
         low_cpu_mem_usage=True,
     )
     converter.convert(tmp_dir, quantization=quantization, force=True)
-    # Atomic publish.
-    os.rename(tmp_dir, output_dir)
+    # Atomic publish. os.replace can't swap onto a non-empty dir on any OS (and
+    # os.rename also fails onto an existing dir on Windows), so clear any stale
+    # publish first, then replace.
+    if os.path.isdir(output_dir):
+        shutil.rmtree(output_dir)
+    os.replace(tmp_dir, output_dir)
     logger.info("auto-convert: %s completed in %.1fs",
                 model_id, time.perf_counter() - t0)
 

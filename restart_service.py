@@ -1,11 +1,17 @@
 """
-Self-restart helper for the WhisperAPI Windows Service.
+Self-restart helper for the backend.
 
-Strategy: spawn `WhisperAPI.exe restart!` (the documented WinSW
-self-restart command, note the trailing `!`) as a detached child, then
+Windows (service deployment): spawn `WhisperAPI.exe restart!` (the documented
+WinSW self-restart command, note the trailing `!`) as a detached child, then
 exit cleanly. WinSW's `restart!` re-execs the wrapper *after* we die,
 surviving the SCM child-tree kill that a regular `restart` would not.
 Restart latency is ~3-4 s end-to-end on a no-preload deployment.
+
+Other OSes (Linux/macOS, bare / systemd / Docker): re-exec the process in
+place via os.execv. Python opens sockets with O_CLOEXEC, so the listen port
+is released on exec and the fresh process re-binds cleanly. This works whether
+the server is run bare (`python main.py`), supervised by systemd (same-PID
+re-exec keeps the unit active), or in a container with a restart policy.
 
 Why not rely on WinSW's <onfailure action="restart"/> on exit code 0?
 Because v2's onfailure semantics on graceful exits are unreliable: issue
@@ -37,17 +43,21 @@ def trigger_self_restart(delay_sec: float = 1.5) -> str:
 
     Returns immediately with a method label (for the admin UI to display).
     The Timer thread fires after `delay_sec` so the caller's HTTP response
-    has time to flush over loopback before uvicorn dies.
-
-    Raises RuntimeError on non-Windows hosts -- the linux dev environment
-    has no WinSW to relaunch us, so a self-exit there would just take
-    the server down for good.
+    has time to flush over loopback before the process restarts.
     """
     if sys.platform != "win32":
-        raise RuntimeError(
-            "self-restart relies on WinSW's `restart!` command and is "
-            f"Windows-only (current platform: {sys.platform})"
-        )
+        # Re-exec the current interpreter with the same argv. Sockets carry
+        # O_CLOEXEC so the port frees on exec; the new process re-binds it.
+        def do_reexec() -> None:
+            try:
+                os.execv(sys.executable, [sys.executable, *sys.argv])
+            except Exception:
+                # If exec fails, exit and let a supervisor (systemd
+                # Restart=, Docker restart policy) bring us back.
+                os._exit(0)
+
+        threading.Timer(delay_sec, do_reexec).start()
+        return "execv-reexec"
 
     repo_dir = os.path.dirname(os.path.abspath(__file__))
     winsw = os.path.join(repo_dir, "WhisperAPI.exe")

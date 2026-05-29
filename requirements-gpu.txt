@@ -1,0 +1,12 @@
+# GPU (NVIDIA CUDA) runtime wheels — opt-in, additive to requirements.txt.
+# Install on an NVIDIA box (Windows service host or Linux + NVIDIA driver):
+#   pip install -r requirements.txt -r requirements-gpu.txt
+# Without these, faster-whisper falls back to CPU (still fully functional).
+#
+# Major versions are pinned because main.py's Windows DLL preloader hardcodes
+# the DLL names: `cublas64_12.dll` requires cublas 12.x; `cudnn64_9.dll` (and
+# the cudnn_*64_9.dll family) require cudnn 9.x. Bumping the major would
+# silently break GPU inference (silent CPU fallback). On Linux these provide
+# the matching .so libraries that ctranslate2 loads at runtime.
+nvidia-cublas-cu12>=12,<13
+nvidia-cudnn-cu12>=9,<10

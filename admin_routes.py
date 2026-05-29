@@ -703,32 +703,23 @@ async def test_pipeline(payload: dict[str, Any]) -> JSONResponse:
 
 @router.post("/restart", dependencies=[Depends(require_admin_host), Depends(require_admin)])
 async def post_restart(request: Request) -> JSONResponse:
-    """Trigger a self-restart of the WhisperAPI Windows Service.
+    """Trigger a self-restart of the backend (cross-platform).
 
-    Spawns `WhisperAPI.exe restart!` (WinSW's documented self-restart
-    command) and schedules `os._exit(0)` ~1.5 s in the future, then
-    returns 200. WinSW relaunches the wrapper after we die, surviving
-    the SCM child-tree kill. The 1.5 s delay gives this response time
-    to flush over loopback before uvicorn dies. End-to-end downtime is
-    ~3-4 s for a no-preload deployment.
+    Windows: spawns `WhisperAPI.exe restart!` (WinSW's documented self-restart
+    command) and schedules `os._exit(0)` ~1.5 s out. Other OSes: re-execs the
+    process in place (os.execv) ~1.5 s out — works bare, under systemd, or in
+    a container. Either way this returns 200 first; the 1.5 s delay lets the
+    response flush over loopback before the process restarts. End-to-end
+    downtime is ~3-4 s for a no-preload deployment.
 
-    See restart_service.py for why we use WinSW's explicit `restart!`
-    rather than relying on <onfailure action="restart"/> on exit 0
-    (v2's onfailure semantics on graceful exits are unreliable).
+    See restart_service.py for the per-platform mechanics (and why Windows
+    uses WinSW's explicit `restart!` rather than <onfailure>).
     """
     try:
         from restart_service import trigger_self_restart
     except ImportError as e:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR,
                             f"restart_service module unavailable: {e}")
-
-    import sys as _sys
-    if _sys.platform != "win32":
-        raise HTTPException(
-            status.HTTP_501_NOT_IMPLEMENTED,
-            "self-restart is Windows-only; restart manually with "
-            "`Restart-Service WhisperAPI`",
-        )
 
     client_host = request.client.host if request.client else "?"
     logger.info("[config] admin restart requested from=%s", client_host)
@@ -1327,7 +1318,7 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
     <div class="subbar">
       <span class="subbar-title">Configuration</span>
       <div class="subbar-right">
-        <button id="restart-btn" title="restart the WhisperAPI Windows Service">restart</button>
+        <button id="restart-btn" title="restart the backend service">restart</button>
         <button id="discard-btn" title="discard all unsaved changes" disabled>discard</button>
         <button id="save-btn" class="primary" disabled>save</button>
         <span id="status" class="pill">loading…</span>

@@ -1,0 +1,7 @@
+# Test / development dependencies. Install on top of the base requirements:
+#   pip install -r requirements.txt -r requirements-dev.txt
+#   pytest -q
+#
+# numpy / av (PyAV) — needed by test_group_trim.py — come in transitively via
+# faster-whisper in the base file, so only pytest is listed here.
+pytest>=8

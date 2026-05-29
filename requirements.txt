@@ -1,29 +1,31 @@
+# Base (CPU, cross-platform) dependencies. Installs cleanly on Linux, macOS,
+# and Windows; faster-whisper runs on CPU via its bundled ctranslate2, so this
+# alone yields a working server everywhere. GPU acceleration is purely additive
+# — see requirements-gpu.txt.
+#
 # Direct dependencies only. Transitive deps (numpy, onnxruntime, ctranslate2,
 # tokenizers, av, ...) are resolved fresh by pip. Strict transitive pins tend
 # to break over time as old wheels are pruned from PyPI for newer Pythons —
 # that is exactly what hit `onnxruntime==1.23.2` on Python 3.13.
 #
-# To rebuild the venv on Windows:
+# Set up a venv:
 #   python -m venv venv
-#   venv\Scripts\activate
+#   # Linux/macOS:  source venv/bin/activate
+#   # Windows:      venv\Scripts\activate
 #   pip install -r requirements.txt
+#   # GPU (NVIDIA, Windows or Linux):  pip install -r requirements-gpu.txt
+#   # Running the tests:               pip install -r requirements-dev.txt
 
 fastapi>=0.125
 uvicorn[standard]>=0.38
 python-multipart>=0.0.21
 faster-whisper>=1.2
 
-# CUDA runtime wheels — required for GPU on Windows. Major versions are pinned
-# because main.py hardcodes the DLL names: `cublas64_12.dll` requires cublas
-# 12.x; `cudnn64_9.dll` (and the cudnn_*64_9.dll family) require cudnn 9.x.
-# Bumping the major would silently break GPU inference (CPU fallback).
-nvidia-cublas-cu12>=12,<13
-nvidia-cudnn-cu12>=9,<10
-
 # Admin /config + /stats observability. nvidia-ml-py is the canonical 2025+
 # NVML binding (the legacy `pynvml` PyPI package is now a deprecated shim that
-# re-exports from nvidia-ml-py). Both are optional at runtime — system_stats.py
-# degrades gracefully when import fails (e.g., AMD GPU / dev box).
+# re-exports from nvidia-ml-py). It is pure-Python and optional at runtime —
+# system_stats.py degrades gracefully when import fails or no NVIDIA GPU is
+# present (AMD GPU / CPU dev box / macOS).
 nvidia-ml-py>=12.560
 psutil>=6.0
 pydantic>=2.0

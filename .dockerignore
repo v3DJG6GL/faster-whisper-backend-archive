@@ -1,0 +1,22 @@
+# Keep the build context small and never bake local state / secrets into the image.
+venv/
+.venv/
+__pycache__/
+*.pyc
+.git/
+.github/
+logs/
+captures/
+*.local.*
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+.env
+.env.*
+# Windows service artifacts (generated on the Windows host).
+WhisperAPI.exe
+WhisperAPI.xml
+WhisperAPI.wrapper.log
+nssm.exe
+# Editor / preview cruft.
+*-preview.html

@@ -1,0 +1,18 @@
+# Normalize line endings: store everything with LF in the repo, regardless of
+# the OS the file was authored on (the deploy host is Windows, dev is Linux).
+* text=auto eol=lf
+
+# Shell scripts and YAML must be LF (CRLF breaks /bin/sh shebang handling and
+# some YAML parsers).
+*.sh   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+
+# Keep Windows-only scripts as CRLF (PowerShell is happiest with CRLF).
+*.ps1  text eol=crlf
+
+# Binary / non-diffable assets.
+*.png  binary
+*.ico  binary
+*.gz   binary
+*.sqlite3 binary
