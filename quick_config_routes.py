@@ -710,7 +710,7 @@ _QUICK_CONFIG_HTML = r"""<!doctype html>
     color: var(--fg); font-size: var(--fs-sm); display: none; z-index: 10; }
   #toast.err { border-color: var(--red); color: var(--red); }
   #toast.ok { border-color: var(--green); color: var(--green); }
-  /* API-key login modal — matches /captures, /reports, /config */
+  /* API-key login modal — matches /captures, /reports, /settings */
   #token-modal { position: fixed; inset: 0; background: rgba(0,0,0,0.65);
     display: none; align-items: center; justify-content: center; z-index: 8; }
   #token-modal.show { display: flex; }
@@ -945,7 +945,7 @@ _QUICK_CONFIG_HTML = r"""<!doctype html>
   <section id="recent-panel">
     <div class="recent-header">
       <h2>Recent transcriptions</h2>
-      <span class="recent-label" title="Persisted in SQLite (WAL). Caps and TTL are configurable at /config.">persistent · paginated</span>
+      <span class="recent-label" title="Persisted in SQLite (WAL). Caps and TTL are configurable at /settings.">persistent · paginated</span>
     </div>
     <div id="recent-list">
       <div class="empty-recent">No transcriptions yet — they'll appear here as you dictate.</div>
@@ -963,7 +963,7 @@ _QUICK_CONFIG_HTML = r"""<!doctype html>
     <h3>API key</h3>
     <p style="color:var(--dim);font-size:var(--fs-sm);margin:0 0 0.5rem 0;">
       Paste your <code>wk_…</code> API key. Your admin issues one per user in
-      <code>/config/api-keys</code>.
+      <code>/settings/api-keys</code>.
     </p>
     <input id="token-input" type="password" autocomplete="off" spellcheck="false"
            placeholder="wk_…">

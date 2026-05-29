@@ -10,8 +10,8 @@ Three-level dependency layering (FastAPI idiomatic):
     `OPEN_MODE_USER` so existing checks keep working while the operator
     bootstraps.
   - `require_admin`: depends on `get_current_user` and raises 403 if
-    `is_admin=False`. Used for system-mutation endpoints (/config,
-    /config/api-keys, delete/clear/reapply-rules).
+    `is_admin=False`. Used for system-mutation endpoints (/settings,
+    /settings/api-keys, delete/clear/reapply-rules).
   - `require_page(name)`: dependency factory — raises 403 if the user
     has no access to the named page. Mounted on the per-data routers
     (/captures, /reports, /quick-config, /logs, /stats) at the
@@ -127,7 +127,7 @@ class Permissions:
 
         Everyone (including admins) is filtered by `exposed=True` —
         /quick-config is the curated end-user view, not a mirror of
-        /config. Admins manage the full unfiltered list at /config.
+        /settings. Admins manage the full unfiltered list at /settings.
 
         Within exposed rules, admins bypass the tag filter (they see
         every exposed rule). Non-admins additionally need rule.tags
@@ -237,7 +237,7 @@ async def open_mode_warning_loop() -> None:
                 logger.warning(
                     "[auth] no admin key configured — running in OPEN mode."
                     " Anyone reachable on this server can use it. Generate"
-                    " an admin key in /config/api-keys now."
+                    " an admin key in /settings/api-keys now."
                 )
                 logged_locked_down = False
         except Exception as e:

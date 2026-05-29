@@ -471,7 +471,7 @@ def clear_all(reporter_host: str = "") -> int:
 def sweep_retention() -> int:
     """Delete rows older than cfg.REPORTS_RETENTION_DAYS. Returns count
     deleted (0 when retention is disabled or nothing's old enough).
-    Lazy-imports cfg so admin /config edits take effect on next sweep."""
+    Lazy-imports cfg so admin /settings edits take effect on next sweep."""
     try:
         import config as cfg
         days = int(getattr(cfg, "REPORTS_RETENTION_DAYS", 0))

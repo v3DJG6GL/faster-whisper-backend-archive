@@ -244,7 +244,7 @@ async def stats_stream() -> StreamingResponse:
 
 
 # --- HTML template -----------------------------------------------------------
-# Single-file, no build step. Mirrors the /logs and /config style. uPlot is
+# Single-file, no build step. Mirrors the /logs and /settings style. uPlot is
 # loaded from the local /static mount — no CDN, works offline.
 
 _STATS_VIEWER_HTML = r"""<!doctype html>
@@ -1008,7 +1008,7 @@ function openStream() {
   };
   es.onerror = () => {
     setStatus('reconnecting…', 'paused');
-    // Service may have restarted. Mirror /config: poll a cheap idempotent
+    // Service may have restarted. Mirror /settings: poll a cheap idempotent
     // endpoint until it 200s, then force-reopen the SSE.
     if (recoveryTimer) return;
     recoveryTimer = setInterval(async () => {

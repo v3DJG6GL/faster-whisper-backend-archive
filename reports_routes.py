@@ -562,7 +562,7 @@ _REPORTS_HTML = """<!doctype html>
   #toast.show { opacity: 1; }
   #toast.err { border-color: var(--red); color: var(--red); }
 
-  /* API-key login modal — same layout as /captures and /config so the
+  /* API-key login modal — same layout as /captures and /settings so the
    * three pages share a consistent look. */
   #token-modal {
     position: fixed; inset: 0; background: rgba(0,0,0,0.65);

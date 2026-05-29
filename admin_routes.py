@@ -1,13 +1,13 @@
 """
 Admin WebUI for faster-whisper-backend.
 
-Mounted at /config when WHISPER_ADMIN_UI=1. Endpoints:
+Mounted at /settings when WHISPER_ADMIN_UI=1. Endpoints:
 
-  GET  /config               HTML page (loopback / ADMIN_ALLOWED_HOSTS)
-  GET  /config/state         Resolved config + provenance + hot/cold tags
-  POST /config/state         Save overrides (validation errors -> 422)
-  POST /config/test-pipeline Dry-run PIPELINE_RULES against a sample
-  POST /config/restart       Detach a self-restart helper (Windows only)
+  GET  /settings               HTML page (loopback / ADMIN_ALLOWED_HOSTS)
+  GET  /settings/state         Resolved config + provenance + hot/cold tags
+  POST /settings/state         Save overrides (validation errors -> 422)
+  POST /settings/test-pipeline Dry-run PIPELINE_RULES against a sample
+  POST /settings/restart       Detach a self-restart helper (Windows only)
 
 Security model (layered):
   1. Allowlist gate:   require_admin_host rejects callers not in
@@ -39,12 +39,12 @@ logger = logging.getLogger("whisper-api")
 
 # Discriminated-union adapter for PIPELINE_RULES canonicalization. Built once
 # at import time — TypeAdapter construction walks every rule subclass and is
-# the dominant cost of _canon_rules, called twice per /config/state request.
+# the dominant cost of _canon_rules, called twice per /settings/state request.
 _PIPELINE_RULE_ADAPTER: TypeAdapter = TypeAdapter(config_store.PipelineRule)
 
 # Fields the WebUI is allowed to surface. Keep this as the single source of
 # truth for the form layout — drives section grouping in the HTML and the
-# /config/state endpoint's provenance map.
+# /settings/state endpoint's provenance map.
 # Section groups: each section can have one or more SUB-groups. A subgroup
 # title of None means "no subheader" — fields render directly under the
 # section. Section titles mirror the per-request log block phases (Decode
@@ -153,7 +153,7 @@ def _all_fields() -> list[str]:
 
 # --- auth deps ---------------------------------------------------------------
 #
-# /config is gated by an IP/CIDR allowlist (cfg.ADMIN_ALLOWED_HOSTS, loopback
+# /settings is gated by an IP/CIDR allowlist (cfg.ADMIN_ALLOWED_HOSTS, loopback
 # always implicit) AND by `Depends(require_admin)` — an API key resolving to
 # is_admin=True. In open mode (no admin key configured yet) require_admin
 # yields the synthetic admin so the operator can bootstrap.
@@ -162,7 +162,7 @@ require_admin_host = web_common.require_allowed_host(lambda: cfg.ADMIN_ALLOWED_H
 
 # --- router ------------------------------------------------------------------
 
-router = APIRouter(prefix="/config")
+router = APIRouter(prefix="/settings")
 
 
 def _resolved_value(field: str) -> Any:
@@ -225,13 +225,13 @@ def _provenance(field: str, env_pinned: dict[str, str], saved: dict[str, Any]) -
 
 
 @router.get("", response_class=HTMLResponse, dependencies=[Depends(require_admin_host)])
-async def config_page() -> HTMLResponse:
+async def settings_page() -> HTMLResponse:
     """The admin HTML page. Allowlist-gated (loopback always allowed) — no
     token required to LOAD the page; the page itself collects the token and
     attaches it on every fetch. `no-store` so browsers never serve a stale
     build after a service restart."""
     return HTMLResponse(
-        web_common.render_page(_CONFIG_VIEWER_HTML, current="config"),
+        web_common.render_page(_SETTINGS_VIEWER_HTML, current="settings"),
         headers={
             "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
             "Pragma": "no-cache",
@@ -349,7 +349,7 @@ async def _apply_hot_changes(written: dict[str, Any]) -> dict[str, Any]:
     """Apply hot edits from a config save to the running cfg module, rebuild
     caches, and evict load-time-affected models.
 
-    Shared by /config/state (admin) and /quick-config/state (end-user). For
+    Shared by /settings/state (admin) and /quick-config/state (end-user). For
     /quick-config only PIPELINE_RULES can change, so most branches here
     simply skip — but the helper handles all cases uniformly so the two
     paths stay in lockstep.
@@ -448,7 +448,7 @@ async def get_factory_rules() -> dict[str, Any]:
     """Return the committed factory pipeline rules (config.json).
 
     The WebUI fetches this just before a "promote" so the diff dialog compares
-    against the truly-current config.json. Distinct from GET /config/state,
+    against the truly-current config.json. Distinct from GET /settings/state,
     which returns the EFFECTIVE rules (config.json overlaid by config.local.json).
     """
     try:
@@ -494,7 +494,7 @@ async def post_factory_rules(payload: dict[str, Any], request: Request) -> JSONR
                             f"could not write config.json: {e}")
 
     # config.json IS the factory baseline — refresh the in-memory snapshot the
-    # WebUI's "↺ reset to default" and /config/state `default_value` rely on.
+    # WebUI's "↺ reset to default" and /settings/state `default_value` rely on.
     if isinstance(getattr(cfg, "_BASELINE", None), dict):
         cfg._BASELINE["PIPELINE_RULES"] = [dict(r) for r in saved]
 
@@ -534,7 +534,7 @@ async def clear_local_pipeline_override(request: Request) -> JSONResponse:
     local snapshot is redundant and only shadows config.json. Clearing it makes
     config.json the runtime source here too.
 
-    Done as a dedicated route (not POST /config/state with a None sentinel)
+    Done as a dedicated route (not POST /settings/state with a None sentinel)
     because _apply_hot_changes, on override removal, falls back to the stale
     in-memory value rather than the baseline — so it would not take effect
     until restart. Here we explicitly reload config.json into cfg.
@@ -747,7 +747,7 @@ async def post_restart(request: Request) -> JSONResponse:
 # per-rule PIPELINE_RULES editor, textarea-per-line editors for list/set
 # fields, save flow with restart modal + post-restart polling.
 
-_CONFIG_VIEWER_HTML = r"""<!doctype html>
+_SETTINGS_VIEWER_HTML = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{HEADER_TITLE}}</title>
@@ -1308,7 +1308,7 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
 <div id="login-wrap" class="login" style="display:none">
   <h1>faster-whisper-backend · admin</h1>
   <p>Paste your <strong>API key</strong> to continue. Keys are issued in
-  <code>/config/api-keys</code> by an admin. The key stays in your browser's
+  <code>/settings/api-keys</code> by an admin. The key stays in your browser's
   <code>sessionStorage</code> until you close the tab.</p>
   <input id="login-token" type="password" autocomplete="off" placeholder="wk_…">
   <button id="login-btn">Unlock</button>
@@ -1325,7 +1325,7 @@ _CONFIG_VIEWER_HTML = r"""<!doctype html>
       <span class="hdr-right">{{SEV_PILLS}}{{SCALE_PICKER}}{{RELOAD}}{{LOGOUT}}</span>
     </div>
     <div class="subbar">
-      <span class="subbar-title">Configuration</span>
+      <span class="subbar-title">Settings</span>
       <div class="subbar-right">
         <button id="restart-btn" title="restart the backend service">restart</button>
         <button id="discard-btn" title="discard all unsaved changes" disabled>discard</button>
@@ -1411,7 +1411,7 @@ function showApp() {
 }
 
 async function loadState() {
-  const r = await api('GET', '/config/state');
+  const r = await api('GET', '/settings/state');
   if (r.status === 401) return;  // showLogin already called
   if (r.status === 403 && typeof _renderNoAccessLanding === 'function') {
     // Valid bearer but no admin scope — render the shared landing
@@ -1435,7 +1435,7 @@ async function loadState() {
   }
   state = await r.json();
   // role-admin is set by OPEN_MODE_BANNER_JS (single source of truth)
-  // when whoami.is_admin=true. /config/state requires admin so callers
+  // when whoami.is_admin=true. /settings/state requires admin so callers
   // who reach this point ARE admin, but the central handler already
   // covered the body-class add — keep this comment as a breadcrumb.
   dirty = {};
@@ -1574,7 +1574,7 @@ function fieldRow(name) {
   }
 
   // Inline description from FIELD_DESCRIPTIONS (single source of truth).
-  // Surfaced via /config/state's per-field payload.
+  // Surfaced via /settings/state's per-field payload.
   const desc = fieldDef(name).description;
   if (desc) {
     const help = document.createElement('div');
@@ -1721,7 +1721,7 @@ function makeEditor(name) {
 function modelOverridesEditor(name, v) {
   // Authoritative state. Local mutable copy of the saved overrides; full
   // snapshot pushed via setDirty(name, snapshot) on every edit so the existing
-  // /config/state save flow sees one consistent payload.
+  // /settings/state save flow sees one consistent payload.
   let overrides = JSON.parse(JSON.stringify(v || {}));
   // Diff-mode default ON: most useful first state — the user immediately
   // sees which fields differ from global. Toggleable via the top sidebar row.
@@ -2579,12 +2579,12 @@ function _ensureUniqueSlug(slug, existing) {
 }
 
 // Live status check for one rule against the current test panel sample.
-// Hits POST /config/test-pipeline with a single-rule list. Returns the step
+// Hits POST /settings/test-pipeline with a single-rule list. Returns the step
 // dict or null on transport error.
 async function _testOneRule(rule) {
   const panelSample = document.getElementById('pipeline-test-sample');
   const sample = panelSample ? panelSample.value : TEST_PRESETS['default'];
-  const r = await api('POST', '/config/test-pipeline', {
+  const r = await api('POST', '/settings/test-pipeline', {
     sample, rules: [rule],
   });
   if (!r.ok) return null;
@@ -2700,7 +2700,7 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
   // --- factory baseline (config.json) ---------------------------------
   // `factoryRules` mirrors the committed config.json: seeded from the page's
   // default_value (cfg._BASELINE) and refreshed from every successful
-  // POST /config/factory-rules response, so origin badges, the promote
+  // POST /settings/factory-rules response, so origin badges, the promote
   // affordances and reset buttons stay correct after a promote.
   let factoryRules = JSON.parse(JSON.stringify(
     (fieldDef(name) && fieldDef(name).default_value) || []));
@@ -2803,7 +2803,7 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
   // any other expanded rows. Structural changes (add/delete/reorder/reset/
   // toggle-enabled) DO rebuild because the visible row layout changes.
   // Both push the whole rule list into the global dirty overlay via setDirty
-  // so the page-level Save → /config/state persists it to config.local.json.
+  // so the page-level Save → /settings/state persists it to config.local.json.
   // Promoting (a separate action) writes config.json instead.
   function commitData() {
     if (isChecklist) return;   // checklist mode is read-only — no setDirty
@@ -3661,7 +3661,7 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
   async function _postFactory(arr) {
     let resp;
     try {
-      resp = await api('POST', '/config/factory-rules', { PIPELINE_RULES: arr });
+      resp = await api('POST', '/settings/factory-rules', { PIPELINE_RULES: arr });
     } catch (e) {
       alert('Could not reach the server.');
       return null;
@@ -3685,7 +3685,7 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
     return out;
   }
   async function _fetchFactory() {
-    const r = await api('GET', '/config/factory-rules');
+    const r = await api('GET', '/settings/factory-rules');
     if (!r.ok) throw new Error('HTTP ' + r.status);
     return (await r.json()).PIPELINE_RULES || [];
   }
@@ -3791,7 +3791,7 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
         { label: 'Clear local override', primary: true, onClick: async (close) => {
             let r;
             try {
-              r = await api('POST', '/config/factory-rules/clear-local-override');
+              r = await api('POST', '/settings/factory-rules/clear-local-override');
             } catch (e) { alert('Could not reach the server.'); return; }
             if (!r.ok) { alert('Clearing the local override failed.'); return; }
             close();
@@ -3854,7 +3854,7 @@ function pipelineTestPanel() {
 
   async function run() {
     out.innerHTML = '<em>running…</em>';
-    const r = await api('POST', '/config/test-pipeline', {
+    const r = await api('POST', '/settings/test-pipeline', {
       sample: sample.value,
       rules: currentValue('PIPELINE_RULES') || [],
     });
@@ -4078,7 +4078,7 @@ async function save() {
   // Disable BEFORE the await so rapid double-clicks can't fire two
   // POSTs with the same dirty payload. setDirty() re-enables on edit.
   $('save-btn').disabled = true;
-  const r = await api('POST', '/config/state', dirty);
+  const r = await api('POST', '/settings/state', dirty);
   if (r.status === 422) {
     const j = await r.json();
     const msg = (j.errors || [])
@@ -4140,7 +4140,7 @@ async function doRestart() {
     if (m0.ok) preBootId = (await m0.json()).boot_id || null;
   } catch {}
 
-  const r = await api('POST', '/config/restart', {});
+  const r = await api('POST', '/settings/restart', {});
   if (!r.ok) {
     $('restart-progress').classList.remove('show');
     let detail = r.status;
@@ -4238,7 +4238,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('restart-now').addEventListener('click', doRestart);
 
   // Probe the state endpoint to figure out whether a token is required.
-  const probe = await fetch('/config/state', {
+  const probe = await fetch('/settings/state', {
     headers: authHeaders(),
     cache: 'no-store',
   });
@@ -4267,7 +4267,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
   if (!probe.ok) {
     document.body.innerHTML = '<main style="padding:1.25rem;color:#ff7b72">'
-      + 'Could not load /config/state (' + probe.status + '). '
+      + 'Could not load /settings/state (' + probe.status + '). '
       + 'Check service logs.</main>';
     return;
   }

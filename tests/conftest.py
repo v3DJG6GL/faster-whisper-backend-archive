@@ -357,7 +357,7 @@ def app_module(tmp_path, monkeypatch, fake_model):
     monkeypatch.setattr(cfg, "DEFAULT_MODEL", "", raising=False)
 
     # config_store.save_overrides / load_overrides persist to the REAL
-    # <repo>/config.local.json by default — route tests that POST /config/state
+    # <repo>/config.local.json by default — route tests that POST /settings/state
     # or /quick-config/state would mutate the working tree and leak override
     # state between tests. Repoint both at a per-test temp file. The path is a
     # default ARG (bound at def time), so we rewrite each function's defaults

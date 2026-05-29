@@ -10,7 +10,7 @@
 #
 # Conversion extras (HF->CT2 auto-conversion): the script asks at install
 # time whether to install them when they're missing -- install them later
-# from /config's AUTO_CONVERT_HF_MODELS toggle requirement. Already-
+# from /settings's AUTO_CONVERT_HF_MODELS toggle requirement. Already-
 # installed extras are detected and the prompt is skipped silently.
 # -WithConvert forces install without prompting (CI / scripted use).
 #
@@ -110,7 +110,7 @@ if (-not (Test-Path $Python)) {
 }
 
 # --- optional: install HF->CT2 conversion extras ----------------------------
-# Required only when AUTO_CONVERT_HF_MODELS=true in /config. Adds ~2 GB
+# Required only when AUTO_CONVERT_HF_MODELS=true in /settings. Adds ~2 GB
 # (transformers + torch + accelerate).
 #
 # Decision tree:
@@ -157,7 +157,7 @@ if ($WithConvert) {
     Write-Host "  These let the backend auto-convert HuggingFace transformers"
     Write-Host "  Whisper checkpoints (e.g. Flurin17/whisper-large-v3-turbo-swiss-german)"
     Write-Host "  to CTranslate2 format on first load. Footprint: ~2 GB (torch + transformers"
-    Write-Host "  + accelerate). Required only when AUTO_CONVERT_HF_MODELS=true in /config."
+    Write-Host "  + accelerate). Required only when AUTO_CONVERT_HF_MODELS=true in /settings."
     $reply = Read-Host "Install conversion extras now? [y/N]"
     if ($reply -match '^(y|yes)$') {
         Install-ConvertDeps
@@ -386,7 +386,7 @@ Write-Host "Done. Service is running." -ForegroundColor Green
 Write-Host "  API:        http://localhost:8000/v1/audio/transcriptions"
 Write-Host "  Live logs:  http://localhost:8000/logs"
 Write-Host "  Stats:      http://localhost:8000/stats"
-Write-Host "  Admin UI:   http://localhost:8000/config  (only when ADMIN_UI_ENABLED=True in config.py, or WHISPER_ADMIN_UI=1)"
+Write-Host "  Admin UI:   http://localhost:8000/settings  (only when ADMIN_UI_ENABLED=True in config.py, or WHISPER_ADMIN_UI=1)"
 Write-Host "  App log:    $LogsDir\whisper.log"
 Write-Host "  Stdout/err: $LogsDir\$ServiceName.out.log  /  $LogsDir\$ServiceName.err.log"
 Write-Host ""

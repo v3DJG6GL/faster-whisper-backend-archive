@@ -175,9 +175,9 @@ CACHE_REBUILD_FIELDS: frozenset[str] = frozenset({"PIPELINE_RULES", "SUPPRESS_CH
 # =============================================================================
 # Surfaced everywhere a description is shown:
 #   - Pydantic Field(description=…) — see _F() helper below
-#   - /config/state payload — admin_routes.py adds .description from the
+#   - /settings/state payload — admin_routes.py adds .description from the
 #     Pydantic model_fields
-#   - /config admin WebUI — fieldRow() renders it as a <div class="help">
+#   - /settings admin WebUI — fieldRow() renders it as a <div class="help">
 #     line under each editor
 # Edit a string here, every consumer reflects it on next reload. Wording is
 # cross-validated against upstream docs (faster-whisper, OpenAI Whisper,
@@ -455,7 +455,7 @@ FIELD_DESCRIPTIONS: dict[str, str] = {
 
     # --- Access (allowlists) ---
     "ADMIN_ALLOWED_HOSTS":
-        "IP/CIDR allowlist for /config admin endpoints. Loopback "
+        "IP/CIDR allowlist for /settings admin endpoints. Loopback "
         "(127.0.0.1, ::1) is always implicitly allowed.",
     "STATS_ALLOWED_HOSTS":
         "IP/CIDR allowlist for /stats endpoints. Loopback always allowed; "
@@ -711,7 +711,7 @@ class MapRule(_RuleBase):
     # its value last changed (see quick_config_routes.post_state). Never written
     # by the client — drives newest-first ordering + the inline date column on
     # /quick-config. Keys not present in `map` are dropped by the validator so
-    # the two stay consistent even when an admin edits the map via /config.
+    # the two stay consistent even when an admin edits the map via /settings.
     map_meta: dict[str, int] = Field(default_factory=dict, max_length=500)
 
     @field_validator("map_meta", mode="after")
@@ -1474,7 +1474,7 @@ def save_overrides(payload: dict[str, Any], path: str = OVERRIDES_PATH) -> dict[
 
 def pipeline_rule_tags(rules: Any) -> list[str]:
     """Return the deduped, sorted union of every tag across the given
-    rule list. Used by `/config/state` + `/config/api-keys/api/users`
+    rule list. Used by `/settings/state` + `/settings/api-keys/api/users`
     to populate autocomplete in the tag-picker widget so admins don't
     have to remember the exact spelling.
 

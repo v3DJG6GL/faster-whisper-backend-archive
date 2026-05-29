@@ -1,20 +1,20 @@
-"""/config/api-keys — admin UI for per-user API key management.
+"""/settings/api-keys — admin UI for per-user API key management.
 
 Endpoints (all admin-only):
 
-  GET    /config/api-keys                       HTML page
-  GET    /config/api-keys/api/users             list users + key counts
-  POST   /config/api-keys/api/users             { username, is_admin }
-  DELETE /config/api-keys/api/users/{uid}       soft-revoke (cascades to keys)
-  GET    /config/api-keys/api/users/{uid}/keys  list keys for one user
-  POST   /config/api-keys/api/users/{uid}/keys  { label }   -> show-once raw key
-  DELETE /config/api-keys/api/users/{uid}/keys/{kid}        soft-revoke
+  GET    /settings/api-keys                       HTML page
+  GET    /settings/api-keys/api/users             list users + key counts
+  POST   /settings/api-keys/api/users             { username, is_admin }
+  DELETE /settings/api-keys/api/users/{uid}       soft-revoke (cascades to keys)
+  GET    /settings/api-keys/api/users/{uid}/keys  list keys for one user
+  POST   /settings/api-keys/api/users/{uid}/keys  { label }   -> show-once raw key
+  DELETE /settings/api-keys/api/users/{uid}/keys/{kid}        soft-revoke
 
 Last-admin guard: revoking the only admin key (or only admin user)
 returns 409. Prevents accidental lockout.
 
 The HTML page is a single-file React-less app: vanilla JS + sessionStorage
-bearer (same pattern as /config). Generates keys with a show-once modal —
+bearer (same pattern as /settings). Generates keys with a show-once modal —
 the raw key is copied to the clipboard, then never retrievable.
 """
 from __future__ import annotations
@@ -33,7 +33,7 @@ from auth import require_admin
 
 logger = logging.getLogger("whisper-api")
 
-router = APIRouter(prefix="/config/api-keys")
+router = APIRouter(prefix="/settings/api-keys")
 
 
 # ---------------------------------------------------------------------
@@ -541,7 +541,7 @@ _API_KEYS_HTML = r"""<!doctype html>
       Per-user access to each admin page. <strong>none</strong> hides
       the page entirely (403 on its API). <strong>own</strong> shows
       the page but filters records to the user's own; <strong>all</strong>
-      shows every user's data. <code>/config</code> and <code>/config/api-keys</code>
+      shows every user's data. <code>/settings</code> and <code>/settings/api-keys</code>
       are always admin-only and never appear here.
     </p>
     <div id="perm-matrix-wrap"></div>
@@ -775,7 +775,7 @@ _API_KEYS_HTML = r"""<!doctype html>
 
     // Tag-picker autocomplete source: union of every tag currently set
     // on any pipeline rule. Computed server-side (list_users_api) so
-    // an admin tagging a rule on /config sees the new tag in the
+    // an admin tagging a rule on /settings sees the new tag in the
     // matrix autocomplete after a reload.
     var availableTags = j.available_tags || [];
     // Per-exposed-rule tag list, used by the per-row "Will see: N of M"
@@ -940,7 +940,7 @@ _API_KEYS_HTML = r"""<!doctype html>
     if (tr._tagPicker) body.quick_config_tags = tr._tagPicker.getTags();
     btn.disabled = true;
     api('PATCH',
-        '/config/api-keys/api/users/' + encodeURIComponent(uid) + '/permissions',
+        '/settings/api-keys/api/users/' + encodeURIComponent(uid) + '/permissions',
         body)
       .then(function(r) {
         if (!r.ok) return r.text().then(function(t) { throw new Error(t); });
@@ -996,7 +996,7 @@ _API_KEYS_HTML = r"""<!doctype html>
       addBtn.textContent = '+ generate key';
       addBtn.onclick = function() {
         var label = labelInp.value.trim();
-        api('POST', '/config/api-keys/api/users/' + encodeURIComponent(u.id) + '/keys',
+        api('POST', '/settings/api-keys/api/users/' + encodeURIComponent(u.id) + '/keys',
             { label: label })
           .then(function(r) {
             if (!r.ok) return r.text().then(function(t) { throw new Error(t); });
@@ -1018,7 +1018,7 @@ _API_KEYS_HTML = r"""<!doctype html>
       revBtn.onclick = function() {
         if (!confirm('Revoke user "' + u.username +
             '"? This will also revoke all of their keys.')) return;
-        api('DELETE', '/config/api-keys/api/users/' + encodeURIComponent(u.id))
+        api('DELETE', '/settings/api-keys/api/users/' + encodeURIComponent(u.id))
           .then(function(r) {
             if (r.status === 409) {
               return r.json().then(function(j) {
@@ -1040,7 +1040,7 @@ _API_KEYS_HTML = r"""<!doctype html>
     // Fetch + render keys
     var listEl = document.createElement('div');
     card.appendChild(listEl);
-    api('GET', '/config/api-keys/api/users/' + encodeURIComponent(u.id) + '/keys')
+    api('GET', '/settings/api-keys/api/users/' + encodeURIComponent(u.id) + '/keys')
       .then(function(r) { return r.ok ? r.json() : { keys: [] }; })
       .then(function(j) {
         if (!j.keys || j.keys.length === 0) {
@@ -1082,7 +1082,7 @@ _API_KEYS_HTML = r"""<!doctype html>
             b.textContent = 'revoke';
             b.onclick = function() {
               if (!confirm('Revoke key ' + k.key_prefix + '…' + k.key_last4 + '?')) return;
-              api('DELETE', '/config/api-keys/api/users/' + encodeURIComponent(u.id) +
+              api('DELETE', '/settings/api-keys/api/users/' + encodeURIComponent(u.id) +
                   '/keys/' + encodeURIComponent(k.id))
                 .then(function(r) {
                   if (r.status === 409) {
@@ -1167,12 +1167,12 @@ _API_KEYS_HTML = r"""<!doctype html>
   }
 
   async function load() {
-    var r = await api('GET', '/config/api-keys/api/users');
+    var r = await api('GET', '/settings/api-keys/api/users');
     if (r.status === 401) {
       var v = await showTokenModal();
       if (!v) return;
       setToken(v);
-      r = await api('GET', '/config/api-keys/api/users');
+      r = await api('GET', '/settings/api-keys/api/users');
       // 403 after a valid bearer = "valid key, no admin scope" — keep
       // the bearer in storage and render the no-access landing. Don't
       // fall through to the `setToken('') + invalid key` branch below
@@ -1216,7 +1216,7 @@ _API_KEYS_HTML = r"""<!doctype html>
     // must never blank the key-management UI.
     window.__usage = { by_user: {}, by_key: {} };
     try {
-      var ur = await api('GET', '/config/api-keys/api/usage');
+      var ur = await api('GET', '/settings/api-keys/api/usage');
       if (ur.ok) window.__usage = await ur.json();
     } catch (_) {}
     renderMatrix(j);
@@ -1227,7 +1227,7 @@ _API_KEYS_HTML = r"""<!doctype html>
     var username = document.getElementById('new-username').value.trim();
     var is_admin = document.getElementById('new-is-admin').checked;
     if (!username) { showToast('Enter a username', 'err'); return; }
-    api('POST', '/config/api-keys/api/users', { username: username, is_admin: is_admin })
+    api('POST', '/settings/api-keys/api/users', { username: username, is_admin: is_admin })
       .then(function(r) {
         if (!r.ok) return r.text().then(function(t) { throw new Error(t); });
         return r.json();

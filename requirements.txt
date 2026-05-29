@@ -26,7 +26,7 @@ faster-whisper>=1.2.1
 # loading — real environment variables still work.
 python-dotenv>=1.2.2
 
-# Admin /config + /stats observability. nvidia-ml-py is the canonical 2025+
+# Admin /settings + /stats observability. nvidia-ml-py is the canonical 2025+
 # NVML binding (the legacy `pynvml` PyPI package is now a deprecated shim that
 # re-exports from nvidia-ml-py). It is pure-Python and optional at runtime —
 # system_stats.py degrades gracefully when import fails or no NVIDIA GPU is

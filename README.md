@@ -19,7 +19,7 @@ Self-hosted [faster-whisper](https://github.com/SYSTRAN/faster-whisper) API for 
 - Auto-capitalize after sentence ends; strips Whisper noise commas; lowercases mid-sentence non-nouns after stripped Whisper terminators
 - Live HTML log viewer at `/logs` (Server-Sent Events, color-coded pipeline trace per request)
 - Live system overview at `/stats` (loaded models + VRAM, GPU/CPU/RAM, request latency, recent transcriptions, sparklines — works fully offline, no CDN)
-- Admin WebUI at `/config` for editing every setting without redeploying (on by default; allowlist + bearer-token gated)
+- Admin WebUI at `/settings` for editing every setting without redeploying (on by default; allowlist + bearer-token gated)
 - **Configure everything via environment** — every setting has a `WHISPER_*` variable; pin them via `.env`, docker-compose, or the service env. Env-pinned settings are shown read-only in the admin WebUI.
 - Cross-page nav with severity pills (WARN/ERR/CRIT in the last 60 s) on every page
 - Runs anywhere: Windows Service, Linux systemd, Docker, or bare `python main.py`
@@ -109,7 +109,7 @@ print(r.text)
 
 ## Configuration
 
-Most knobs live in **`config.py`** at the repo root — models, default prompt, server host/port, log paths, faster-whisper transcribe defaults. The **text post-processing pipeline rules** (dictation map, German non-noun list, regex tidy rules) live in a separate committed file, **`config.json`** — see [Post-processing pipeline](#post-processing-pipeline). Edit either file directly to change behavior, then restart the service (`systemctl restart whisper-api` / `Restart-Service WhisperAPI` / the `/config` restart button) to pick up the changes. The algorithm code in `main.py` doesn't need to be touched.
+Most knobs live in **`config.py`** at the repo root — models, default prompt, server host/port, log paths, faster-whisper transcribe defaults. The **text post-processing pipeline rules** (dictation map, German non-noun list, regex tidy rules) live in a separate committed file, **`config.json`** — see [Post-processing pipeline](#post-processing-pipeline). Edit either file directly to change behavior, then restart the service (`systemctl restart whisper-api` / `Restart-Service WhisperAPI` / the `/settings` restart button) to pick up the changes. The algorithm code in `main.py` doesn't need to be touched.
 
 Layers of overrides, **env wins over file wins over in-repo default**:
 
@@ -151,16 +151,16 @@ A few of the most common variables:
 | `WHISPER_PRELOAD_MODELS` | `PRELOAD_MODELS` | Comma-separated list to load eagerly at startup (no first-request warm-up) |
 | `WHISPER_SERVER_PORT` | `SERVER_PORT` | Listen port (also update the Docker `ports:` mapping) |
 | `WHISPER_DEFAULT_PROMPT` | `DEFAULT_PROMPT` | Initial prompt when request omits `prompt` (empty string disables) |
-| `WHISPER_ADMIN_UI` | `ADMIN_UI_ENABLED` | `0` unregisters `/config*` (on by default) |
-| `WHISPER_ADMIN_ALLOWED_HOSTS` | `ADMIN_ALLOWED_HOSTS` | Comma-separated IPs/CIDRs allowed to reach `/config` (loopback always implicit) |
+| `WHISPER_ADMIN_UI` | `ADMIN_UI_ENABLED` | `0` unregisters `/settings*` (on by default) |
+| `WHISPER_ADMIN_ALLOWED_HOSTS` | `ADMIN_ALLOWED_HOSTS` | Comma-separated IPs/CIDRs allowed to reach `/settings` (loopback always implicit) |
 | `WHISPER_STATS_ALLOWED_HOSTS` | `STATS_ALLOWED_HOSTS` | Comma-separated IPs/CIDRs allowed to reach `/stats` (loopback always implicit) |
 
 ### Allowed hosts
 
-`/config` and `/stats` are gated by IP/CIDR allowlists. Defaults are `["127.0.0.1", "::1"]` — loopback only. Loopback is *always* implicitly allowed regardless of the configured list, so a typo can never lock you out from the box itself.
+`/settings` and `/stats` are gated by IP/CIDR allowlists. Defaults are `["127.0.0.1", "::1"]` — loopback only. Loopback is *always* implicitly allowed regardless of the configured list, so a typo can never lock you out from the box itself.
 
 ```python
-# Allow the local LAN to reach /stats but keep /config loopback-only:
+# Allow the local LAN to reach /stats but keep /settings loopback-only:
 ADMIN_ALLOWED_HOSTS = ["127.0.0.1", "::1"]
 STATS_ALLOWED_HOSTS = ["127.0.0.1", "::1", "192.168.1.0/24"]
 ```
@@ -175,9 +175,9 @@ CIDR is accepted (`192.168.0.0/16`) and so are bare IPs (`10.0.0.5`).
 - `GET  /logs/stream` — raw SSE feed.
 - `GET  /stats` — system overview dashboard. Allowlist-gated (`STATS_ALLOWED_HOSTS`; loopback always allowed).
 - `GET  /stats/snapshot`, `GET /stats/stream` — JSON snapshot + SSE stream of the same data (~1 Hz).
-- `GET  /config` — admin WebUI (registered by default; set `WHISPER_ADMIN_UI=0` to disable). Allowlist-gated (`ADMIN_ALLOWED_HOSTS`; loopback always allowed) plus API-key auth.
-- `GET  /config/api-keys` — admin UI for per-user API key management.
-- `GET/POST /config/state`, `POST /config/restart` — admin JSON endpoints; require `Authorization: Bearer <api_key>` resolving to a user with `is_admin=True`.
+- `GET  /settings` — admin WebUI (registered by default; set `WHISPER_ADMIN_UI=0` to disable). Allowlist-gated (`ADMIN_ALLOWED_HOSTS`; loopback always allowed) plus API-key auth.
+- `GET  /settings/api-keys` — admin UI for per-user API key management.
+- `GET/POST /settings/state`, `POST /settings/restart` — admin JSON endpoints; require `Authorization: Bearer <api_key>` resolving to a user with `is_admin=True`.
 - `GET  /auth/whoami` — resolve the current bearer to `{open_mode, user_id, username, is_admin}`. WebUI uses this to render the login modal and the OPEN-mode banner.
 
 ### Model selection examples
@@ -223,7 +223,7 @@ Get-Service     WhisperAPI
 ```
 
 Docker: `docker compose restart` / `docker compose down`. Any deployment can also
-self-restart from the admin UI (`/config` → **restart**) — it re-execs the process
+self-restart from the admin UI (`/settings` → **restart**) — it re-execs the process
 on Linux/macOS and uses WinSW on Windows.
 
 `Get-Content -Wait logs\whisper.log` to tail logs in a terminal, or open `http://localhost:8000/logs`.
@@ -243,7 +243,7 @@ The 13 seeded defaults handle Swiss German orthography (`ß`→`ss`), Whisper no
 
 **Ordering invariants:** `dictation-map` multi-word phrases must precede their single-word components (the alternation regex is rebuilt longest-first, so the longest phrase wins); the `terminal` trim rule is always last.
 
-**Editing — the unified editor at `/config`** (Pipeline section). One rule list
+**Editing — the unified editor at `/settings`** (Pipeline section). One rule list
 shows the **effective** pipeline (config.json overlaid by config.local.json). Edits
 save to `config.local.json` via the page Save (gitignored, per-deployment). Each
 rule carries an **origin badge**:
@@ -285,9 +285,9 @@ The nav row at the top of every page (logs ↔ stats ↔ config) also surfaces t
 
 ## Admin WebUI (optional)
 
-A second WebUI at `/config` lets you edit any setting from `config.py` from the browser, with hot-reload for safe knobs (transcribe params, dictation map, prompt) and an automatic service restart for cold ones (server port, log file, preload list).
+A second WebUI at `/settings` lets you edit any setting from `config.py` from the browser, with hot-reload for safe knobs (transcribe params, dictation map, prompt) and an automatic service restart for cold ones (server port, log file, preload list).
 
-**On by default** (`ADMIN_UI_ENABLED = True`). Set `ADMIN_UI_ENABLED = False` in `config.py` (or `WHISPER_ADMIN_UI=0`) and restart to unregister `/config*`. The page opens at `http://localhost:8000/config` from the server itself or any host in `ADMIN_ALLOWED_HOSTS`. Settings pinned by a `WHISPER_*` env var appear **read-only** (greyed out, badged with the variable name) since the environment takes precedence.
+**On by default** (`ADMIN_UI_ENABLED = True`). Set `ADMIN_UI_ENABLED = False` in `config.py` (or `WHISPER_ADMIN_UI=0`) and restart to unregister `/settings*`. The page opens at `http://localhost:8000/settings` from the server itself or any host in `ADMIN_ALLOWED_HOSTS`. Settings pinned by a `WHISPER_*` env var appear **read-only** (greyed out, badged with the variable name) since the environment takes precedence.
 
 ### Authentication: per-user API keys
 
@@ -295,7 +295,7 @@ The transcription endpoint and every WebUI page are gated by **per-user API keys
 
 **Bootstrap.** On a fresh install with no admin key in the DB, the server starts in **OPEN mode**: every request is accepted as a synthetic admin, a red banner appears on every WebUI page, and a `WARNING` log line fires every 60 s. This is the operator's prompt to generate the first admin key. Two ways:
 
-1. **In the UI** — open `/config/api-keys`, click "+ add user" with admin=true, then "+ generate key", and copy the raw key from the show-once modal.
+1. **In the UI** — open `/settings/api-keys`, click "+ add user" with admin=true, then "+ generate key", and copy the raw key from the show-once modal.
 2. **Via env var** — set `WHISPER_BOOTSTRAP_ADMIN_KEY=wk_…` on first start. A `bootstrap-admin` user is created (or skipped if the same key hash is already present) with that exact raw key. Subsequent starts no-op.
 
 Once at least one active admin key exists, the OPEN-mode banner disappears and 401 is returned to unauthenticated callers.
@@ -307,7 +307,7 @@ Once at least one active admin key exists, the OPEN-mode banner disappears and 4
 **Multi-user.** Each capture is tagged with the originating `user_id`. Non-admin users see only their own captures in `/captures`; admins see all and can filter by user. Group merging is locked to a single speaker — the server rejects any merge whose members span more than one user.
 
 Other layers:
-- **Feature flag**: `ADMIN_UI_ENABLED = True` (the default; or `WHISPER_ADMIN_UI=1`) registers the routes. Set it `False` / `WHISPER_ADMIN_UI=0` and `/config*` returns 404.
+- **Feature flag**: `ADMIN_UI_ENABLED = True` (the default; or `WHISPER_ADMIN_UI=1`) registers the routes. Set it `False` / `WHISPER_ADMIN_UI=0` and `/settings*` returns 404.
 - **Host allowlist**: `ADMIN_ALLOWED_HOSTS` keeps the admin endpoints reachable only from the configured CIDRs (loopback always implicit).
 - **Server-side validation**: every payload is validated against `config_store.AdminConfig` (Pydantic v2).
 - **Auto-restart**: when a "cold" setting changes (server port, log file, preload list, …), a confirmation modal asks whether to restart the service. WinSW relaunches the wrapper; the page polls `/v1/models` until back up.
@@ -341,9 +341,9 @@ Assets (`static/`):
 ```
 main.py                    FastAPI app + post-processing pipeline + log viewer
 config.py                  User-tunable scalar settings (models, prompt, server, logging, ...)
-config.json                Committed factory pipeline rules (PIPELINE_RULES); editable via /config
+config.json                Committed factory pipeline rules (PIPELINE_RULES); editable via /settings
 config_store.py            Admin-WebUI persistence layer (Pydantic schema, atomic writes)
-admin_routes.py            Admin /config endpoints + HTML page (on by default; disable with WHISPER_ADMIN_UI=0)
+admin_routes.py            Admin /settings endpoints + HTML page (on by default; disable with WHISPER_ADMIN_UI=0)
 stats_routes.py            /stats dashboard endpoints + HTML page (always on, allowlist-gated)
 metrics.py                 In-process request metrics (counters, latency ring, recent transcriptions)
 system_stats.py            GPU + host snapshot (pynvml + psutil; degrades gracefully if NVML missing)
@@ -351,7 +351,7 @@ web_common.py              Shared helpers: allowlist gate, nav HTML, severity co
 restart_service.py         Detached self-restart helper (Windows-only)
 auth.py                    HTTPBearer dep — get_current_user / require_admin + OPEN-mode loop
 api_keys_store.py          users + api_keys SQLite store (SHA-256 hash, soft revoke, O(1) lookup)
-api_keys_routes.py         /config/api-keys admin UI for per-user key management
+api_keys_routes.py         /settings/api-keys admin UI for per-user key management
 audio_merge.py             stdlib-wave PCM splicer for ≤28 s training-sample packing
 capture_groups_store.py    capture_groups table + dissolve / stale / regenerate helpers
 captures_store.py          Capture rows + audio fanout, retention, eviction

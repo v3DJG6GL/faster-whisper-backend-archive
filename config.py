@@ -411,9 +411,9 @@ MODEL_OVERRIDES: "dict[str, dict[str, object]]" = {}
 
 
 # =============================================================================
-# Admin WebUI (optional /config browser editor)
+# Admin WebUI (optional /settings browser editor)
 # =============================================================================
-# Off → /config endpoints aren't registered at all. Auth on the endpoints
+# Off → /settings endpoints aren't registered at all. Auth on the endpoints
 # themselves is per-user API key (see API_KEYS_DB below). With no admin key
 # configured the server runs in OPEN mode and warns prominently in the UI
 # and logs.
@@ -528,7 +528,7 @@ USAGE_RETENTION_DAYS = 0
 # Bootstrap: if no active admin key exists in the DB, the server starts in
 # OPEN mode — every request is accepted as a synthetic admin — and emits a
 # WARNING every 60 s plus a red banner on every WebUI page. The operator
-# creates the first admin user/key in /config/api-keys.
+# creates the first admin user/key in /settings/api-keys.
 #
 # Optional shortcut: setting WHISPER_BOOTSTRAP_ADMIN_KEY at startup creates
 # (if needed) a `bootstrap-admin` user holding that exact key, so the

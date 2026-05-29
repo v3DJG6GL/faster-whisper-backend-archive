@@ -73,7 +73,7 @@ _KEY_BYTES = 32   # secrets.token_urlsafe(32) → 43-char base64url, 256-bit ent
 #   "own"  → page visible, store layer filters by caller's user_id.
 #   "all"  → page visible, no user_id filter (admin-equivalent visibility).
 # Admins (is_admin=1) bypass this entirely via the super-role short-circuit.
-# /config and /config/api-keys are admin-only by definition and never appear.
+# /settings and /settings/api-keys are admin-only by definition and never appear.
 PAGES: tuple[str, ...] = ("logs", "stats", "quick_config", "reports", "captures")
 
 # Per-user data pages — support the full none|own|all triple.

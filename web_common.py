@@ -1,5 +1,5 @@
 """
-Shared helpers used by the /logs, /config, /stats, and /quick-config pages.
+Shared helpers used by the /logs, /settings, /stats, and /quick-config pages.
 
   - require_allowed_host(allowlist) — FastAPI dependency that 403s callers
     not in the allowlist. Allowlist accepts bare IPs or CIDRs.
@@ -42,7 +42,7 @@ def _build_networks(allowlist: list[str]) -> list[ipaddress._BaseNetwork]:
         try:
             nets.append(ipaddress.ip_network(entry, strict=False))
         except ValueError:
-            # Bad entry — skip silently. The /config endpoint validates inputs;
+            # Bad entry — skip silently. The /settings endpoint validates inputs;
             # this is a runtime defense for handwritten config edits.
             continue
     return nets
@@ -58,7 +58,7 @@ def require_allowed_host(allowlist_ref: Callable[[], list[str]]) -> Callable[[Re
 
     Loopback (`127.0.0.1`, `::1`) is ALWAYS allowed in addition to the
     configured list, so a misconfigured CIDR can never lock the local
-    operator out of /config — they can still fix the entry from the box.
+    operator out of /settings — they can still fix the entry from the box.
     """
 
     def _dep(request: Request) -> None:
@@ -334,10 +334,10 @@ header .subbar .filt-label { display: inline-flex; align-items: center; gap: 0.3
 }
 
 /* ---- Admin-only nav elements ----
-   logs/stats/config nav links + sev pills are marked .admin-only at
+   logs/stats/settings nav links + sev pills are marked .admin-only at
    render time. Hidden by default; revealed when the page's JS adds
    `body.role-admin` after a successful auth-required state fetch.
-   /config, /logs, /stats add the class unconditionally (their state
+   /settings, /logs, /stats add the class unconditionally (their state
    endpoints already require admin token). /quick-config adds it only
    when /quick-config/state returns role=admin — non-admin user keys
    never see admin-only chrome. */
@@ -392,8 +392,8 @@ header .page-link.allowed { display: inline-flex; }
   background: #21262d; color: var(--bold);
 }
 
-/* Tag-picker widget — shared between /config rule editor and the
-   /config/api-keys permissions matrix. Renders as a single
+/* Tag-picker widget — shared between /settings rule editor and the
+   /settings/api-keys permissions matrix. Renders as a single
    border-bounded row of pills + an inline text input.
    Validation: TAG_RE = lowercase a-z0-9- only, 1-32 chars, no
    leading/trailing hyphen. Bad input gets a red border via .invalid.
@@ -495,7 +495,7 @@ LOGOUT_BTN_HTML = (
 
 # Global reload button — the {{RELOAD}} fragment, in every page's right-hand
 # header utility cluster (left of logout). Wired in OPEN_MODE_BANNER_JS: pages
-# that expose a soft refresh set `window._pageReload` (config/keys re-fetch
+# that expose a soft refresh set `window._pageReload` (settings/keys re-fetch
 # their data); everywhere else it falls back to a full location.reload().
 # Always visible (a refresh is meaningful regardless of auth state).
 RELOAD_BTN_HTML = (
@@ -546,7 +546,7 @@ OPEN_MODE_BANNER_JS = r"""
   // without re-querying the DOM.
   //   * __current_page = permission key (for can()/scope() lookups)
   //   * __current_page_path = full URL path (for display in the landing
-  //     heading, so a nested page like /config/api-keys reads correctly
+  //     heading, so a nested page like /settings/api-keys reads correctly
   //     instead of showing just the permission key '/api-keys').
   try {
     var meta = document.querySelector('meta[name=page-key]');
@@ -607,7 +607,7 @@ OPEN_MODE_BANNER_JS = r"""
             + 'position:sticky;top:0;z-index:20;';
           b.innerHTML = '⚠ No admin API key set — the server is in '
             + 'OPEN mode and anyone reachable can use it. '
-            + '<a href="/config/api-keys" style="color:#ffd1d1;text-decoration:underline">'
+            + '<a href="/settings/api-keys" style="color:#ffd1d1;text-decoration:underline">'
             + 'Generate the first admin key</a>.';
           document.body.insertBefore(b, document.body.firstChild);
         }
@@ -615,8 +615,8 @@ OPEN_MODE_BANNER_JS = r"""
         var isAdmin = !!j.is_admin;
         var perms = (j.permissions && j.permissions.pages) || {};
 
-        // `body.role-admin` reveals admin-only chrome (/config +
-        // /config/api-keys nav links, severity pills, in-page admin
+        // `body.role-admin` reveals admin-only chrome (/settings +
+        // /settings/api-keys nav links, severity pills, in-page admin
         // buttons). Pages used to add it unconditionally after a successful
         // state fetch, which leaked admin chrome to non-admins on /stats,
         // /logs and /reports.
@@ -663,7 +663,7 @@ OPEN_MODE_BANNER_JS = r"""
   // Every page renders #logout-btn (.auth-action) in the header utility
   // cluster. Auth is one shared bearer, so a single handler logs out from
   // anywhere: clear the token, announce the change, reload (which re-shows
-  // the login card on /config + /config/api-keys, or the no-access landing
+  // the login card on /settings + /settings/api-keys, or the no-access landing
   // elsewhere). Visibility tracks token presence so the control is hidden
   // when logged out / in open mode.
   function _syncAuthActions() {
@@ -686,7 +686,7 @@ OPEN_MODE_BANNER_JS = r"""
 
   // ---- Global reload ----
   // Every page renders #reload-btn in the header utility cluster. Pages that
-  // can refresh in place set `window._pageReload` (e.g. /config + /config/api-
+  // can refresh in place set `window._pageReload` (e.g. /settings + /settings/api-
   // keys re-fetch their data); elsewhere we do a full page reload. Read at
   // click time so the page's init can register the hook after this runs.
   var _reloadBtn = document.getElementById('reload-btn');
@@ -828,7 +828,7 @@ function _renderNoAccessLanding(opts) {
   }).join('');
 
   // Heading slug: prefer the full URL path stashed by OPEN_MODE_BANNER_JS
-  // (e.g. "/config/api-keys"), then fall back to a derived form, then to
+  // (e.g. "/settings/api-keys"), then fall back to a derived form, then to
   // an empty suffix. Admin-only pages get the URL too — never the bare
   // sentinel.
   var displayPath = window.__current_page_path || '';
@@ -877,8 +877,8 @@ function _renderNotAdminLanding() {
 NOT_ADMIN_LANDING_GLOBAL_JS = "<script>" + NOT_ADMIN_LANDING_JS + "</script>"
 
 
-# Shared tag-picker widget used on /config (per-rule tag editor) and
-# /config/api-keys (per-user tag editor in the permissions matrix).
+# Shared tag-picker widget used on /settings (per-rule tag editor) and
+# /settings/api-keys (per-user tag editor in the permissions matrix).
 # DOM-pure factory: `_renderTagPicker(opts) -> { el, getTags, setTags,
 # setAvailable }`. Caller mounts the returned element wherever and
 # subscribes to `opts.onChange(newTags)`.
@@ -1077,7 +1077,7 @@ SEV_POLLER_JS = """
 """
 
 
-# Per-rule body editors shared by /config (full editor with drag-reorder etc.)
+# Per-rule body editors shared by /settings (full editor with drag-reorder etc.)
 # and /quick-config (read-only header + body editor only). Defined as
 # top-level functions so both pages can call them with their own
 # `commitData` callback. The `commitData` argument is invoked by every
@@ -1179,7 +1179,7 @@ function _makeMapRow(rule, key, val, commitData, datalistId, onEnter, ts, showDa
   const ki = document.createElement('input');
   ki.type = 'text'; ki.value = _esc(key);
   // Spoken-word cell opts into a datalist on /quick-config so end-users
-  // get autocomplete from recent transcription FINALs. Admin /config
+  // get autocomplete from recent transcription FINALs. Admin /settings
   // doesn't pass datalistId — no autocomplete on the admin page (it
   // would clutter long maps).
   if (datalistId) ki.setAttribute('list', datalistId);
@@ -1247,19 +1247,19 @@ function renderTypeEditor(rule, commitData, opts) {
   //   makeSaveBtn     — `() => HTMLButtonElement` factory. When provided, the
   //                     editor appends a per-rule Save button. /quick-config
   //                     passes a factory closed over the global dirty Set;
-  //                     /config (admin) omits this opt → no per-card Save.
+  //                     /settings (admin) omits this opt → no per-card Save.
   //   commitOnEnter   — `() => void` callback. When provided, pressing Enter
   //                     inside any text input in this editor fires it (after
   //                     a one-tick guard for native datalist picks). Skipped
   //                     for the cb:wordlist textarea (Enter inserts newline)
   //                     and the terminal type (no inputs). /quick-config
-  //                     passes `doSave`; admin /config omits → Enter inert.
+  //                     passes `doSave`; admin /settings omits → Enter inert.
   opts = opts || {};
   const onEnter = opts.commitOnEnter;
   const box = document.createElement('div');
   box.className = 'rule-editor';
 
-  // Rule rationale / documentation. Only the admin /config editor passes
+  // Rule rationale / documentation. Only the admin /settings editor passes
   // `showNote` — /quick-config omits it (non-admin users cannot patch the
   // `note` field, see _PATCH_ALLOWED_FIELDS in quick_config_routes.py).
   if (opts.showNote) {
@@ -1448,8 +1448,8 @@ def _nav_items(current: str) -> list[tuple[str, str, bool]]:
         ("stats", "/stats", current == "stats"),
     ]
     if getattr(cfg, "ADMIN_UI_ENABLED", False):
-        items.append(("config", "/config", current == "config"))
-        items.append(("keys", "/config/api-keys", current == "api-keys"))
+        items.append(("settings", "/settings", current == "settings"))
+        items.append(("keys", "/settings/api-keys", current == "api-keys"))
         items.append(("quick", "/quick-config", current == "quick-config"))
         items.append(("reports", "/reports", current == "reports"))
         items.append(("captures", "/captures", current == "captures"))
@@ -1462,7 +1462,7 @@ def nav_html(current: str) -> str:
     can live in the header's right-hand utility cluster."""
     # Two visibility tracks:
     #
-    #   - "admin-only" — config + api-keys + sev pills. These stay all-or-
+    #   - "admin-only" — settings + api-keys + sev pills. These stay all-or-
     #     nothing on the existing `body.role-admin` class (CSS hides by
     #     default; pages add the class after a successful admin-API ping).
     #
@@ -1478,7 +1478,7 @@ def nav_html(current: str) -> str:
         "reports":  "reports",
         "captures": "captures",
     }
-    admin_only_labels = {"config", "keys"}
+    admin_only_labels = {"settings", "keys"}
     parts: list[str] = ['<span class="navrow">']
     for label, href, active in _nav_items(current):
         classes = ["navlink"]
@@ -1543,8 +1543,8 @@ def render_page(template: str, current: str) -> str:
       - {{PAGE_META}}            → <meta name="page-key" ...> carrier so
                                    shared JS knows which page it's on
       - {{TAG_PICKER_JS}}        → window._renderTagPicker(opts) widget
-                                   shared by /config rule editor +
-                                   /config/api-keys permissions matrix
+                                   shared by /settings rule editor +
+                                   /settings/api-keys permissions matrix
       - {{HEADER_TITLE}}         → uniform page-title string —
                                    "faster-whisper-backend · <slug>"
                                    plain text, used inside <title>
@@ -1589,7 +1589,7 @@ def render_page(template: str, current: str) -> str:
 
 # Maps the `current=` argument passed by each page route into the
 # permission-key used by api_keys_store.PAGES. Pages absent from this
-# map (api-keys, config) are admin-only — they don't participate in
+# map (api-keys, settings) are admin-only — they don't participate in
 # per-page scope gating; the central JS short-circuits for them.
 _PAGE_KEY_BY_CURRENT: dict[str, str] = {
     "logs":         "logs",
@@ -1600,14 +1600,14 @@ _PAGE_KEY_BY_CURRENT: dict[str, str] = {
     # Admin-only pages: emit a sentinel so the JS can distinguish
     # "no per-page perm to check" from "we're on a data page that maps
     # to a key in the permissions dict".
-    "config":       "__admin_only__",
+    "settings":     "__admin_only__",
     "api-keys":     "__admin_only__",
 }
 
 # Display-URL for each page, used as the heading slug in the no-access
 # landing. Keeps the rendered slug in lockstep with what the user typed
 # in the address bar (the permission-key alone is misleading for nested
-# routes like /config/api-keys — without this, the landing would say
+# routes like /settings/api-keys — without this, the landing would say
 # "No access to /api-keys").
 _PAGE_PATH_BY_CURRENT: dict[str, str] = {
     "logs":         "/logs",
@@ -1615,8 +1615,8 @@ _PAGE_PATH_BY_CURRENT: dict[str, str] = {
     "quick-config": "/quick-config",
     "reports":      "/reports",
     "captures":     "/captures",
-    "config":       "/config",
-    "api-keys":     "/config/api-keys",
+    "settings":     "/settings",
+    "api-keys":     "/settings/api-keys",
 }
 
 
@@ -1627,7 +1627,7 @@ _PAGE_PATH_BY_CURRENT: dict[str, str] = {
 _HEADER_SLUG_BY_CURRENT: dict[str, str] = {
     "logs":         "logs",
     "stats":        "stats",
-    "config":       "config",
+    "settings":     "settings",
     "api-keys":     "API keys",
     "quick-config": "quick config",
     "reports":      "reports",

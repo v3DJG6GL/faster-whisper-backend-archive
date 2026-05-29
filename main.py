@@ -597,15 +597,15 @@ def _format_segments_section(seg_diag: list[dict], info, kwargs: dict) -> list[s
             out.append(f"    likely cause: VAD ate audio  "
                        f"(duration_after_vad={float(dav):.2f}s vs {duration:.2f}s)")
             out.append("    next step:    set VAD_FILTER=false or "
-                       "VAD_MIN_SILENCE_MS=250 in /config")
+                       "VAD_MIN_SILENCE_MS=250 in /settings")
         elif ip:
             out.append("    likely cause: initial_prompt may be poisoning decode")
             out.append("                  (tnfru/primeline finetunes); "
-                       "clear DEFAULT_PROMPT in /config")
+                       "clear DEFAULT_PROMPT in /settings")
         else:
             out.append("    likely cause: thresholds suppressed all segments")
             out.append("                  try disabling NO_SPEECH / LOG_PROB / "
-                       "COMPRESSION_RATIO thresholds in /config")
+                       "COMPRESSION_RATIO thresholds in /settings")
         return out
 
     out = [_section_rule(f"Segments  (n={n})")]
@@ -1254,7 +1254,7 @@ async def _idle_evictor() -> None:
 
 async def _reports_retention_loop() -> None:
     """Hourly retention sweep for the reports store. Lazy-imports
-    cfg.REPORTS_RETENTION_DAYS each tick so admin /config edits take
+    cfg.REPORTS_RETENTION_DAYS each tick so admin /settings edits take
     effect on the next cycle without a service restart. Cancellation
     on shutdown is the normal exit path."""
     import reports_store
@@ -1362,7 +1362,7 @@ async def lifespan(app: FastAPI):
 
     # Open the API-keys SQLite store and start the open-mode warning loop.
     # In OPEN mode (no admin key exists yet) the loop nags every 60 s; this
-    # is the operator's prompt to bootstrap an admin via /config/api-keys.
+    # is the operator's prompt to bootstrap an admin via /settings/api-keys.
     # Optional WHISPER_BOOTSTRAP_ADMIN_KEY env var creates the very first
     # admin in one shot without any UI.
     open_mode_task = None
@@ -2559,7 +2559,7 @@ async def severity_snapshot():
     (nav HTML render, /stats payload) — WARNING+ records since process
     start, bounded by the 2000-entry ring. Wide-open like /logs — three
     integers, no PII. The poller in web_common.SEV_POLLER_JS hits this
-    every 5 s on /logs, /stats, and /config so all three pages stay
+    every 5 s on /logs, /stats, and /settings so all three pages stay
     synced to the server-side truth."""
     import web_common
     return web_common.severity_counts()
@@ -2583,7 +2583,7 @@ except Exception as _e:
 
 
 # =============================================================================
-# /config - admin WebUI (opt-in)
+# /settings - admin WebUI (opt-in)
 # =============================================================================
 # Off by default: registered only when cfg.ADMIN_UI_ENABLED is True (set in
 # config.py or via WHISPER_ADMIN_UI=1). Auth on the endpoints themselves is
@@ -2594,12 +2594,12 @@ if cfg.ADMIN_UI_ENABLED:
     try:
         from admin_routes import router as _admin_router
         app.include_router(_admin_router)
-        # /config/api-keys — admin UI for per-user key management. Same
-        # auth shape (admin host + admin key) as /config.
+        # /settings/api-keys — admin UI for per-user key management. Same
+        # auth shape (admin host + admin key) as /settings.
         from api_keys_routes import router as _api_keys_router
         app.include_router(_api_keys_router)
         logger.info(
-            "Admin UI enabled at /config (allowlist=%s; auth=API key)",
+            "Admin UI enabled at /settings (allowlist=%s; auth=API key)",
             cfg.ADMIN_ALLOWED_HOSTS,
         )
         # /quick-config piggybacks on the admin UI: same allowlist, same

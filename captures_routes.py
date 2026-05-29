@@ -6893,7 +6893,7 @@ _CAPTURES_HTML = r"""<!doctype html>
       var empty = document.createElement('div');
       empty.className = 'empty-state';
       empty.innerHTML = _allCaptures.length === 0
-        ? '<strong>No captures yet.</strong> Enable <em>CAPTURE_RECORDINGS_ENABLED</em> in /config and send a transcription request.'
+        ? '<strong>No captures yet.</strong> Enable <em>CAPTURE_RECORDINGS_ENABLED</em> in /settings and send a transcription request.'
         : 'No captures match the current filters.';
       list.appendChild(empty);
       return;

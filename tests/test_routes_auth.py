@@ -9,33 +9,33 @@ from conftest import bearer
 def test_open_mode_admin_everywhere(client):
     # No admin key => open mode => synthetic admin can reach admin routes.
     assert client.get("/auth/whoami").json()["is_admin"] is True
-    assert client.get("/config/state").status_code == 200
+    assert client.get("/settings/state").status_code == 200
 
 
 def test_locked_down_no_bearer_is_401(client, make_user_key):
     # Creating the first admin key flips the server to locked-down.
     make_user_key("root", is_admin=True)
-    r = client.get("/config/state")
+    r = client.get("/settings/state")
     assert r.status_code == 401
 
 
 def test_locked_down_admin_bearer_ok(client, make_user_key):
     _uid, raw = make_user_key("root", is_admin=True)
-    r = client.get("/config/state", headers=bearer(raw))
+    r = client.get("/settings/state", headers=bearer(raw))
     assert r.status_code == 200
 
 
 def test_locked_down_bad_bearer_is_401(client, make_user_key):
     make_user_key("root", is_admin=True)
-    r = client.get("/config/state", headers=bearer("wk_not_a_real_key"))
+    r = client.get("/settings/state", headers=bearer("wk_not_a_real_key"))
     assert r.status_code == 401
 
 
 def test_non_admin_403_on_admin_route(client, make_user_key):
     make_user_key("root", is_admin=True)
     _uid, raw = make_user_key("alice", is_admin=False)
-    # /config/state requires admin -> 403 for a non-admin key.
-    r = client.get("/config/state", headers=bearer(raw))
+    # /settings/state requires admin -> 403 for a non-admin key.
+    r = client.get("/settings/state", headers=bearer(raw))
     assert r.status_code == 403
 
 
@@ -64,13 +64,13 @@ def test_host_gate_rejects_non_loopback(app_module):
     # Build a SEPARATE client from a non-loopback source IP. The host gate
     # 403s before auth on host-gated routes.
     with TestClient(app_module.app, client=("8.8.8.8", 1)) as c:
-        r = c.get("/config/state")
+        r = c.get("/settings/state")
         assert r.status_code == 403
 
 
 def test_host_gate_allows_loopback(client):
     # The default loopback client is admitted by the host gate.
-    assert client.get("/config/state").status_code == 200
+    assert client.get("/settings/state").status_code == 200
 
 
 def test_cross_user_report_read_is_404(client, make_user_key):
