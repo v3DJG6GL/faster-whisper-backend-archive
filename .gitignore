@@ -31,6 +31,16 @@ recent_transcriptions.local.sqlite3
 recent_transcriptions.local.sqlite3-shm
 recent_transcriptions.local.sqlite3-wal
 
+# API key store (SQLite + WAL/SHM)
+api_keys.local.sqlite3
+api_keys.local.sqlite3-shm
+api_keys.local.sqlite3-wal
+
+# Usage/metrics store (SQLite + WAL/SHM)
+usage.local.sqlite3
+usage.local.sqlite3-shm
+usage.local.sqlite3-wal
+
 # Editor / IDE
 .vscode/
 .idea/
