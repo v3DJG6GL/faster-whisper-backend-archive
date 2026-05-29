@@ -7,6 +7,12 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Test / coverage artifacts
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+
 # Local environment / secrets
 .env
 .env.local

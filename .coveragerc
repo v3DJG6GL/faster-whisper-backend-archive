@@ -1,0 +1,21 @@
+# Coverage configuration. Measures the application modules at the repo root;
+# excludes the tests themselves, the stray manual integration script, the
+# virtualenvs, and code that cannot run on a CPU-only CI box (the uvicorn
+# __main__ launcher and the Windows CUDA DLL preloader).
+[run]
+branch = True
+omit =
+    tests/*
+    test_*.py
+    test.py
+    venv/*
+    .venv/*
+    conftest.py
+
+[report]
+show_missing = True
+exclude_lines =
+    pragma: no cover
+    if TYPE_CHECKING:
+    if __name__ == .__main__.:
+    raise NotImplementedError

@@ -7,19 +7,24 @@ on:
 
 jobs:
   test:
-    name: tests (${{ matrix.os }})
+    name: tests (${{ matrix.os }} py${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        # ubuntu is the primary target; windows is a portability parity guard.
-        os: [ubuntu-latest, windows-latest]
+        # ubuntu is the primary target and is exercised across the supported
+        # Python range; windows is a single-version portability parity guard.
+        os: [ubuntu-latest]
+        python-version: ["3.12", "3.13", "3.14.5"]
+        include:
+          - os: windows-latest
+            python-version: "3.14.5"
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.14.5"
+          python-version: ${{ matrix.python-version }}
           cache: pip
 
       - name: Install dependencies (CPU base + test tools)
@@ -27,8 +32,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r requirements-dev.txt
 
-      - name: Run tests
-        run: pytest -q
+      # Coverage is gated: the suite must exercise at least this percent of the
+      # application modules, so coverage can only ratchet upward. A shortfall
+      # fails this leg, which fails the `all-ci` gate below, which blocks
+      # auto-merge / release publishing. Baseline measured at 66% on Linux;
+      # set a few points lower so the Windows leg (which skips the POSIX-only
+      # timezone tests) and minor per-version variance don't false-fail. Raise
+      # this number as coverage grows — never lower it.
+      - name: Run tests (with coverage gate)
+        run: pytest -q --cov-fail-under=63
 
   # Single, stable status check to require in the branch ruleset. Matrix legs
   # ("tests (ubuntu-latest)", "tests (windows-latest)") expand/rename over time;
