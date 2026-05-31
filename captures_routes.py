@@ -5413,6 +5413,10 @@ _CAPTURES_HTML = r"""<!doctype html>
     });
     strip.addEventListener('keydown', function(e) {
       if (e.isComposing) return;   // let IME handle dead keys / compositions
+      // Ctrl/Cmd combos belong to the batch-popup handler (accept / dismiss /
+      // replay / revert / Ctrl+Space play-pause) — don't consume them here as
+      // plain cursor moves; let them bubble untouched to _onBatchKey.
+      if (e.ctrlKey || e.metaKey) return;
       var n = state.words.length;
       if (n === 0) return;
       var k = e.key;
@@ -5657,7 +5661,7 @@ _CAPTURES_HTML = r"""<!doctype html>
       // hide the on-button label here).
       toggleBtn.classList.add('compact-player-btn');
       durEl.style.display = 'none';
-      toggleBtn.title = 'Play / pause (Space)';
+      toggleBtn.title = 'Play / pause (Ctrl+Space)';
     }
     // Accepts 'play' | 'pause' | 'loading'. Loading keeps a text ellipsis
     // (no dedicated glyph) while the trimmed preview audio is fetched.
@@ -6242,7 +6246,7 @@ _CAPTURES_HTML = r"""<!doctype html>
     var hint = document.createElement('div');
     hint.className = 'batch-hint';
     hint.textContent = 'Ctrl+← Dismiss · Ctrl+→ Accept · Ctrl+↓ Revert · '
-      + 'Space pause · Ctrl+↑ Replay · Esc Exit';
+      + 'Ctrl+Space pause · Ctrl+↑ Replay · Esc Exit';
     host.appendChild(hint);
 
     // Touch swipe gestures on the card itself.
@@ -6452,16 +6456,18 @@ _CAPTURES_HTML = r"""<!doctype html>
     if (e.key === 'Escape') {
       e.preventDefault(); _exitBatchMode(); return;
     }
-    if (e.key === ' ' || e.code === 'Space') {
-      e.preventDefault();
-      if (_previewAudio) {
-        if (_previewAudio.paused) _previewAudio.play().catch(function() {});
-        else _previewAudio.pause();
-      }
-      return;
-    }
     if (e.ctrlKey || e.metaKey) {
-      if (e.key === 'ArrowRight')      { e.preventDefault(); _advanceBatch('accept'); }
+      // Ctrl+Space toggles play/pause — plain Space is left free to type
+      // into a correction chip. These fire regardless of where focus sits
+      // in the popup (incl. the focused word-strip).
+      if (e.key === ' ' || e.code === 'Space') {
+        e.preventDefault();
+        if (_previewAudio) {
+          if (_previewAudio.paused) _previewAudio.play().catch(function() {});
+          else _previewAudio.pause();
+        }
+      }
+      else if (e.key === 'ArrowRight') { e.preventDefault(); _advanceBatch('accept'); }
       else if (e.key === 'ArrowLeft')  { e.preventDefault(); _advanceBatch('dismiss'); }
       else if (e.key === 'ArrowUp')    { e.preventDefault(); _batchReplay(); }
       else if (e.key === 'ArrowDown')  { e.preventDefault(); _revertBatch(); }
