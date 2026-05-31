@@ -1708,18 +1708,24 @@ def _align_words_to_final(
     a cross-word rule (dedup, "Neue Zeile → \\n", etc.) also fires.
 
     Output items (one per raw word) carry:
-      - `word`: the matched final token (display text for the
-        karaoke band + the chip's `wrong` reference)
+      - `word`: the final token(s) attributed to this raw word — the
+        display text for the karaoke band + the chip's `wrong` reference.
+        A rule that EXPANDS one raw word into several tokens (e.g.
+        "Nurtax" → "nur tags") yields the joined run ("nur tags") so the
+        band reconstructs `final` losslessly instead of dropping the
+        extra tokens.
       - `raw_word`: present when display != raw — powers the dotted
         underline + `title="raw: …"` tooltip
-      - `removed`: True when LCS found no match for this raw token,
-        i.e. a cross-word rule deleted it from `final`. The UI fades
-        + strikes-through these slots; chip creation is suppressed.
+      - `removed`: True only when this raw word ends up owning ZERO final
+        tokens (a cross-word rule deleted it, or it's the dropped side of
+        a contraction). The UI fades + strikes-through these slots; chip
+        creation is suppressed.
 
-    Insertions (final tokens with no raw correspondent) are NOT
-    materialised — there's no audio timestamp to anchor them to.
-    They're still in `final` for export; the band's job is to
-    faithfully represent timestamped audio, not to invent positions.
+    Every final token is assigned to exactly one raw word, so
+    `" ".join(item["word"] for non-removed items) == final`. Inserted
+    tokens (no direct raw correspondent) attach to the raw word that
+    expanded into them — sharing that word's audio timestamp — rather
+    than being discarded.
     """
     src = list(words or [])
     if not src:
@@ -1770,13 +1776,51 @@ def _align_words_to_final(
             else:
                 j += 1
 
+    # Assign every final token to exactly one raw word so the per-word band
+    # reconstructs `final` losslessly — even when a rule expands one raw word
+    # into several tokens ("Nurtax" → "nur tags") or contracts several into one.
+    # The matched raw words are monotonic anchors that split `fin_tokens` into
+    # segments; the inserted (unmatched) tokens in a segment go to the unmatched
+    # raw words sharing that segment, apportioned by each raw word's isolated
+    # post-processed token count, with any remainder to the last one.
+    owners: list[list[int]] = [[] for _ in range(n)]
+    exp_count = [len((post_cache.get(w.get("word") or "") or "").split()) for w in src]
+    anchors = [(idx, matches[idx]) for idx in range(n) if matches[idx] >= 0]
+    seg_bounds = [(-1, -1)] + anchors + [(n, m)]
+    for t in range(len(seg_bounds) - 1):
+        ri0, fj0 = seg_bounds[t]
+        ri1, fj1 = seg_bounds[t + 1]
+        if ri0 >= 0:
+            owners[ri0].append(fj0)  # the left anchor owns its matched token
+        ins = list(range(fj0 + 1, fj1))       # inserted final tokens in this gap
+        if not ins:
+            continue
+        unmatched = list(range(ri0 + 1, ri1))  # raw words sharing this gap
+        if unmatched:
+            k = 0
+            for ri in unmatched:
+                take = exp_count[ri]
+                while take > 0 and k < len(ins):
+                    owners[ri].append(ins[k]); k += 1; take -= 1
+            last = unmatched[-1]
+            while k < len(ins):  # leftover insertions → last raw word in the gap
+                owners[last].append(ins[k]); k += 1
+        else:
+            # Pure insertion with no raw word in the gap: attach to an adjacent
+            # anchor (it shares that word's audio time). Prefer the left anchor.
+            target = ri0 if ri0 >= 0 else (ri1 if ri1 < n else None)
+            if target is not None:
+                owners[target].extend(ins)
+
     out: list[dict[str, Any]] = []
     for i, w in enumerate(src):
         item = _clone_word(w)
         raw_w = w.get("word") or ""
-        if matches[i] >= 0:
-            item["word"] = fin_tokens[matches[i]]
-            if item["word"].strip() != raw_w.strip():
+        toks = owners[i]
+        if toks:
+            disp = " ".join(fin_tokens[j] for j in toks)
+            item["word"] = disp
+            if disp.strip() != raw_w.strip():
                 item["raw_word"] = raw_w
         else:
             item["word"] = raw_w
