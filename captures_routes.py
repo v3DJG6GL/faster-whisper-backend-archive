@@ -656,6 +656,41 @@ async def reprocess_all_captures_api() -> JSONResponse:
     return JSONResponse(captures_reapply.start())
 
 
+@router.get(
+    "/captures/api/reprocess-all/status",
+    dependencies=[Depends(require_page("captures")), Depends(require_admin)],
+)
+async def reprocess_all_status_api() -> JSONResponse:
+    """Live progress of the pipeline-reapply job (for the Advanced menu's
+    progress line)."""
+    import captures_reapply
+    return JSONResponse(captures_reapply.status())
+
+
+@router.post(
+    "/captures/api/reprocess-vad",
+    dependencies=[Depends(require_page("captures")), Depends(require_admin)],
+)
+async def reprocess_vad_api() -> JSONResponse:
+    """Trigger the bulk VAD/silence re-merge job: rebuild every sample's
+    merged WAV with the CURRENT global silence settings (skips locked
+    samples; over-cap samples are flagged stale, never truncated). Idempotent:
+    a second call while running returns the current state. Use after editing
+    the global Sample-sizing / Silence-trim settings."""
+    import captures_vad_reprocess
+    return JSONResponse(captures_vad_reprocess.start())
+
+
+@router.get(
+    "/captures/api/reprocess-vad/status",
+    dependencies=[Depends(require_page("captures")), Depends(require_admin)],
+)
+async def reprocess_vad_status_api() -> JSONResponse:
+    """Live progress of the VAD/silence re-merge job."""
+    import captures_vad_reprocess
+    return JSONResponse(captures_vad_reprocess.status())
+
+
 # ---------------------------------------------------------------------
 # Capture groups (≤28 s packed training samples)
 # ---------------------------------------------------------------------
@@ -2538,6 +2573,24 @@ _CAPTURES_HTML = r"""<!doctype html>
      would otherwise push the capture-state badge to wrap on its own. */
   header .subbar #counts { flex-basis: 100%; }
 
+  /* Advanced ▾ dropdown (bulk reprocess + destructive actions). */
+  .adv-wrap { position: relative; display: inline-block; }
+  .adv-menu {
+    position: absolute; right: 0; top: calc(100% + 0.25rem); z-index: 50;
+    min-width: 16rem; padding: 0.35rem;
+    display: flex; flex-direction: column; gap: 0.25rem;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 0.375rem; box-shadow: 0 0.5rem 1.25rem rgba(0,0,0,0.45);
+  }
+  .adv-menu[hidden] { display: none; }
+  .adv-menu button { width: 100%; text-align: left; white-space: nowrap; }
+  .adv-sep { height: 1px; background: var(--border); margin: 0.15rem 0; }
+  .adv-progress {
+    font-size: var(--fs-xs); color: var(--help); font-family: var(--font-mono);
+    padding: 0.2rem 0.3rem; white-space: normal;
+  }
+  .adv-progress[hidden] { display: none; }
+
   /* Radio-style status button group. Used in the toolbar filter and
      in the per-row + per-group action rows. Replaces the previous
      <select> dropdowns; a 1-click switch is faster than open-pick. */
@@ -3336,9 +3389,18 @@ _CAPTURES_HTML = r"""<!doctype html>
     </label>
     <div class="subbar-right">
       <button id="btn-refresh">Refresh</button>
-      <button id="btn-reprocess-all" title="Re-run PIPELINE_RULES on every capture's raw text. Use after editing rules.">Reprocess all</button>
       <button id="btn-export" title="Download ready captures as a tar.gz (manifest.jsonl + audio/)">Export ready</button>
-      <button id="btn-clear" class="danger" title="Permanently delete every capture">Clear all</button>
+      <div class="adv-wrap">
+        <button id="btn-advanced" aria-haspopup="true" aria-expanded="false"
+          title="Bulk reprocessing &amp; destructive actions">Advanced ▾</button>
+        <div id="adv-menu" class="adv-menu" hidden role="menu">
+          <button id="btn-reprocess-all" role="menuitem" title="Re-run PIPELINE_RULES on every capture's raw text (text only). Use after editing rules.">Reprocess all · Pipeline rules</button>
+          <button id="btn-reprocess-vad" role="menuitem" title="Rebuild every sample's audio with the current global silence settings. Use after editing Sample sizing / Silence trim.">Reprocess all · VAD silence</button>
+          <div id="adv-progress" class="adv-progress" hidden></div>
+          <div class="adv-sep"></div>
+          <button id="btn-clear" class="danger" role="menuitem" title="Permanently delete every capture">Clear all</button>
+        </div>
+      </div>
     </div>
   </div>
 </header>
@@ -4717,21 +4779,78 @@ _CAPTURES_HTML = r"""<!doctype html>
   // -------------------------------------------------------------------
   // Export
   // -------------------------------------------------------------------
-  // Bulk-reprocess: trigger the background job that re-runs PIPELINE_RULES
-  // on every capture's `raw` text and updates `final` + `text_for_training`.
-  // Same worker /quick-config/reapply-rules uses; idempotent — a second
-  // call while running returns the current state.
+  // --- Advanced menu (bulk reprocess + destructive actions) ---
+  function _closeAdvMenu() {
+    var m = document.getElementById('adv-menu');
+    var b = document.getElementById('btn-advanced');
+    if (m) m.hidden = true;
+    if (b) b.setAttribute('aria-expanded', 'false');
+  }
+  function _toggleAdvMenu() {
+    var m = document.getElementById('adv-menu');
+    var b = document.getElementById('btn-advanced');
+    if (!m) return;
+    var open = m.hidden;
+    m.hidden = !open;
+    if (b) b.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
+
+  // Shared progress poller for the two background jobs. Polls the job's
+  // status endpoint into the Advanced menu's progress line until it finishes.
+  var _jobPollTimer = null;
+  function _pollJob(statusUrl, render) {
+    if (_jobPollTimer) { clearTimeout(_jobPollTimer); _jobPollTimer = null; }
+    var prog = document.getElementById('adv-progress');
+    function tick() {
+      api('GET', statusUrl).then(function(s) {
+        if (prog) { prog.hidden = false; prog.textContent = render(s); }
+        if (s && s.status === 'running') {
+          _jobPollTimer = setTimeout(tick, 1000);
+        } else {
+          _jobPollTimer = null;
+          if (s && s.status === 'error') toast('Reprocess failed: ' + (s.error || ''), true);
+          else toast('Reprocess done.');
+          load();  // refresh the list (durations / stale pills may have changed)
+        }
+      }).catch(function() { _jobPollTimer = null; });
+    }
+    tick();
+  }
+
+  // Bulk-reprocess (text): re-run PIPELINE_RULES on every capture's `raw`,
+  // updating final + training text (and unlocked sample transcripts). Audio
+  // is NOT rebuilt. Idempotent background job; progress shown in the menu.
   async function onReprocessAll() {
-    if (!confirm('Re-run PIPELINE_RULES on every capture? Updates final + training text in place.\n\nThis runs in the background.'))
+    if (!confirm('Re-run PIPELINE_RULES on every capture? Updates final + training text in place (no audio rebuild).\n\nThis runs in the background.'))
       return;
     try {
-      var j = await api('POST', '/captures/api/reprocess-all', {});
-      var st = j && j.status ? j.status : 'started';
-      toast('Reprocess-all ' + st + '.');
+      await api('POST', '/captures/api/reprocess-all', {});
+      _pollJob('/captures/api/reprocess-all/status', function(s) {
+        return 'Pipeline rules: ' + (s.processed || 0) + '/' + (s.total || 0)
+          + ' · ' + (s.captures_updated || 0) + ' updated'
+          + (s.status !== 'running' ? ' — done' : '…');
+      });
     } catch (e) {
-      if (e.message !== 'unauthorized') {
-        toast('Reprocess-all failed: ' + e.message, true);
-      }
+      if (e.message !== 'unauthorized') toast('Reprocess-all failed: ' + e.message, true);
+    }
+  }
+
+  // Bulk-reprocess (audio): rebuild every sample's merged WAV with the current
+  // global silence settings. Skips locked samples; over-cap → flagged stale.
+  async function onReprocessVad() {
+    if (!confirm('Rebuild every sample’s audio with the current global silence settings?\n\nLocked samples are skipped; any that no longer fit the cap are flagged stale (not truncated). Runs in the background.'))
+      return;
+    try {
+      await api('POST', '/captures/api/reprocess-vad', {});
+      _pollJob('/captures/api/reprocess-vad/status', function(s) {
+        return 'VAD silence: ' + (s.processed || 0) + '/' + (s.total || 0)
+          + ' · ' + (s.rebuilt || 0) + ' rebuilt'
+          + (s.stale ? ', ' + s.stale + ' stale' : '')
+          + (s.skipped ? ', ' + s.skipped + ' skipped' : '')
+          + (s.status !== 'running' ? ' — done' : '…');
+      });
+    } catch (e) {
+      if (e.message !== 'unauthorized') toast('Reprocess-VAD failed: ' + e.message, true);
     }
   }
 
@@ -6976,6 +7095,18 @@ _CAPTURES_HTML = r"""<!doctype html>
   document.getElementById('btn-export').addEventListener('click', onExport);
   document.getElementById('btn-clear').addEventListener('click', onClearAll);
   document.getElementById('btn-reprocess-all').addEventListener('click', onReprocessAll);
+  document.getElementById('btn-reprocess-vad').addEventListener('click', onReprocessVad);
+  document.getElementById('btn-advanced').addEventListener('click', function(e) {
+    e.stopPropagation(); _toggleAdvMenu();
+  });
+  // Close the Advanced menu on an outside click / Escape.
+  document.addEventListener('click', function(e) {
+    var wrap = document.querySelector('.adv-wrap');
+    if (wrap && !wrap.contains(e.target)) _closeAdvMenu();
+  });
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') _closeAdvMenu();
+  });
   document.getElementById('ab-merge').addEventListener('click', _openMergeModal);
   document.getElementById('ab-clear').addEventListener('click', _clearSelection);
   document.getElementById('btn-propose').addEventListener('click', function() { _openProposeModal(); });

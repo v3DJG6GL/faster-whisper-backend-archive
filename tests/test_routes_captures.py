@@ -24,6 +24,24 @@ def test_captures_list_open_mode(client):
     assert "is_admin" in body
 
 
+def test_reprocess_vad_job_lifecycle(client):
+    # Status endpoint is registered and reports a known state.
+    s0 = client.get("/captures/api/reprocess-vad/status")
+    assert s0.status_code == 200
+    assert s0.json()["status"] in ("idle", "running", "done", "error")
+    # Start the bulk VAD re-merge on an empty store → runs and finishes clean.
+    assert client.post("/captures/api/reprocess-vad").status_code == 200
+    import time
+    s = s0.json()
+    for _ in range(30):
+        s = client.get("/captures/api/reprocess-vad/status").json()
+        if s["status"] in ("done", "error"):
+            break
+        time.sleep(0.1)
+    assert s["status"] == "done"
+    assert s["total"] == 0 and s["rebuilt"] == 0
+
+
 def test_samples_route_not_swallowed_by_cid(client):
     # Regression: /captures/api/samples must resolve to the sample-list handler,
     # NOT the parameterized /captures/api/{cid} handler (which would 404 with
