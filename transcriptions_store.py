@@ -274,12 +274,20 @@ def list_recent(
     before_ts: float | None = None,
     limit: int = 100,
     user_id_filter: str | None = None,
+    query: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return up to `limit` rows newer than `before_ts` (or the newest
     `limit` rows when before_ts is None / 0), newest-first. When
     user_id_filter is set, returns only rows for that user — used by
     /quick-config scope='own' to keep one user's traces out of another
-    user's view."""
+    user's view.
+
+    When `query` is set, only rows whose raw_text OR final_text contain
+    the substring are returned (case-insensitive substring match). This
+    composes with both the before_ts cursor and user_id_filter, so the
+    "Load older" pagination walks back through matches only. Note: SQLite
+    LIKE is ASCII case-insensitive — non-ASCII (e.g. German umlauts) is
+    matched case-sensitively; acceptable for this free-text search."""
     conn = _require_conn()
     where: list[str] = []
     params: list[Any] = []
@@ -289,6 +297,16 @@ def list_recent(
     if user_id_filter is not None:
         where.append("user_id = ?")
         params.append(user_id_filter)
+    if query:
+        # Escape LIKE wildcards so a literal % or _ in the search text is
+        # matched literally rather than as a wildcard.
+        needle = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        like = f"%{needle}%"
+        where.append(
+            "(raw_text LIKE ? ESCAPE '\\' OR final_text LIKE ? ESCAPE '\\')"
+        )
+        params.append(like)
+        params.append(like)
     sql = "SELECT * FROM recent_transcriptions"
     if where:
         sql += " WHERE " + " AND ".join(where)

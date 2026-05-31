@@ -91,6 +91,43 @@ def test_list_recent_user_filter(tx_store):
     assert [r["request_id"] for r in rows] == ["a"]
 
 
+def test_list_recent_query_matches_raw_or_final(tx_store):
+    ts = tx_store
+    ts.record_trace(request_id="r1", model="m", raw="patient hat Fieber",
+                    final="Patient hat Fieber", created_ts=1.0)
+    ts.record_trace(request_id="r2", model="m", raw="kein treffer hier",
+                    final="Aspirin verordnet", created_ts=2.0)
+    ts.record_trace(request_id="r3", model="m", raw="nichts", final="nichts",
+                    created_ts=3.0)
+    # Matches raw of r1 and final of r2 (case-insensitive, ASCII).
+    assert {r["request_id"] for r in ts.list_recent(query="fieber", limit=10)} == {"r1"}
+    assert {r["request_id"] for r in ts.list_recent(query="ASPIRIN", limit=10)} == {"r2"}
+    assert ts.list_recent(query="zzzznope", limit=10) == []
+
+
+def test_list_recent_query_composes_with_user_and_cursor(tx_store):
+    ts = tx_store
+    ts.record_trace(request_id="a", model="m", raw="alpha note", final="x",
+                    user_id="u1", created_ts=1.0)
+    ts.record_trace(request_id="b", model="m", raw="alpha note", final="x",
+                    user_id="u2", created_ts=2.0)
+    ts.record_trace(request_id="c", model="m", raw="alpha note", final="x",
+                    user_id="u1", created_ts=3.0)
+    # query AND user_id_filter AND before_ts all compose.
+    rows = ts.list_recent(query="alpha", user_id_filter="u1", before_ts=3.0, limit=10)
+    assert [r["request_id"] for r in rows] == ["a"]
+
+
+def test_list_recent_query_escapes_like_wildcards(tx_store):
+    ts = tx_store
+    ts.record_trace(request_id="lit", model="m", raw="50% done", final="x",
+                    created_ts=1.0)
+    ts.record_trace(request_id="other", model="m", raw="50 percent", final="x",
+                    created_ts=2.0)
+    # A literal "%" must match only the row containing it, not act as a wildcard.
+    assert {r["request_id"] for r in ts.list_recent(query="50%", limit=10)} == {"lit"}
+
+
 def test_list_recent_limit_floored_to_one(tx_store):
     ts = tx_store
     ts.record_trace(request_id="r", model="m", raw="x", final="y")

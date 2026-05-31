@@ -2440,21 +2440,43 @@ _LOG_VIEWER_HTML = """<!doctype html>
   // EventSource sends the HttpOnly session cookie automatically (same-origin),
   // so the server's _require_logs_page_sse dependency resolves the user
   // without the legacy ?key= fallback.
-  const es = new EventSource('/logs/stream');
-  es.onmessage = (e) => append(e.data);
-  es.onerror = () => {
-    statusEl.textContent = 'reconnecting…';
-    statusEl.className = 'pill paused';
-  };
-  es.onopen = () => {
-    // role-admin used to be added here unconditionally — that leaked
-    // admin chrome to non-admins. OPEN_MODE_BANNER_JS is now the single
-    // source of truth (sets role-admin iff whoami.is_admin=true).
-    if (!paused) {
-      statusEl.textContent = 'live';
-      statusEl.className = 'pill live';
-    }
-  };
+  let es = null;
+  let _logRecoveryTimer = null;
+  function openLogStream() {
+    if (es) { try { es.close(); } catch (_) {} es = null; }
+    es = new EventSource('/logs/stream');
+    es.onmessage = (e) => append(e.data);
+    es.onerror = () => {
+      statusEl.textContent = 'reconnecting…';
+      statusEl.className = 'pill paused';
+      // EventSource does NOT auto-reconnect after an HTTP error (e.g. an
+      // intermittent 401 where the cookie wasn't attached to the SSE
+      // handshake). Mirror /stats: poll a cheap endpoint until it 200s,
+      // then reopen the stream.
+      if (_logRecoveryTimer) return;
+      _logRecoveryTimer = setInterval(async () => {
+        try {
+          const r = await fetch('/v1/models', { cache: 'no-store' });
+          if (r.ok) {
+            clearInterval(_logRecoveryTimer);
+            _logRecoveryTimer = null;
+            openLogStream();
+          }
+        } catch (_) { /* keep polling */ }
+      }, 3000);
+    };
+    es.onopen = () => {
+      // role-admin used to be added here unconditionally — that leaked
+      // admin chrome to non-admins. OPEN_MODE_BANNER_JS is now the single
+      // source of truth (sets role-admin iff whoami.is_admin=true).
+      if (_logRecoveryTimer) { clearInterval(_logRecoveryTimer); _logRecoveryTimer = null; }
+      if (!paused) {
+        statusEl.textContent = 'live';
+        statusEl.className = 'pill live';
+      }
+    };
+  }
+  openLogStream();
 
   // --- Log-only zoom (independent of the global UI scale picker) ---------
   // Multiplies on top of --fs-base via #log { font-size: calc(1rem * --log-zoom) }.

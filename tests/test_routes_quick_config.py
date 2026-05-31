@@ -90,6 +90,29 @@ def test_recent_open_mode(client):
     assert "recent" in body
 
 
+def test_recent_query_filters_raw_and_final(client):
+    import transcriptions_store
+    transcriptions_store.record_trace(
+        request_id="q1", model="m", raw="patient hat Fieber",
+        final="Patient hat Fieber", created_ts=1.0)
+    transcriptions_store.record_trace(
+        request_id="q2", model="m", raw="andere notiz",
+        final="Aspirin verordnet", created_ts=2.0)
+    # ?q= matches the substring across raw OR final, case-insensitively.
+    r = client.get("/quick-config/recent", params={"q": "fieber"})
+    assert r.status_code == 200
+    ids = [t["request_id"] for t in r.json()["recent"]]
+    assert ids == ["q1"]
+    r = client.get("/quick-config/recent", params={"q": "ASPIRIN"})
+    assert [t["request_id"] for t in r.json()["recent"]] == ["q2"]
+    # No query → both rows (newest-first).
+    r = client.get("/quick-config/recent")
+    assert [t["request_id"] for t in r.json()["recent"]] == ["q2", "q1"]
+    # No match → empty.
+    r = client.get("/quick-config/recent", params={"q": "zzznope"})
+    assert r.json()["recent"] == []
+
+
 def test_reapply_rules_status(client):
     r = client.get("/quick-config/reapply-rules/status")
     assert r.status_code == 200

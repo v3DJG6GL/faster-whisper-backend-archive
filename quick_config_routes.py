@@ -523,7 +523,11 @@ async def get_recent(
 
     Scope-aware: scope=own users see only their own rows; scope=all
     users (admins) see every row. The username column is materialized
-    at write so the read path doesn't hit api_keys_store."""
+    at write so the read path doesn't hit api_keys_store.
+
+    q (str, optional) — free-text filter: only rows whose raw/final text
+    contain the substring (case-insensitive). Pagination via before_ts
+    stays within the matching set."""
     perms = user["permissions"]
     caller_uid = user.get("user_id") or ""
     sees_all = perms.scope("quick_config") == "all"
@@ -538,12 +542,14 @@ async def get_recent(
     except (TypeError, ValueError):
         q_limit = page_size
     q_limit = max(1, min(q_limit, page_size))
+    q_search = (request.query_params.get("q") or "").strip()
 
     user_filter = None if sees_all else caller_uid
     traces = transcriptions_store.list_recent(
         before_ts=q_before if q_before > 0 else None,
         limit=q_limit,
         user_id_filter=user_filter,
+        query=q_search or None,
     )
     next_before = traces[-1]["created_ts"] if len(traces) >= q_limit else None
     return {"recent": traces, "next_before_ts": next_before}
@@ -776,6 +782,18 @@ _QUICK_CONFIG_HTML = r"""<!doctype html>
   .recent-header .recent-label { font-size: var(--fs-xs); color: var(--dim);
     font-style: italic; }
   .recent-header .spacer { flex: 1; }
+  /* Free-text search for the recent list — mirrors the /captures subbar
+     search. margin-left:auto pushes it to the right edge of the header;
+     the magnifier replaces a "search" label to save width. Sized in
+     em/rem so it tracks the scale picker. */
+  .recent-header .subbar-search { flex: 1 1 auto; min-width: 8rem;
+    max-width: 28rem; margin-left: auto; display: inline-flex;
+    align-items: center; gap: 0.35rem; }
+  .recent-header .subbar-search .search-ico { flex: 0 0 auto;
+    width: 0.95em; height: 0.95em; stroke: var(--help); fill: none;
+    stroke-width: 2; }
+  .recent-header .subbar-search input[type="text"] { flex: 1 1 auto;
+    min-width: 4rem; max-width: none; }
   .recent-pager { display: flex; justify-content: center; padding: 0.5rem 0 1rem; }
   .recent-pager button { background: transparent; color: var(--cyan);
     border: 1px solid var(--border); padding: 0.4rem 0.9rem;
@@ -956,6 +974,10 @@ _QUICK_CONFIG_HTML = r"""<!doctype html>
     <div class="recent-header">
       <h2>Recent transcriptions</h2>
       <span class="recent-label" title="Persisted in SQLite (WAL). Caps and TTL are configurable at /settings.">persistent · paginated</span>
+      <label class="subbar-search" title="search recent transcriptions">
+        <svg class="search-ico" viewBox="0 0 24 24" aria-hidden="true" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
+        <input id="recent-search" type="text" aria-label="search recent transcriptions" placeholder="text in raw / final">
+      </label>
     </div>
     <div id="recent-list">
       <div class="empty-recent">No transcriptions yet — they'll appear here as you dictate.</div>
@@ -1174,6 +1196,38 @@ const _MAX_DATALIST = 200;
 let _es = null;
 let _oldestLoadedTs = null;
 let _loadOlderBusy = false;
+// request_ids already rendered, so the SSE on-connect replay (which always
+// re-sends the freshest page) doesn't duplicate rows already placed by the
+// initial /quick-config/recent fetch or by "Load older".
+let _seenReqIds = new Set();
+// Active free-text filter (server-side substring over raw/final). Empty =
+// unfiltered newest-first view.
+let _searchQuery = '';
+// Active stream-recovery poller (mirrors /stats); non-null while reconnecting.
+let _recoveryTimer = null;
+
+function _entryKey(entry) {
+  if (!entry) return '';
+  if (entry.request_id) return 'r:' + entry.request_id;
+  if (entry.id != null) return 'i:' + entry.id;
+  return '';
+}
+// Returns true if this entry was already rendered (and should be skipped);
+// otherwise records it as seen and returns false. Entries without any id are
+// never deduped (always allowed through).
+function _seenTrace(entry) {
+  const k = _entryKey(entry);
+  if (!k) return false;
+  if (_seenReqIds.has(k)) return true;
+  _seenReqIds.add(k);
+  return false;
+}
+function _matchesSearch(entry) {
+  if (!_searchQuery) return true;
+  const q = _searchQuery.toLowerCase();
+  return (((entry && entry.raw) || '') + ' ' + ((entry && entry.final) || ''))
+    .toLowerCase().indexOf(q) !== -1;
+}
 
 function escapeHtml(s) {
   const div = document.createElement('div');
@@ -1799,6 +1853,11 @@ async function removeReport(form) {
 function pushTrace(entry) {
   const list = document.getElementById('recent-list');
   if (!list) return;
+  // Skip rows already on screen (the SSE replay re-sends the freshest page
+  // that the initial fetch already rendered) and, while a search is active,
+  // live rows that don't match the filter (so they don't pollute the view).
+  if (_seenTrace(entry)) return;
+  if (!_matchesSearch(entry)) return;
   const empty = list.querySelector('.empty-recent');
   if (empty) empty.remove();
   list.insertBefore(renderTrace(entry), list.firstChild);
@@ -1816,11 +1875,50 @@ function pushTrace(entry) {
 function appendTraceAtBottom(entry) {
   const list = document.getElementById('recent-list');
   if (!list) return;
+  if (_seenTrace(entry)) return;
   // #recent-pager is a SIBLING of #recent-list (it sits below the list as a
   // separate footer bar), not a child — so insertBefore(node, pager) throws
   // NotFoundError. Older entries belong at the end of the list, so just
   // append them there (they land above the pager, which follows the list).
   list.appendChild(renderTrace(entry));
+}
+
+// Clear the list and (re)load the freshest page from the durable store for
+// the current _searchQuery. Used for the initial population (so the panel no
+// longer depends on the SSE replay succeeding), on every search change, and
+// to catch up after a stream reconnect. Resets the dedupe set + pagination
+// cursor so "Load older" walks back through the (optionally filtered) set.
+async function reloadRecent() {
+  const list = document.getElementById('recent-list');
+  const btn = document.getElementById('btn-load-older');
+  if (!list) return;
+  _seenReqIds = new Set();
+  _oldestLoadedTs = null;
+  const q = _searchQuery;
+  const url = '/quick-config/recent' + (q ? ('?q=' + encodeURIComponent(q)) : '');
+  let j = null;
+  try {
+    const r = await api('GET', url);
+    if (r.ok) j = await r.json();
+    else showToast('Recent load failed (' + r.status + ')', 'err');
+  } catch (e) {
+    showToast('Recent load failed: ' + e, 'err');
+  }
+  const rows = (j && j.recent) || [];
+  // Server returns newest-first; appending in order leaves newest at the top.
+  list.innerHTML = '';
+  for (const entry of rows) appendTraceAtBottom(entry);
+  _oldestLoadedTs = j && j.next_before_ts ? j.next_before_ts : null;
+  if (!rows.length) {
+    const d = document.createElement('div');
+    d.className = 'empty-recent';
+    d.textContent = q
+      ? 'No transcriptions match your search.'
+      : "No transcriptions yet — they'll appear here as you dictate.";
+    list.appendChild(d);
+  }
+  if (btn) btn.style.display = _oldestLoadedTs ? '' : 'none';
+  rebuildDatalist();
 }
 
 async function loadOlder() {
@@ -1845,7 +1943,8 @@ async function loadOlder() {
   btn.textContent = 'Loading…';
   try {
     const r = await api('GET',
-      '/quick-config/recent?before_ts=' + encodeURIComponent(_oldestLoadedTs));
+      '/quick-config/recent?before_ts=' + encodeURIComponent(_oldestLoadedTs)
+      + (_searchQuery ? '&q=' + encodeURIComponent(_searchQuery) : ''));
     if (!r.ok) { showToast('Load older failed (' + r.status + ')', 'err'); return; }
     const j = await r.json();
     const rows = (j && j.recent) || [];
@@ -1890,6 +1989,11 @@ function rebuildDatalist() {
   }
 }
 
+function _setRecentLabel(text) {
+  const el = document.querySelector('.recent-header .recent-label');
+  if (el) el.textContent = text;
+}
+
 function startStream() {
   if (_es) { try { _es.close(); } catch (_) {} _es = null; }
   // EventSource sends the HttpOnly session cookie automatically (same-origin),
@@ -1898,11 +2002,30 @@ function startStream() {
   _es.addEventListener('trace', (e) => {
     try { pushTrace(JSON.parse(e.data)); } catch (_) {}
   });
+  _es.onopen = () => {
+    // A successful (re)connect ends any recovery polling and restores the label.
+    if (_recoveryTimer) { clearInterval(_recoveryTimer); _recoveryTimer = null; }
+    _setRecentLabel('persistent · paginated');
+  };
   _es.onerror = () => {
-    // EventSource auto-reconnects; nothing to do here. If the token is
-    // truly bad the server will keep returning 401 and EventSource will
-    // give up after a few retries — at which point the page is stale
-    // until the user reloads. Acceptable.
+    // EventSource does NOT auto-reconnect after an HTTP error (e.g. an
+    // intermittent 401 where the browser didn't attach the session cookie to
+    // the SSE handshake) — it fails the connection permanently. Mirror the
+    // /stats recovery: poll a cheap cookie-authed endpoint until it 200s,
+    // then catch up via reloadRecent() (deduped) and reopen the stream.
+    _setRecentLabel('reconnecting…');
+    if (_recoveryTimer) return;
+    _recoveryTimer = setInterval(async () => {
+      try {
+        const r = await api('GET', '/quick-config/recent?limit=1');
+        if (r.ok) {
+          clearInterval(_recoveryTimer);
+          _recoveryTimer = null;
+          await reloadRecent();
+          startStream();
+        }
+      } catch (_) { /* keep polling */ }
+    }, 3000);
   };
 }
 
@@ -2288,21 +2411,33 @@ document.getElementById('discard-btn').addEventListener('click', doDiscard);
 const _loadOlderBtn = document.getElementById('btn-load-older');
 if (_loadOlderBtn) _loadOlderBtn.addEventListener('click', loadOlder);
 
+// Recent-transcriptions search: debounced server-side substring filter over
+// raw/final. Mirrors the /captures search (150 ms debounce); whole-DB so
+// matches are found regardless of how far the list has been paginated.
+const _recentSearchInput = document.getElementById('recent-search');
+let _recentSearchTimer = null;
+if (_recentSearchInput) {
+  _recentSearchInput.addEventListener('input', () => {
+    if (_recentSearchTimer) clearTimeout(_recentSearchTimer);
+    _recentSearchTimer = setTimeout(() => {
+      _recentSearchTimer = null;
+      const next = (_recentSearchInput.value || '').trim();
+      if (next === _searchQuery) return;
+      _searchQuery = next;
+      reloadRecent();
+    }, 150);
+  });
+}
+
 load().then(() => {
-  // Only open the SSE stream after the rules state has loaded — avoids
-  // racing the token prompt with the EventSource connection.
+  // Populate the recent list via a plain fetch FIRST so the panel no longer
+  // depends on the SSE replay succeeding (a single failed /stream handshake
+  // used to leave it empty). reloadRecent() also seeds the dedupe set + the
+  // "Load older" cursor before the stream opens, so the on-connect replay is
+  // skipped as already-seen rather than duplicated.
+  return reloadRecent();
+}).then(() => {
   startStream();
-  // The "Load older" affordance only makes sense once we know there's
-  // something older than the freshest page to fetch — show it after the
-  // initial SSE replay populates the cursor (deferred 1 s; the replay is
-  // synchronous after connect-open). If next_before_ts comes back null
-  // on the first click, the button hides itself again.
-  setTimeout(() => {
-    const btn = document.getElementById('btn-load-older');
-    const list = document.getElementById('recent-list');
-    if (!btn || !list) return;
-    if (list.querySelectorAll('.trace-item').length > 0) btn.style.display = '';
-  }, 1500);
 });
 })();
 </script>
