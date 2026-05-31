@@ -453,6 +453,101 @@ header .page-link.allowed { display: inline-flex; }
   background: rgba(242, 204, 96, 0.08);
   border: 1px solid rgba(242, 204, 96, 0.3);
   border-radius: 999px; white-space: nowrap; }
+
+/* ===================================================================
+   RESPONSIVE FOUNDATION  — shared phone/tablet support, injected on
+   every page (after each page's own <style>, so these win on equal
+   specificity). Breakpoint convention (em is relative to the BROWSER
+   default font, NOT --fs-base):
+       tablet  max-width: 64em  (~1024px)
+       phone   max-width: 40em  (~640px)   matches @container hdr 40rem
+       small   max-width: 30em  (~480px)
+   Media-query em/rem do NOT track the --fs-base scale picker, so any
+   width-based reflow that must follow the user's scale uses grid
+   auto-fit + rem minmax() (scale-aware) instead of a breakpoint — see
+   the .rgrid helper below.
+   =================================================================== */
+
+/* Scale-aware card/grid deck: columns drop on their own as the viewport
+   narrows OR the user raises --fs-base, with no media query (22rem rides
+   the scale). Pages opt in with class="rgrid". */
+.rgrid { display: grid; gap: 0.75rem;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr)); }
+
+/* Touch ergonomics — gated on the PRIMARY pointer being coarse so a
+   hybrid touch-laptop driven by a mouse keeps the dense desktop layout. */
+@media (pointer: coarse) {
+  /* iOS Safari zooms the page when a focused control's font-size < 16px.
+     The 16px floor is a hard platform minimum (not decorative px); the
+     rem term still rides --fs-base above it. */
+  input, select, textarea { font-size: max(1rem, 16px); }
+  /* Comfortable hit areas — rem rides the scale picker and clears the
+     WCAG 2.5.8 (AA) 24px floor at every scale step. */
+  header button, header .navlink, header .icon-btn, header .scale-picker,
+  header select, button, select, a.btn, .btn { min-height: 2.5rem; }
+  header .icon-btn, .nav-toggle { min-width: 2.5rem; }
+}
+
+/* ---- Responsive data tables → stacked label/value cards ----
+   Pages opt in: add class "rcards" to the <table> and data-label="…"
+   to every <td>. Below the phone breakpoint each row becomes a card
+   with its column header shown inline as the label. */
+@media (max-width: 40em) {
+  table.rcards { border: 0; }
+  table.rcards thead { position: absolute; width: 1px; height: 1px;
+    padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0);
+    white-space: nowrap; border: 0; }                 /* visually hidden */
+  table.rcards tr { display: block; border: 1px solid var(--border);
+    border-radius: 6px; margin-bottom: 0.5rem; padding: 0.3rem 0.6rem;
+    background: var(--panel); }
+  table.rcards td { display: grid;
+    grid-template-columns: minmax(6rem, 40%) 1fr; gap: 0.5rem;
+    align-items: baseline; border: 0; padding: 0.2rem 0; text-align: left; }
+  table.rcards td::before { content: attr(data-label); color: var(--help);
+    font-weight: 600; }
+  /* empty / loading rows span the whole card with no label column */
+  table.rcards td[colspan] { display: block; text-align: center; }
+  table.rcards td[colspan]::before { content: none; }
+}
+
+/* ---- Mobile hamburger nav drawer ----
+   <header> has container-type:inline-size, which makes it the containing
+   block for its position:fixed descendants. We rely on the header sitting
+   at the viewport top-left and spanning the full width: a fixed child at
+   top:0/left:0 lines up with the viewport origin, and we size the drawer
+   and backdrop with viewport units (vw / dvh) so they still cover the
+   whole screen. */
+.nav-toggle { display: none; background: #21262d; color: var(--fg);
+  border: 1px solid var(--border); border-radius: 4px; cursor: pointer;
+  font: inherit; font-size: var(--fs-lg); line-height: 1;
+  padding: 0.35rem 0.55rem; flex-shrink: 0; }
+.nav-toggle:hover { background: #30363d; color: var(--bold); }
+.nav-toggle:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
+.nav-backdrop { display: none; position: fixed; top: 0; left: 0;
+  width: 100vw; height: 100vh; height: 100dvh;
+  background: rgba(1, 4, 9, 0.6); z-index: 40; }
+
+@media (max-width: 40em) {
+  .nav-toggle { display: inline-flex; align-items: center;
+    justify-content: center; }
+  header .brand-sep { display: none; }
+  /* the existing .navrow becomes the off-canvas panel (links keep their
+     admin-only / page-link gating because they stay inside <header>). */
+  header #navrow { position: fixed; top: 0; left: 0;
+    height: 100vh; height: 100dvh; width: min(80vw, 17rem); z-index: 50;
+    flex-direction: column; flex-wrap: nowrap; align-items: stretch;
+    gap: 0.15rem; padding: 3.25rem 0.6rem 1rem; box-sizing: border-box;
+    background: var(--panel); border-right: 1px solid var(--border);
+    box-shadow: 4px 0 24px -8px rgba(0, 0, 0, 0.7); overflow-y: auto;
+    visibility: hidden; transform: translateX(-100%);
+    transition: transform .18s ease, visibility 0s linear .18s; }
+  header #navrow .navlink { width: 100%; box-sizing: border-box;
+    justify-content: flex-start; font-size: var(--fs-md);
+    padding: 0.55rem 0.7rem; }
+  header.nav-open #navrow { transform: translateX(0); visibility: visible;
+    transition: transform .18s ease; }
+  header.nav-open .nav-backdrop { display: block; }
+}
 """
 
 
@@ -532,6 +627,55 @@ SCALE_PICKER_JS = """
     document.documentElement.style.setProperty('--fs-base',sel.value+'px');
     localStorage.setItem(KEY,sel.value);
   });
+})();</script>
+"""
+
+
+# Mobile nav drawer wire-up — appended to SCALE_PICKER_JS at the end of
+# <body> on every page (so it ships without a new per-page placeholder).
+# Self-contained IIFE (no reliance on later-defined helpers — see the
+# injected-JS-parse-order pitfall). Toggles `header.nav-open`, traps focus
+# by marking the rest of the page `inert`, closes on Esc / backdrop / link,
+# and restores focus to the toggle on close.
+NAV_DRAWER_JS = """
+<script>(function(){
+  var hdr=document.querySelector('header');
+  var btn=document.querySelector('.nav-toggle');
+  var nav=document.getElementById('navrow');
+  var bd=document.querySelector('.nav-backdrop');
+  if(!hdr||!btn||!nav)return;
+  var lastFocus=null;
+  function inertRest(on){
+    Array.prototype.forEach.call(document.body.children,function(el){
+      if(el===hdr)return;
+      if(on)el.setAttribute('inert','');else el.removeAttribute('inert');
+    });
+  }
+  function onKey(e){if(e.key==='Escape'){e.preventDefault();close();}}
+  function open(){
+    if(hdr.classList.contains('nav-open'))return;
+    lastFocus=document.activeElement;
+    hdr.classList.add('nav-open');
+    btn.setAttribute('aria-expanded','true');
+    inertRest(true);
+    var links=nav.querySelectorAll('.navlink'),first=null;
+    for(var i=0;i<links.length;i++){if(links[i].offsetParent!==null){first=links[i];break;}}
+    (first||btn).focus();
+    document.addEventListener('keydown',onKey);
+  }
+  function close(){
+    if(!hdr.classList.contains('nav-open'))return;
+    hdr.classList.remove('nav-open');
+    btn.setAttribute('aria-expanded','false');
+    inertRest(false);
+    document.removeEventListener('keydown',onKey);
+    if(lastFocus&&lastFocus.focus)lastFocus.focus();else btn.focus();
+  }
+  btn.addEventListener('click',function(){
+    hdr.classList.contains('nav-open')?close():open();
+  });
+  if(bd)bd.addEventListener('click',close);
+  nav.addEventListener('click',function(e){if(e.target.closest('.navlink'))close();});
 })();</script>
 """
 
@@ -1531,7 +1675,15 @@ def nav_html(current: str) -> str:
         "captures": "captures",
     }
     admin_only_labels = {"settings", "keys"}
-    parts: list[str] = ['<span class="navrow">']
+    # Hamburger toggle (shown only ≤40em via NAV_CSS) + the nav links. The
+    # links keep their admin-only / page-link gating classes; on narrow
+    # screens NAV_CSS turns the same #navrow into an off-canvas drawer and
+    # NAV_DRAWER_JS wires open/close + focus handling.
+    parts: list[str] = [
+        '<button class="nav-toggle" type="button" aria-label="Menu" '
+        'aria-expanded="false" aria-controls="navrow">☰</button>',
+        '<span class="navrow" id="navrow">',
+    ]
     for label, href, active in _nav_items(current):
         classes = ["navlink"]
         extra_attr = ""
@@ -1548,6 +1700,7 @@ def nav_html(current: str) -> str:
             f'{label}</a>'
         )
     parts.append("</span>")
+    parts.append('<div class="nav-backdrop"></div>')
     return "".join(parts)
 
 
@@ -1620,7 +1773,7 @@ def render_page(template: str, current: str) -> str:
         .replace("{{SCALE_PICKER}}", SCALE_PICKER_HTML)
         .replace("{{RELOAD}}", RELOAD_BTN_HTML)
         .replace("{{LOGOUT}}", LOGOUT_BTN_HTML)
-        .replace("{{SCALE_PICKER_JS}}", SCALE_PICKER_JS)
+        .replace("{{SCALE_PICKER_JS}}", SCALE_PICKER_JS + NAV_DRAWER_JS)
         .replace(
             "{{SEV_POLLER_JS}}",
             # Order matters: the global landing helpers must be defined

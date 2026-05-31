@@ -329,6 +329,13 @@ _API_KEYS_HTML = r"""<!doctype html>
     gap: 0.6rem; align-items: center; padding: 0.4rem 0;
     border-top: 1px solid var(--border); font-size: var(--fs-sm); }
   .key-row:first-child { border-top: none; }
+  /* Phone: the 5-column key row can't hold its widths on a ~360px screen —
+     stack the cells into a single column so each (label / id / usage /
+     activity / action) gets the full width. */
+  @media (max-width: 40em) {
+    .key-row { grid-template-columns: 1fr; gap: 0.3rem; align-items: start; }
+    .key-row .action { justify-self: start; }
+  }
   .key-row .label { color: var(--fg); word-break: break-word; }
   .key-row .id { color: var(--dim); font-family: var(--font-mono); }
   /* Per-key usage: a row of compact stat chips (value over caption). Mono
@@ -352,7 +359,7 @@ _API_KEYS_HTML = r"""<!doctype html>
   /* Per-user summary strip under the card header: one mono line of the
      user's lifetime totals across all their keys. Sits in the card header,
      pushed right (margin-left:auto); doesn't wrap internally. */
-  .user-usage { display: flex; flex-wrap: nowrap; gap: 0.15rem 1.1rem;
+  .user-usage { display: flex; flex-wrap: wrap; gap: 0.15rem 1.1rem;
     margin-left: auto; }
   .user-usage .stat { display: flex; align-items: baseline; gap: 0.3rem; }
   .user-usage .stat .v { color: var(--cyan); font-family: var(--font-mono);
@@ -475,6 +482,16 @@ _API_KEYS_HTML = r"""<!doctype html>
     opacity: 0.35; cursor: not-allowed; }
   .perm-matrix .admin-cell {
     color: var(--dim); font-style: italic; }
+  /* The matrix is an inherently 2-D users×pages grid that doesn't stack into
+     cards meaningfully — the documented exception to the .rcards pattern.
+     Let it scroll horizontally and pin the username column so the row stays
+     identifiable while scanning page permissions on a phone. */
+  #perm-matrix-wrap { overflow-x: auto; }
+  @media (max-width: 40em) {
+    .perm-matrix th:first-child, .perm-matrix td:first-child {
+      position: sticky; left: 0; z-index: 1; background: var(--panel); }
+    .perm-matrix tbody tr.dirty td:first-child { background: #2a2718; }
+  }
   .perm-matrix button.save-perms {
     background: var(--input-bg); border: 1px solid var(--border);
     color: var(--fg); padding: 0.2rem 0.65rem; border-radius: 3px;

@@ -682,6 +682,12 @@ _QUICK_CONFIG_HTML = r"""<!doctype html>
   .card .rule-editor .map-table td.map-date-cell {
     width: 11rem; padding-left: 0.4rem; text-align: right;
     white-space: nowrap; vertical-align: middle; }
+  /* Phone: a fixed 11rem date column eats ~half a 360px screen, crushing the
+     key/value inputs — let it shrink to its content and wrap under them. */
+  @media (max-width: 40em) {
+    .card .rule-editor .map-table td.map-date-cell {
+      width: auto; white-space: normal; }
+  }
   .card .rule-editor .map-date {
     color: var(--dim); font-size: var(--fs-xs); font-family: var(--font-mono); }
   /* Collapse the oldest entries behind the toggle. _readMap still reads them

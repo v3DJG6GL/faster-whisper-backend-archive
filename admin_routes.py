@@ -1122,10 +1122,11 @@ _SETTINGS_VIEWER_HTML = r"""<!doctype html>
     align-items: center; justify-content: center; z-index: 100; }
   .modal.show { display: flex; }
   .modal-box { background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
-    padding: 1rem 1.25rem; max-width: 32.5rem; }
+    padding: 1rem 1.25rem; max-width: min(32.5rem, 95vw); }
   .modal-box h3 { margin: 0 0 0.625rem; color: var(--bold); }
   .modal-box ul { margin: 0.375rem 0 0.75rem; padding-left: 1.25rem; }
-  .modal-actions { display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 0.875rem; }
+  .modal-actions { display: flex; gap: 0.5rem; justify-content: flex-end;
+    margin-top: 0.875rem; flex-wrap: wrap; }
   .modal-actions button { padding: 0.3125rem 0.75rem; }
   .login { max-width: 30rem; margin: 3.75rem auto; background: var(--panel);
     border: 1px solid var(--border); border-radius: 6px; padding: 1.25rem 1.5rem; }

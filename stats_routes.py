@@ -542,7 +542,7 @@ _STATS_VIEWER_HTML = r"""<!doctype html>
   <div class="grid-stack-item" gs-id="endpoints" gs-x="6" gs-y="12" gs-w="6" gs-h="5">
    <div class="grid-stack-item-content"><div class="card">
     <h3>Endpoint counters</h3>
-    <table class="tbl"><thead><tr><th>path</th><th class="num">requests</th><th class="num">5xx</th></tr></thead>
+    <table class="tbl rcards"><thead><tr><th>path</th><th class="num">requests</th><th class="num">5xx</th></tr></thead>
     <tbody id="endpoints-rows"></tbody></table>
    </div></div>
   </div>
@@ -551,7 +551,7 @@ _STATS_VIEWER_HTML = r"""<!doctype html>
   <div class="grid-stack-item" gs-id="models" gs-x="0" gs-y="17" gs-w="12" gs-h="4">
    <div class="grid-stack-item-content"><div class="card">
     <h3>Loaded models</h3>
-    <table class="tbl"><thead><tr>
+    <table class="tbl rcards"><thead><tr>
       <th>name</th><th>device</th><th>compute</th>
       <th class="num">VRAM (MB)</th><th>state</th>
       <th class="num">age</th><th class="num">idle</th>
@@ -600,7 +600,7 @@ _STATS_VIEWER_HTML = r"""<!doctype html>
       <div id="usage-tip" class="usage-tip"></div>
     </div>
     <div class="usage-note">Buckets are local days. Showing the top 8 by the selected metric; the rest are folded into “others”.</div>
-    <table class="tbl usage-board"><thead><tr>
+    <table class="tbl usage-board rcards"><thead><tr>
       <th class="rank">#</th><th>name</th>
       <th class="num">requests</th><th class="num">words</th>
       <th class="num">audio</th><th class="num">err</th>
@@ -613,7 +613,7 @@ _STATS_VIEWER_HTML = r"""<!doctype html>
   <div class="grid-stack-item" gs-id="recent" gs-x="0" gs-y="30" gs-w="12" gs-h="6">
    <div class="grid-stack-item-content"><div class="card">
     <h3>Recent transcriptions (last <span id="rt-n">0</span>)</h3>
-    <table class="tbl"><thead><tr>
+    <table class="tbl rcards"><thead><tr>
       <th>when</th><th>model</th>
       <th class="num">audio</th><th class="num">wall</th><th class="num">RTF</th>
       <th class="num">words</th><th>status</th>
@@ -633,6 +633,15 @@ _STATS_VIEWER_HTML = r"""<!doctype html>
 const GS_LAYOUT_KEY = 'whisper-stats-layout-v5';
 const grid = GridStack.init({
   column: 12,
+  // Responsive: collapse to a single stacked column on phones/narrow tablets.
+  // breakpointForWindow keys off the viewport width (not the grid container),
+  // and layout:'list' keeps tiles in their saved order when reflowing.
+  // (GridStack 10+ has responsive OFF by default, so this is required.)
+  columnOpts: {
+    breakpointForWindow: true,
+    breakpoints: [{ w: 700, c: 1 }],
+    layout: 'list',
+  },
   // String form so cells track --fs-base (the scale picker). At 100% scale,
   // 4rem = 60px (matches the previous fixed value); at 130% it's ~78px.
   // Saved layouts (column units) preserve unchanged across scale changes.
@@ -643,6 +652,13 @@ const grid = GridStack.init({
   draggable: { handle: '.card h3' },
   alwaysShowResizeHandle: false,
 });
+// On touch devices, freeze drag/resize (the layout stays, but reordering tiles
+// by dragging is fiddly on a phone and the dashboard is read-mostly there).
+try {
+  if (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) {
+    grid.setStatic(true);
+  }
+} catch (_) {}
 // Restore saved layout if present (best-effort — schema mismatches are
 // silently ignored; user can hit [↺ layout] to recover defaults).
 try {
@@ -936,8 +952,8 @@ function render(snap) {
   for (const p of paths) {
     const n = snap.requests[p] || 0;
     const errs = snap.errors_total[p] || 0;
-    rows.push(`<tr><td>${p}</td><td class="num">${n}</td>` +
-      `<td class="num" style="${errs ? 'color:var(--red)' : ''}">${errs}</td></tr>`);
+    rows.push(`<tr><td data-label="path">${p}</td><td class="num" data-label="requests">${n}</td>` +
+      `<td class="num" data-label="5xx" style="${errs ? 'color:var(--red)' : ''}">${errs}</td></tr>`);
   }
   $('endpoints-rows').innerHTML = rows.length
     ? rows.join('') : '<tr><td colspan="3" class="empty">— none yet —</td></tr>';
@@ -951,14 +967,14 @@ function render(snap) {
       ? `${cold.first}s / ~${cold.last5_avg}s avg (${cold.count})`
       : '—';
     return `<tr>
-      <td>${m.name}</td>
-      <td>${m.device || '—'}</td>
-      <td>${m.compute_type || '—'}</td>
-      <td class="num">${m.vram_mb != null ? m.vram_mb.toFixed(0) : '—'}</td>
-      <td><span class="badge ${warm ? 'warm' : 'cold'}">${warm ? 'warm' : 'cold'}</span></td>
-      <td class="num">${fmtSec(m.age_sec)}</td>
-      <td class="num">${fmtSec(m.idle_sec)}</td>
-      <td class="num">${coldStr}</td>
+      <td data-label="name">${m.name}</td>
+      <td data-label="device">${m.device || '—'}</td>
+      <td data-label="compute">${m.compute_type || '—'}</td>
+      <td class="num" data-label="VRAM (MB)">${m.vram_mb != null ? m.vram_mb.toFixed(0) : '—'}</td>
+      <td data-label="state"><span class="badge ${warm ? 'warm' : 'cold'}">${warm ? 'warm' : 'cold'}</span></td>
+      <td class="num" data-label="age">${fmtSec(m.age_sec)}</td>
+      <td class="num" data-label="idle">${fmtSec(m.idle_sec)}</td>
+      <td class="num" data-label="cold-load">${coldStr}</td>
     </tr>`;
   });
   $('models-rows').innerHTML = mrows.length
@@ -972,13 +988,13 @@ function render(snap) {
       '<tr><td colspan="7" class="empty">— no requests yet —</td></tr>';
   } else {
     $('rt-rows').innerHTML = rt.slice().reverse().map(r => `<tr>
-      <td class="ts">${fmtAgo(r.ts)}</td>
-      <td>${r.model}</td>
-      <td class="num">${r.audio_dur.toFixed(1)} s</td>
-      <td class="num">${r.proc_dur.toFixed(2)} s</td>
-      <td class="num">${r.rtf != null ? r.rtf.toFixed(2) + '×' : '—'}</td>
-      <td class="num">${r.words}</td>
-      <td><span class="badge ${r.status === 'ok' ? 'ok' : 'err'}">${r.status}</span></td>
+      <td class="ts" data-label="when">${fmtAgo(r.ts)}</td>
+      <td data-label="model">${r.model}</td>
+      <td class="num" data-label="audio">${r.audio_dur.toFixed(1)} s</td>
+      <td class="num" data-label="wall">${r.proc_dur.toFixed(2)} s</td>
+      <td class="num" data-label="RTF">${r.rtf != null ? r.rtf.toFixed(2) + '×' : '—'}</td>
+      <td class="num" data-label="words">${r.words}</td>
+      <td data-label="status"><span class="badge ${r.status === 'ok' ? 'ok' : 'err'}">${r.status}</span></td>
     </tr>`).join('');
   }
 
@@ -1217,12 +1233,12 @@ function renderBoard(board, by) {
     const sub = by === 'key' && r.user_label
       ? '<span class="sub">' + esc(r.user_label) + '</span>' : '';
     return '<tr>'
-      + '<td class="rank">' + (i + 1) + '</td>'
-      + '<td class="name">' + sw + esc(r.label || '?') + sub + '</td>'
-      + '<td class="num">' + fmtCount(r.requests) + '</td>'
-      + '<td class="num">' + fmtCount(r.words) + '</td>'
-      + '<td class="num">' + fmtDur(r.audio_s) + '</td>'
-      + '<td class="num">' + fmtCount(r.errors) + '</td>'
+      + '<td class="rank" data-label="#">' + (i + 1) + '</td>'
+      + '<td class="name" data-label="name">' + sw + esc(r.label || '?') + sub + '</td>'
+      + '<td class="num" data-label="requests">' + fmtCount(r.requests) + '</td>'
+      + '<td class="num" data-label="words">' + fmtCount(r.words) + '</td>'
+      + '<td class="num" data-label="audio">' + fmtDur(r.audio_s) + '</td>'
+      + '<td class="num" data-label="err">' + fmtCount(r.errors) + '</td>'
       + '</tr>';
   }).join('');
 }

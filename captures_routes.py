@@ -2625,6 +2625,12 @@ _CAPTURES_HTML = r"""<!doctype html>
     font-size: var(--fs-sm); color: var(--help);
     cursor: pointer; user-select: none;
   }
+  /* Small phones: tighten the inter-item gap so the timestamp, pills,
+     duration and expand arrow keep wrapping cleanly instead of colliding. */
+  @media (max-width: 30em) {
+    .cc-head { gap: 0.35rem 0.6rem; }
+    .cc-head .spacer { flex-basis: 100%; height: 0; }
+  }
   .cc-head .when { color: var(--bold); font-size: var(--fs-md); }
   .cc-head .pill {
     border: 1px solid var(--border); border-radius: 999px;
@@ -2842,8 +2848,8 @@ _CAPTURES_HTML = r"""<!doctype html>
   .modal.show { display: flex; }
   .modal .box {
     background: var(--panel); border: 1px solid var(--border);
-    border-radius: 6px; padding: 1.25rem; min-width: 22rem;
-    max-width: 32rem;
+    border-radius: 6px; padding: 1.25rem;
+    min-width: min(22rem, 92vw); max-width: min(32rem, 95vw);
   }
   .modal h3 { margin: 0 0 0.5rem; color: var(--bold); font-size: var(--fs-xl); }
   .modal p { margin: 0.25rem 0; font-size: var(--fs-md); }

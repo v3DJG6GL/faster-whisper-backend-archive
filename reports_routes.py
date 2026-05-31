@@ -472,6 +472,13 @@ _REPORTS_HTML = """<!doctype html>
   .rc-step .step-before { color: var(--help); text-decoration: line-through; }
   .rc-step .step-after { color: var(--bold); }
 
+  /* Phone: the fixed label columns (4rem / 12rem) leave too little room for
+     the value next to them, so stack label-above-value. */
+  @media (max-width: 40em) {
+    .rc-textline, .rc-step { grid-template-columns: 1fr; gap: 0.1rem; }
+    .rc-step { padding-left: 0; }
+  }
+
   .rc-section {
     margin: 0.625rem 0 0.25rem; padding: 0.5rem 0.625rem;
     background: var(--input-bg); border: 1px solid var(--border);
