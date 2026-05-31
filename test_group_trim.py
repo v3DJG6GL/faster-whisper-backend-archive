@@ -100,11 +100,15 @@ def test_trim_collapses_internal_gap_and_edges(monkeypatch):
         pcm, n, edge_pad_ms=50, max_internal_gap_ms=300,
     )
     assert res["trimmed"] is True
-    # Two kept speech spans, each padded by 50ms on the available sides.
-    assert res["segments"] == [[150, 550, 0], [1450, 1850, 700]]
-    # 1100ms = span1 (400) + capped gap (300) + span2 (400).
-    assert res["new_duration_ms"] == 1100
-    assert res["lead_ms"] == 150
+    # Body-only: outer edges get NO pad (merge adds the uniform outer margin);
+    # internal span sides keep 50ms; the internal gap is capped at 300ms.
+    # span1 [200,550) (speech 200-500 + 50 inner-right), span2 [1450,1800)
+    # (50 inner-left + speech 1500-1800).
+    assert res["segments"] == [[200, 550, 0], [1450, 1800, 650]]
+    # 1000ms = span1 (350) + capped gap (300) + span2 (350).
+    assert res["new_duration_ms"] == 1000
+    # Leading silence fully removed (info only).
+    assert res["lead_ms"] == 200
     # new_start values are strictly increasing and the trimmed PCM matches.
     new_starts = [s[2] for s in res["segments"]]
     assert new_starts == sorted(new_starts)
@@ -157,11 +161,14 @@ def test_merge_trims_each_member(monkeypatch):
             edge_pad_ms=50, max_internal_gap_ms=300,
         )
     assert len(res["members"]) == 2
-    # Each member kept its single 300ms speech span padded to 400ms.
-    assert res["members"][0]["new_duration_ms"] == 400
-    assert res["members"][1]["new_duration_ms"] == 400
-    # merged = 400 + 300 gap + 400 = 1100ms.
-    assert res["duration_ms"] == 1100
+    # Body-only: each member is its 300ms speech span (no edge pad).
+    assert res["members"][0]["new_duration_ms"] == 300
+    assert res["members"][1]["new_duration_ms"] == 300
+    # Uniform layout: edge(50) + body(300) + join(300) + body(300) + edge(50).
+    assert res["duration_ms"] == 1000
+    # Absolute offsets: m0 after the leading edge; m1 after m0 + join.
+    assert res["members"][0]["offset_ms"] == 50
+    assert res["members"][1]["offset_ms"] == 650
 
 
 def test_merge_accepts_raw_over_cap_when_trimmed_fits(monkeypatch):
@@ -180,9 +187,10 @@ def test_merge_accepts_raw_over_cap_when_trimmed_fits(monkeypatch):
             [p1, p2], out, gap_ms=300, trim=True,
             edge_pad_ms=50, max_internal_gap_ms=300,
         )
-    # Each member: 13 s speech + 2×50 ms pad = 13.1 s; merged = 13.1+0.3+13.1.
-    assert res["members"][0]["new_duration_ms"] == 13100
-    assert res["duration_ms"] == 26500
+    # Body-only: each member is 13 s of speech; merged =
+    # edge(50)+13000+join(300)+13000+edge(50) = 26400 ms.
+    assert res["members"][0]["new_duration_ms"] == 13000
+    assert res["duration_ms"] == 26400
     assert res["duration_ms"] <= 28_000
 
 
@@ -253,6 +261,38 @@ def test_build_merged_words_per_member(monkeypatch):
     assert out[1]["start"] == pytest.approx(1.4)
     assert out[1]["end"] == pytest.approx(1.6)
     assert out[1]["member_idx"] == 1
+
+
+def test_build_merged_words_uniform_offset(monkeypatch):
+    # New uniform-silence layout: each member carries an absolute `offset_ms`,
+    # so word times are offset_ms + remapped-local (NOT cum+i*silence).
+    cr = _routes()
+    monkeypatch.setattr(
+        cr, "_align_words_to_final",
+        lambda words, final, model_name=None: [dict(w) for w in words],
+    )
+    members = [
+        {"id": "a", "words": [{"word": "hi", "start": 0.25, "end": 0.45}],
+         "final": "hi", "duration_seconds": 2.0},
+        {"id": "b", "words": [{"word": "yo", "start": 1.55, "end": 1.75}],
+         "final": "yo", "duration_seconds": 2.0},
+    ]
+    # edge 300 leading → m0 body at 300ms; m0 body 300ms; join 300 → m1 at 900ms.
+    trims = {
+        "a": {"lead_ms": 200, "new_duration_ms": 300,
+              "segments": [[200, 500, 0]], "offset_ms": 300},
+        "b": {"lead_ms": 1500, "new_duration_ms": 300,
+              "segments": [[1500, 1800, 0]], "offset_ms": 900},
+    }
+    out = cr._build_merged_words(members, 300, member_trims=trims)
+    assert len(out) == 2
+    # a: start 0.25s→50ms local +300ms offset = 0.35s; end 0.45s→250ms +300 = 0.55s
+    assert out[0]["start"] == pytest.approx(0.35)
+    assert out[0]["end"] == pytest.approx(0.55)
+    # b: start 1.55s→50ms local +900ms offset = 0.95s (NOT cum+silence);
+    #    end 1.75s→250ms +900 = 1.15s
+    assert out[1]["start"] == pytest.approx(0.95)
+    assert out[1]["end"] == pytest.approx(1.15)
 
 
 def test_align_member_words_attaches_training_tokens(monkeypatch):
@@ -329,8 +369,8 @@ def test_proposer_trimmed_duration_and_caching(monkeypatch, tmp_path):
 
     row = {"id": "cap1", "audio_relpath": "x", "duration_seconds": 1.0}
     d1 = P.trimmed_duration_s(row)
-    # speech 600ms + 2×50ms pad = 700ms, well under the raw 1.0s.
-    assert 0.65 <= d1 <= 0.75
+    # Body-only: 600ms speech (outer pad removed; merge adds the margin).
+    assert 0.55 <= d1 <= 0.65
 
     # Second call must hit the cache — make read_pcm explode to prove it.
     def _boom(_p):

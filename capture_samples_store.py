@@ -5,10 +5,10 @@ Lives in the same SQLite DB as `captures` (re-uses the connection from
 `captures_store`). The merged WAV files sit under `CAPTURES_DIR/groups/`
 with the same 4-char fanout as individual captures.
 
-The schema is structurally minimal: one `capture_groups` row per merged
-sample + a `group_id`/`group_order` FK on the existing captures table
+The schema is structurally minimal: one `capture_samples` row per merged
+sample + a `sample_id`/`sample_order` FK on the existing captures table
 (added by captures_store's migration). Dissolving a group deletes the
-row + the merged WAV; members get their `group_id` NULL'd out and
+row + the merged WAV; members get their `sample_id` NULL'd out and
 return to the flat list.
 
 Member-content drift is recorded via per-member PCM-content hashes
@@ -48,7 +48,7 @@ _groups_audio_dir: str | None = None    # e.g. CAPTURES_DIR/groups
 #                         "no such column …" and keep going.
 #   3. _SCHEMA_POST_MIGRATIONS — indexes that reference columns added
 #                         by phase 2. If we put `CREATE INDEX … ON
-#                         capture_groups(status)` in phase 1 alongside
+#                         capture_samples(status)` in phase 1 alongside
 #                         the CREATE TABLE, then on a DB upgraded from
 #                         before `status` existed the CREATE TABLE is a
 #                         no-op, the CREATE INDEX raises "no such
@@ -56,7 +56,7 @@ _groups_audio_dir: str | None = None    # e.g. CAPTURES_DIR/groups
 #                         which skips phase 2 entirely and leaves the
 #                         store unable to read its own rows.
 _SCHEMA_CORE = """
-CREATE TABLE IF NOT EXISTS capture_groups (
+CREATE TABLE IF NOT EXISTS capture_samples (
   id                          TEXT PRIMARY KEY,
   user_id                     TEXT NOT NULL,
   created_ts                  REAL NOT NULL,
@@ -75,46 +75,46 @@ CREATE TABLE IF NOT EXISTS capture_groups (
   merged_trail_trim_ms        INTEGER NOT NULL DEFAULT 0,
   member_trims_json           TEXT NOT NULL DEFAULT '{}'
 );
-CREATE INDEX IF NOT EXISTS idx_capture_groups_user
-  ON capture_groups(user_id, created_ts DESC);
+CREATE INDEX IF NOT EXISTS idx_capture_samples_user
+  ON capture_samples(user_id, created_ts DESC);
 """
 
 _MIGRATIONS: tuple[str, ...] = (
     # Old DBs still carry these two columns from the one-time-projection
     # cache design. Drop them idempotently — fresh DBs see "no such
     # column" and swallow it; upgraded DBs succeed and reclaim the space.
-    "ALTER TABLE capture_groups DROP COLUMN corrections_json",
-    "ALTER TABLE capture_groups DROP COLUMN corrections_migrated_at",
+    "ALTER TABLE capture_samples DROP COLUMN corrections_json",
+    "ALTER TABLE capture_samples DROP COLUMN corrections_migrated_at",
     # Live columns that may need adding on older DBs that pre-date them.
-    "ALTER TABLE capture_groups ADD COLUMN status TEXT NOT NULL DEFAULT 'new'",
-    "ALTER TABLE capture_groups ADD COLUMN admin_notes TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE capture_samples ADD COLUMN status TEXT NOT NULL DEFAULT 'new'",
+    "ALTER TABLE capture_samples ADD COLUMN admin_notes TEXT NOT NULL DEFAULT ''",
     # `language` per-group (BCP-47-ish, e.g. "de"). Whisper-detected at
     # the first member; emitted in the export manifest so fine-tune
     # loaders force the right language token.
-    "ALTER TABLE capture_groups ADD COLUMN language TEXT",
+    "ALTER TABLE capture_samples ADD COLUMN language TEXT",
     # Drop the `newline` join strategy: Whisper never emits literal `\n`
     # in continuous speech, so training samples that join members with
     # \n confuse the model. Normalise any historical rows to 'space'.
-    "UPDATE capture_groups SET transcript_join_strategy='space' "
+    "UPDATE capture_samples SET transcript_join_strategy='space' "
     "WHERE transcript_join_strategy='newline'",
     # VAD-trim offsets on the merged WAV. NOT NULL DEFAULT 0 so the
     # `_build_merged_words` math can rely on a numeric value without
     # a COALESCE — un-trimmed groups simply contribute 0.
-    "ALTER TABLE capture_groups ADD COLUMN merged_lead_trim_ms "
+    "ALTER TABLE capture_samples ADD COLUMN merged_lead_trim_ms "
     "INTEGER NOT NULL DEFAULT 0",
-    "ALTER TABLE capture_groups ADD COLUMN merged_trail_trim_ms "
+    "ALTER TABLE capture_samples ADD COLUMN merged_trail_trim_ms "
     "INTEGER NOT NULL DEFAULT 0",
     # Per-member silence-trim map: {member_id: {lead_ms, new_duration_ms,
     # segments:[[orig_start_ms, orig_end_ms, new_start_ms], ...]}}. Populated
     # when a group is created/re-merged under per-member trimming; empty '{}'
     # for legacy groups, which keep using merged_lead_trim_ms instead.
-    "ALTER TABLE capture_groups ADD COLUMN member_trims_json "
+    "ALTER TABLE capture_samples ADD COLUMN member_trims_json "
     "TEXT NOT NULL DEFAULT '{}'",
 )
 
 _SCHEMA_POST_MIGRATIONS = """
-CREATE INDEX IF NOT EXISTS idx_capture_groups_status
-  ON capture_groups(status);
+CREATE INDEX IF NOT EXISTS idx_capture_samples_status
+  ON capture_samples(status);
 """
 
 _VALID_STATUS = frozenset({"new", "reviewed", "ready", "dismissed"})
@@ -133,6 +133,19 @@ def init(conn: sqlite3.Connection, captures_audio_root: str) -> None:
     _conn = conn
     _groups_audio_dir = os.path.join(captures_audio_root, "groups")
     os.makedirs(_groups_audio_dir, exist_ok=True)
+    # One-shot table rename capture_groups → capture_samples (group→sample
+    # terminology migration). MUST run before CREATE TABLE so an existing
+    # table is renamed in place (data preserved) rather than shadowed by a
+    # fresh empty capture_samples. Idempotent: a no-op once renamed.
+    try:
+        _tables = {
+            r[0] for r in _conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        if "capture_groups" in _tables and "capture_samples" not in _tables:
+            _conn.execute("ALTER TABLE capture_groups RENAME TO capture_samples")
+    except sqlite3.OperationalError:
+        pass
     _conn.executescript(_SCHEMA_CORE)
     for stmt in _MIGRATIONS:
         try:
@@ -147,18 +160,18 @@ def init(conn: sqlite3.Connection, captures_audio_root: str) -> None:
     try:
         # One-shot correlated UPDATE: for each group missing a language,
         # pull the first non-empty language from its member captures in
-        # group_order. After this lands once on a deployed DB the WHERE
+        # sample_order. After this lands once on a deployed DB the WHERE
         # clause matches zero rows and the statement is a fast no-op.
         cur = _conn.execute(
-            "UPDATE capture_groups SET language = ("
+            "UPDATE capture_samples SET language = ("
             "  SELECT language FROM captures"
-            "   WHERE group_id = capture_groups.id"
+            "   WHERE sample_id = capture_samples.id"
             "     AND language IS NOT NULL AND language != ''"
-            "   ORDER BY group_order ASC LIMIT 1"
+            "   ORDER BY sample_order ASC LIMIT 1"
             ") WHERE (language IS NULL OR language = '')"
             "   AND EXISTS ("
             "     SELECT 1 FROM captures"
-            "      WHERE group_id = capture_groups.id"
+            "      WHERE sample_id = capture_samples.id"
             "        AND language IS NOT NULL AND language != ''"
             "   )"
         )
@@ -174,13 +187,13 @@ def init(conn: sqlite3.Connection, captures_audio_root: str) -> None:
 
 def _require_conn() -> sqlite3.Connection:
     if _conn is None:
-        raise RuntimeError("capture_groups_store.init() was not called before use.")
+        raise RuntimeError("capture_samples_store.init() was not called before use.")
     return _conn
 
 
 def _require_audio_root() -> str:
     if _groups_audio_dir is None:
-        raise RuntimeError("capture_groups_store.init() was not called before use.")
+        raise RuntimeError("capture_samples_store.init() was not called before use.")
     return _groups_audio_dir
 
 
@@ -188,9 +201,9 @@ def _require_audio_root() -> str:
 # Path helpers
 # ---------------------------------------------------------------------
 
-def _relpath_for(gid: str) -> str:
-    """`groups/<g0g1>/<g2g3>/<gid>.wav` — mirrors the captures fanout."""
-    return os.path.join("groups", gid[0:2], gid[2:4], f"{gid}.wav")
+def _relpath_for(sid: str) -> str:
+    """`groups/<g0g1>/<g2g3>/<sid>.wav` — mirrors the captures fanout."""
+    return os.path.join("groups", sid[0:2], sid[2:4], f"{sid}.wav")
 
 
 def abs_path_for(relpath: str) -> str:
@@ -216,7 +229,7 @@ def abs_path_for(relpath: str) -> str:
 
 def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     # `corrections` is derived from current member chips on every read
-    # (see captures_routes._enrich_group / list_groups_api). The DB row
+    # (see captures_routes._enrich_sample / list_samples_api). The DB row
     # has no chip storage of its own — single source of truth lives on
     # the member captures.
     return {
@@ -244,15 +257,15 @@ def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
 # Create / read / mutate / dissolve
 # ---------------------------------------------------------------------
 
-def get_group(gid: str) -> dict[str, Any] | None:
+def get_sample(sid: str) -> dict[str, Any] | None:
     conn = _require_conn()
     row = conn.execute(
-        "SELECT * FROM capture_groups WHERE id = ?", (gid,),
+        "SELECT * FROM capture_samples WHERE id = ?", (sid,),
     ).fetchone()
     return _row_to_dict(row) if row else None
 
 
-def list_groups(
+def list_samples(
     *, user_id: str | None = None, status: str | None = None,
 ) -> list[dict[str, Any]]:
     clauses: list[str] = []
@@ -265,14 +278,14 @@ def list_groups(
         params.append(status)
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     rows = _require_conn().execute(
-        f"SELECT * FROM capture_groups{where} ORDER BY created_ts DESC",
+        f"SELECT * FROM capture_samples{where} ORDER BY created_ts DESC",
         params,
     ).fetchall()
     return [_row_to_dict(r) for r in rows]
 
 
-def get_members(gid: str) -> list[dict[str, Any]]:
-    """Return member captures in their declared group_order, decoded
+def get_members(sid: str) -> list[dict[str, Any]]:
+    """Return member captures in their declared sample_order, decoded
     enough for the UI (transcript + duration; no heavy words/segments).
     Includes corrections_json so chip-aware joiners can apply each
     member's corrections to its post-processing text before merging."""
@@ -280,10 +293,10 @@ def get_members(gid: str) -> list[dict[str, Any]]:
     rows = conn.execute(
         "SELECT id, created_ts, duration_seconds, raw, final,"
         " text_for_training, audio_trimmed_relpath,"
-        " corrected_text, corrections_json, status, group_order, user_id,"
+        " corrected_text, corrections_json, status, sample_order, user_id,"
         " language"
-        " FROM captures WHERE group_id = ? ORDER BY group_order ASC",
-        (gid,),
+        " FROM captures WHERE sample_id = ? ORDER BY sample_order ASC",
+        (sid,),
     ).fetchall()
     out: list[dict[str, Any]] = []
     for r in rows:
@@ -298,8 +311,8 @@ def get_members(gid: str) -> list[dict[str, Any]]:
     return out
 
 
-def update_group(
-    gid: str,
+def update_sample(
+    sid: str,
     patch: dict[str, Any],
 ) -> dict[str, Any] | None:
     """Patch transcript / transcript_join_strategy /
@@ -332,31 +345,31 @@ def update_group(
         sets.append(f"{k} = ?")
         args.append(v)
     if not sets:
-        return get_group(gid)
-    args.append(gid)
+        return get_sample(sid)
+    args.append(sid)
     conn = _require_conn()
     with _lock:
         conn.execute(
-            f"UPDATE capture_groups SET {', '.join(sets)} WHERE id = ?", args,
+            f"UPDATE capture_samples SET {', '.join(sets)} WHERE id = ?", args,
         )
-    return get_group(gid)
+    return get_sample(sid)
 
 
-def dissolve_group(gid: str) -> None:
+def dissolve_sample(sid: str) -> None:
     """Delete the row, unlink the merged WAV, NULL out members'
-    (group_id, group_order)."""
-    g = get_group(gid)
+    (sample_id, sample_order)."""
+    g = get_sample(sid)
     if g is None:
         return
     conn = _require_conn()
     with _lock:
         with conn:
             conn.execute(
-                "UPDATE captures SET group_id = NULL, group_order = NULL"
-                " WHERE group_id = ?",
-                (gid,),
+                "UPDATE captures SET sample_id = NULL, sample_order = NULL"
+                " WHERE sample_id = ?",
+                (sid,),
             )
-            conn.execute("DELETE FROM capture_groups WHERE id = ?", (gid,))
+            conn.execute("DELETE FROM capture_samples WHERE id = ?", (sid,))
     try:
         abs_p = abs_path_for(g["merged_wav_relpath"])
         if os.path.exists(abs_p):
@@ -369,37 +382,37 @@ def dissolve_group(gid: str) -> None:
         captures_merge_proposer.invalidate(g.get("user_id"))
     except Exception:
         pass
-    logger.info("[groups] dissolved gid=%s", gid[:8])
+    logger.info("[groups] dissolved sid=%s", sid[:8])
 
 
-def clear_all_groups() -> int:
-    """Drop every row from capture_groups. Caller is responsible for
+def clear_all_samples() -> int:
+    """Drop every row from capture_samples. Caller is responsible for
     removing the merged WAV files (captures_store.clear_all handles
     that as part of its filesystem wipe). Returns count deleted."""
     conn = _require_conn()
     with _lock:
         row = conn.execute(
-            "SELECT COUNT(*) FROM capture_groups",
+            "SELECT COUNT(*) FROM capture_samples",
         ).fetchone()
         n = int(row[0]) if row else 0
-        conn.execute("DELETE FROM capture_groups")
+        conn.execute("DELETE FROM capture_samples")
     return n
 
 
 def reconcile_on_startup() -> tuple[int, int, int]:
     """Audit the merged-group WAV subtree (`<CAPTURES_DIR>/groups/`)
-    AND the captures→group_id FKs. Mirrors
+    AND the captures→sample_id FKs. Mirrors
     `captures_store.reconcile_on_startup` but scoped to this store.
 
       1. For each group whose merged WAV is missing on disk, count it.
          No column is set — the GET /audio route already returns 404
          and the UI surfaces a Regenerate banner; tracking it twice
          would add no signal.
-      2. For each file under `groups/` with no matching capture_groups
+      2. For each file under `groups/` with no matching capture_samples
          row, unlink (true orphans: dissolved groups whose unlink
          failed, crashed regenerates leaving stale `.tmp`s, etc.).
-      3. For each capture whose `group_id` points to a group row that
-         doesn't exist, NULL out `group_id` + `group_order`. This catches
+      3. For each capture whose `sample_id` points to a group row that
+         doesn't exist, NULL out `sample_id` + `sample_order`. This catches
          half-committed merges from earlier server versions and
          crash-recovery edge cases; without this, the capture is
          effectively unreachable (UI filters grouped captures from the
@@ -416,7 +429,7 @@ def reconcile_on_startup() -> tuple[int, int, int]:
     known_paths: set[str] = set()
     with _lock:
         rows = conn.execute(
-            "SELECT id, merged_wav_relpath FROM capture_groups",
+            "SELECT id, merged_wav_relpath FROM capture_samples",
         ).fetchall()
     for r in rows:
         try:
@@ -447,20 +460,20 @@ def reconcile_on_startup() -> tuple[int, int, int]:
                         continue
                     files_unlinked += 1
 
-    # Pass 3: orphan-FK sweep. A capture whose group_id points to a
+    # Pass 3: orphan-FK sweep. A capture whose sample_id points to a
     # missing group row gets returned to the flat list.
     orphan_fks_cleared = 0
     with _lock:
         cur = conn.execute(
-            "UPDATE captures SET group_id = NULL, group_order = NULL"
-            " WHERE group_id IS NOT NULL"
-            " AND group_id NOT IN (SELECT id FROM capture_groups)"
+            "UPDATE captures SET sample_id = NULL, sample_order = NULL"
+            " WHERE sample_id IS NOT NULL"
+            " AND sample_id NOT IN (SELECT id FROM capture_samples)"
         )
         orphan_fks_cleared = cur.rowcount or 0
 
     logger.info(
         "[groups] reconcile: %d rows with missing WAV, "
-        "%d orphan files removed, %d orphan group_id FKs cleared",
+        "%d orphan files removed, %d orphan sample_id FKs cleared",
         rows_missing, files_unlinked, orphan_fks_cleared,
     )
     return rows_missing, files_unlinked, orphan_fks_cleared

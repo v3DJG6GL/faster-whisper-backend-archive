@@ -402,20 +402,20 @@ def test_delete_member_auto_dissolves_group(captures_store_db, groups_store_db, 
     cid = _make(cs, monkeypatch, tmp_path)
     # Manually create a group row + attach the capture as a member.
     conn = cs._require_conn()
-    gid = "g0123456789abcdef"
+    sid = "g0123456789abcdef"
     conn.execute(
-        "INSERT INTO capture_groups (id, user_id, created_ts,"
+        "INSERT INTO capture_samples (id, user_id, created_ts,"
         " merged_wav_relpath, merged_duration_ms, transcript,"
         " member_hashes_json) VALUES (?,?,?,?,?,?,?)",
-        (gid, "u1", 1.0, gs._relpath_for(gid), 1000, "t", "{}"),
+        (sid, "u1", 1.0, gs._relpath_for(sid), 1000, "t", "{}"),
     )
     conn.execute(
-        "UPDATE captures SET group_id=?, group_order=0 WHERE id=?", (gid, cid),
+        "UPDATE captures SET sample_id=?, sample_order=0 WHERE id=?", (sid, cid),
     )
-    assert gs.get_group(gid) is not None
+    assert gs.get_sample(sid) is not None
     assert cs.delete_capture(cid) is True
     # Group auto-dissolved on member delete.
-    assert gs.get_group(gid) is None
+    assert gs.get_sample(sid) is None
 
 
 # ---------------------------------------------------------------------------
@@ -468,16 +468,16 @@ def test_evict_excludes_group_members(captures_store_db, groups_store_db, monkey
     monkeypatch.setattr(config, "CAPTURES_MAX_MB", 5000, raising=False)
     member = _make(cs, monkeypatch, tmp_path)
     other = _make(cs, monkeypatch, tmp_path)
-    gid = "gmemberexcl00000"
+    sid = "gmemberexcl00000"
     conn = cs._require_conn()
     conn.execute(
-        "INSERT INTO capture_groups (id, user_id, created_ts,"
+        "INSERT INTO capture_samples (id, user_id, created_ts,"
         " merged_wav_relpath, merged_duration_ms, transcript,"
         " member_hashes_json) VALUES (?,?,?,?,?,?,?)",
-        (gid, "u1", 1.0, gs._relpath_for(gid), 1000, "t", "{}"),
+        (sid, "u1", 1.0, gs._relpath_for(sid), 1000, "t", "{}"),
     )
     # member is the oldest, but it's in a group → must be protected.
-    conn.execute("UPDATE captures SET group_id=?, group_order=0, created_ts=1 WHERE id=?", (gid, member))
+    conn.execute("UPDATE captures SET sample_id=?, sample_order=0, created_ts=1 WHERE id=?", (sid, member))
     conn.execute("UPDATE captures SET created_ts=2 WHERE id=?", (other,))
     monkeypatch.setattr(config, "CAPTURES_MAX", 2, raising=False)
     _make(cs, monkeypatch, tmp_path)  # total now 3 > cap 2
@@ -572,17 +572,17 @@ def test_sweep_retention_excludes_group_members(captures_store_db, groups_store_
     import config
     monkeypatch.setattr(config, "CAPTURES_RETENTION_DAYS", 30, raising=False)
     member = _make(cs, monkeypatch, tmp_path)
-    gid = "gretention000000"
+    sid = "gretention000000"
     conn = cs._require_conn()
     conn.execute(
-        "INSERT INTO capture_groups (id, user_id, created_ts,"
+        "INSERT INTO capture_samples (id, user_id, created_ts,"
         " merged_wav_relpath, merged_duration_ms, transcript,"
         " member_hashes_json) VALUES (?,?,?,?,?,?,?)",
-        (gid, "u1", 1.0, gs._relpath_for(gid), 1000, "t", "{}"),
+        (sid, "u1", 1.0, gs._relpath_for(sid), 1000, "t", "{}"),
     )
     conn.execute(
-        "UPDATE captures SET group_id=?, group_order=0, created_ts=? WHERE id=?",
-        (gid, time.time() - 99 * 86400, member),
+        "UPDATE captures SET sample_id=?, sample_order=0, created_ts=? WHERE id=?",
+        (sid, time.time() - 99 * 86400, member),
     )
     # Member is ancient but grouped → never swept.
     assert cs.sweep_retention() == 0

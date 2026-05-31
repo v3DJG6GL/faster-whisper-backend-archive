@@ -3,7 +3,7 @@ Auto-merge proposer for /captures fine-tuning data curation.
 
 Given the user's ungrouped captures, ranks plausible merges into ~26 s
 "groups" that respect the 28 s hard cap already enforced by
-captures_routes.create_group_api (mirrors its raw-`duration_seconds`
+captures_routes.create_sample_api (mirrors its raw-`duration_seconds`
 arithmetic; see captures_routes.py:896-901).
 
 Heuristic rationale (see captures-finetune-findings.md + research notes):
@@ -22,7 +22,7 @@ the existing merge-modal preview before any write.
 
 In-memory cache: results are cached per (user_id) with a TTL and are
 invalidated explicitly by capture writes (see invalidate() callers in
-captures_store + capture_groups_store).
+captures_store + capture_samples_store).
 """
 from __future__ import annotations
 
@@ -37,10 +37,9 @@ import captures_store
 logger = logging.getLogger(__name__)
 
 
-# Mirrors captures_routes.create_group_api pre-flight (L896-901) and
-# audio_merge.merge_wavs gap accounting. Kept here as a constant rather
-# than imported to avoid a circular dep with captures_routes.
-_GROUP_HARD_CAP_S = 28.0
+# The finished-sample duration cap is the global cfg.CAPTURES_SAMPLE_MAX_DURATION_S
+# (read in _generate); the inter-member gap mirrors the global VAD-internal
+# silence. Kept out of imports to avoid a circular dep with captures_routes.
 _DEFAULT_GAP_MS = 300
 
 # Sentinel cache key for admin "all users" view.
@@ -129,13 +128,14 @@ def _ratio(a: str, b: str) -> float:
     return difflib.SequenceMatcher(None, a, b).ratio()
 
 
-def _build_group_score(members: list[dict[str, Any]], gap_s: float, target_s: float) -> dict[str, float]:
+def _build_sample_score(members: list[dict[str, Any]], gap_s: float,
+                        target_s: float, edge_s: float = 0.0) -> dict[str, float]:
     """Return per-component scores + composite for ranking."""
     n = len(members)
-    # Packed audio uses TRIMMED durations (what the merged WAV actually is);
-    # wall span uses RAW duration since the recording occupied real wall-clock
-    # time before trimming.
-    total_dur = sum(_dur(m) for m in members) + gap_s * (n - 1)
+    # Packed audio uses TRIMMED bodies (what the merged WAV actually is) +
+    # (n-1) join gaps + the two uniform outer margins; wall span uses RAW
+    # duration since the recording occupied real wall-clock time before trim.
+    total_dur = sum(_dur(m) for m in members) + gap_s * (n - 1) + 2.0 * edge_s
     first_ts = float(members[0]["created_ts"])
     last = members[-1]
     last_end = float(last["created_ts"]) + float(last["duration_seconds"])
@@ -187,6 +187,8 @@ def _generate_candidates_for_bucket(
     dup_threshold: float,
     target_s: float,
     hard_cap_s: float,
+    edge_s: float = 0.0,
+    min_sample_s: float = 0.0,
 ) -> list[tuple[float, list[dict[str, Any]]]]:
     """For one (session, language) bucket of chronologically-sorted captures,
     enumerate one candidate group per starting index by walking forward and
@@ -203,7 +205,8 @@ def _generate_candidates_for_bucket(
     for i in range(n):
         members: list[dict[str, Any]] = [bucket[i]]
         member_texts: list[str] = [texts[i]]
-        used_dur = _dur(bucket[i])
+        # Outer margins (both ends) count toward the cap from the start.
+        used_dur = 2.0 * edge_s + _dur(bucket[i])
         for j in range(i + 1, n):
             cand = bucket[j]
             cand_dur = _dur(cand)
@@ -219,9 +222,12 @@ def _generate_candidates_for_bucket(
             members.append(cand)
             member_texts.append(ct)
             used_dur = tentative
-        if len(members) < 2:
+        # Single-capture samples (group-of-one) are allowed; drop a candidate
+        # whose finished length is below the sample-min floor or above the cap
+        # (the latter guards a lone over-long member that has no pair).
+        scored = _build_sample_score(members, gap_s, target_s, edge_s)
+        if scored["total_dur"] < min_sample_s or scored["total_dur"] > hard_cap_s:
             continue
-        scored = _build_group_score(members, gap_s, target_s)
         candidates.append((scored["composite"], members))
     return candidates
 
@@ -232,8 +238,9 @@ def _build_proposal(
     target_s: float,
     language: str,
     user_id: str,
+    edge_s: float = 0.0,
 ) -> dict[str, Any]:
-    scored = _build_group_score(members, gap_s, target_s)
+    scored = _build_sample_score(members, gap_s, target_s, edge_s)
     return {
         "member_ids": [m["id"] for m in members],
         "member_previews": [
@@ -265,13 +272,18 @@ def _build_proposal(
     }
 
 
-def _eligible(row: dict[str, Any], min_clip_s: float) -> bool:
+def _eligible(row: dict[str, Any], min_clip_s: float, hard_cap_s: float) -> bool:
     if (row.get("status") or "") in {"dismissed", "audio_missing"}:
         return False
-    if row.get("group_id"):
+    if row.get("sample_id"):
         return False
-    dur = float(row.get("duration_seconds") or 0.0)
-    if dur < min_clip_s or dur > _GROUP_HARD_CAP_S:
+    # Min on RAW duration (the ingestion floor every stored capture clears);
+    # cap on the TRIMMED body, so a raw-long / trims-short clip (e.g. 40 s raw,
+    # 27 s of speech) is now eligible instead of wrongly rejected.
+    raw = float(row.get("duration_seconds") or 0.0)
+    if raw < min_clip_s:
+        return False
+    if trimmed_duration_s(row) > hard_cap_s:
         return False
     if not (row.get("language") or "").strip():
         return False
@@ -312,11 +324,20 @@ def propose_merges(
         return list(cached[1]), True
 
     session_gap_s = max(1, int(cfg.CAPTURES_PROPOSER_SESSION_GAP_S))
-    min_clip_s = float(cfg.CAPTURES_PROPOSER_MIN_CLIP_S)
+    # Per-capture floor is the (raw) ingestion minimum; every stored capture
+    # already clears it, so this is mostly a belt-and-braces guard.
+    min_clip_s = float(cfg.CAPTURE_RECORDINGS_MIN_DURATION_SEC)
     dup_threshold = float(cfg.CAPTURES_PROPOSER_DUP_THRESHOLD)
     max_proposals = max(1, int(cfg.CAPTURES_PROPOSER_MAX_PROPOSALS))
     target_s = float(cfg.CAPTURES_PROPOSER_TARGET_S)
-    gap_s = _DEFAULT_GAP_MS / 1000.0
+    hard_cap_s = float(cfg.CAPTURES_SAMPLE_MAX_DURATION_S)
+    # Inter-member gap estimate mirrors the global silence knob (the merge
+    # inserts this between members), so "packs to X s" matches the real WAV.
+    gap_s = float(getattr(cfg, "CAPTURES_VAD_MARGIN_GROUP_INTERNAL_MS", 300)) / 1000.0
+    # Uniform outer margin on both ends of the merged WAV (counts toward cap).
+    edge_s = float(getattr(cfg, "CAPTURES_VAD_MARGIN_GROUP_EDGE_MS", 300)) / 1000.0
+    # Finished-sample floor — drop proposals (incl. solos) shorter than this.
+    min_sample_s = float(getattr(cfg, "CAPTURES_SAMPLE_MIN_DURATION_S", 1.0))
 
     # Pull a bounded window of recent captures. 500 keeps work bounded for
     # the rare admin "all users" view; per-user views typically have far
@@ -326,7 +347,7 @@ def propose_merges(
         limit=500,
         user_id=effective_user_id,
     )
-    eligible = [r for r in rows if _eligible(r, min_clip_s)]
+    eligible = [r for r in rows if _eligible(r, min_clip_s, hard_cap_s)]
 
     # Annotate each survivor with its trimmed group-contribution duration once
     # (cached across runs). All downstream packing + scoring + display reads go
@@ -354,7 +375,7 @@ def propose_merges(
         sessions.append(cur)
 
     # Per session × user × language → candidates. user_id partition matters
-    # because create_group_api enforces same-user (captures_routes.py:878-882);
+    # because create_sample_api enforces same-user (captures_routes.py:878-882);
     # without it, the admin "all users" view could emit proposals that the
     # merge endpoint rejects.
     all_candidates: list[tuple[float, list[dict[str, Any]], str, str]] = []
@@ -368,7 +389,8 @@ def propose_merges(
             by_keys.setdefault((uid, lang), []).append(r)
         for (uid, lang), bucket in by_keys.items():
             for score, members in _generate_candidates_for_bucket(
-                bucket, gap_s, dup_threshold, target_s, _GROUP_HARD_CAP_S
+                bucket, gap_s, dup_threshold, target_s, hard_cap_s, edge_s,
+                min_sample_s,
             ):
                 all_candidates.append((score, members, lang, uid))
 
@@ -381,7 +403,7 @@ def propose_merges(
             continue
         for m in members:
             claimed.add(m["id"])
-        proposals.append(_build_proposal(members, gap_s, target_s, lang, uid))
+        proposals.append(_build_proposal(members, gap_s, target_s, lang, uid, edge_s))
         if len(proposals) >= max_proposals:
             break
 
@@ -395,7 +417,7 @@ def propose_merges(
 
 def invalidate(user_id: str | None) -> None:
     """Drop cached proposals for a user (and the all-users entry, which any
-    write may affect). Called from captures_store + capture_groups_store
+    write may affect). Called from captures_store + capture_samples_store
     write paths. Safe to call with no current cache entry."""
     if user_id:
         _CACHE.pop(user_id, None)

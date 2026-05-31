@@ -61,18 +61,18 @@ _VALID_STATUS = frozenset({"new", "reviewed", "ready", "dismissed", "audio_missi
 _EVICTION_ORDER = ("dismissed", "audio_missing", "reviewed", "new", "ready")
 
 # Schema is split into THREE phases on purpose, ordered around the
-# user_id / group_id migration:
+# user_id / sample_id migration:
 #
 #   1. _SCHEMA_CORE  — table + indexes that reference ONLY original
 #      columns. Safe to run against a pre-flag DB.
 #   2. _MIGRATIONS   — ALTER TABLE ADD COLUMN for every column added
-#      after the first ship (currently: user_id, group_id, group_order,
+#      after the first ship (currently: user_id, sample_id, sample_order,
 #      text_for_training, audio_trimmed_relpath, audio_trim_lead_ms,
 #      audio_trim_trail_ms). Idempotent — each stmt runs in its own
 #      try/except so a fresh DB whose CREATE TABLE already includes
 #      the column swallows "duplicate column …" and keeps going.
 #   3. _SCHEMA_USER_GROUP_INDEXES — indexes that reference user_id /
-#      group_id. MUST run AFTER step 2 — if we packaged them into
+#      sample_id. MUST run AFTER step 2 — if we packaged them into
 #      _SCHEMA_CORE with executescript(), the index creation on a
 #      pre-flag DB raised "no such column: user_id" and the executescript
 #      bailed before step 2 could fix it, leaving the table missing
@@ -101,8 +101,8 @@ CREATE TABLE IF NOT EXISTS captures (
   status          TEXT NOT NULL DEFAULT 'new',
   reviewed_ts     REAL,
   user_id         TEXT,
-  group_id        TEXT,
-  group_order     INTEGER
+  sample_id        TEXT,
+  sample_order     INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_captures_created    ON captures(created_ts DESC);
 CREATE INDEX IF NOT EXISTS idx_captures_status     ON captures(status);
@@ -124,9 +124,15 @@ CREATE INDEX IF NOT EXISTS idx_captures_request_id ON captures(request_id);
 #   silence cut via Silero VAD (per-singleton manual trim). NULL means
 #   "use audio_relpath".
 _MIGRATIONS = (
+    # group→sample terminology rename. RENAME first so existing DBs keep
+    # their membership data (the later ADD COLUMN sample_id then duplicate-
+    # fails harmlessly); fresh DBs swallow "no such column" and the ADD
+    # creates them. SQLite ≥3.25 auto-updates dependent index definitions.
+    "ALTER TABLE captures RENAME COLUMN group_id TO sample_id",
+    "ALTER TABLE captures RENAME COLUMN group_order TO sample_order",
     "ALTER TABLE captures ADD COLUMN user_id TEXT",
-    "ALTER TABLE captures ADD COLUMN group_id TEXT",
-    "ALTER TABLE captures ADD COLUMN group_order INTEGER",
+    "ALTER TABLE captures ADD COLUMN sample_id TEXT",
+    "ALTER TABLE captures ADD COLUMN sample_order INTEGER",
     "ALTER TABLE captures ADD COLUMN text_for_training TEXT",
     "ALTER TABLE captures ADD COLUMN audio_trimmed_relpath TEXT",
     # VAD silence-trim offset bookkeeping. NULL means "row was never
@@ -141,7 +147,7 @@ _MIGRATIONS = (
 
 _SCHEMA_USER_GROUP_INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_captures_user  ON captures(user_id, created_ts DESC);
-CREATE INDEX IF NOT EXISTS idx_captures_group ON captures(group_id, group_order);
+CREATE INDEX IF NOT EXISTS idx_captures_group ON captures(sample_id, sample_order);
 """
 
 
@@ -354,7 +360,7 @@ def create_capture(
                 " raw, final, text_for_training, audio_trimmed_relpath,"
                 " words_json, segments_json,"
                 " corrected_text, corrections_json, admin_notes,"
-                " status, reviewed_ts, user_id, group_id, group_order"
+                " status, reviewed_ts, user_id, sample_id, sample_order"
                 ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     cid, now, request_id, model or "", language or "",
@@ -466,7 +472,7 @@ def _evict_to_cap(conn: sqlite3.Connection) -> None:
 
 def _total_audio_bytes(conn: sqlite3.Connection) -> int:
     # Restrict to non-group rows: _drop_oldest_by_bytes excludes group
-    # members from eviction (they are owned by capture_groups_store), so
+    # members from eviction (they are owned by capture_samples_store), so
     # counting their bytes here would let the total cross the cap with
     # nothing the evictor can drop, causing a full scan on every insert.
     # Include the VAD-trimmed companion: _drop_oldest_by_bytes credits its
@@ -475,7 +481,7 @@ def _total_audio_bytes(conn: sqlite3.Connection) -> int:
     total = 0
     rows = conn.execute(
         "SELECT audio_relpath, audio_trimmed_relpath FROM captures"
-        " WHERE group_id IS NULL"
+        " WHERE sample_id IS NULL"
     )
     for row in rows:
         try:
@@ -503,7 +509,7 @@ def _drop_oldest_with_status(
         return 0
     rows = conn.execute(
         "SELECT id, audio_relpath, audio_trimmed_relpath FROM captures"
-        " WHERE status = ? AND group_id IS NULL"
+        " WHERE status = ? AND sample_id IS NULL"
         " ORDER BY created_ts ASC LIMIT ?",
         (status, limit),
     ).fetchall()
@@ -536,7 +542,7 @@ def _drop_oldest_by_bytes(
         return 0
     rows = conn.execute(
         "SELECT id, audio_relpath, audio_trimmed_relpath FROM captures"
-        " WHERE status = ? AND group_id IS NULL"
+        " WHERE status = ? AND sample_id IS NULL"
         " ORDER BY created_ts ASC",
         (status,),
     ).fetchall()
@@ -590,7 +596,7 @@ _LIST_COLUMNS = (
     " raw, final, text_for_training, audio_trimmed_relpath,"
     " audio_trim_lead_ms, audio_trim_trail_ms,"
     " corrected_text, corrections_json, admin_notes,"
-    " status, reviewed_ts, user_id, group_id, group_order"
+    " status, reviewed_ts, user_id, sample_id, sample_order"
 )
 
 
@@ -785,13 +791,13 @@ def delete_capture(cid: str) -> bool:
     conn = _require_conn()
     with _lock:
         row = conn.execute(
-            "SELECT audio_relpath, audio_trimmed_relpath, group_id, user_id"
+            "SELECT audio_relpath, audio_trimmed_relpath, sample_id, user_id"
             " FROM captures WHERE id = ?",
             (cid,),
         ).fetchone()
         if row is None:
             return False
-        gid = row["group_id"]
+        sid = row["sample_id"]
         uid = row["user_id"]
         conn.execute("DELETE FROM captures WHERE id = ?", (cid,))
     try:
@@ -805,18 +811,18 @@ def delete_capture(cid: str) -> bool:
             _safe_unlink(abs_audio_path(trimmed))
         except ValueError:
             pass
-    if gid:
+    if sid:
         try:
-            import capture_groups_store
-            capture_groups_store.dissolve_group(gid)
+            import capture_samples_store
+            capture_samples_store.dissolve_sample(sid)
             logger.info(
-                "[captures] auto-dissolved gid=%s after member %s delete",
-                gid[:8], cid[:8],
+                "[captures] auto-dissolved sid=%s after member %s delete",
+                sid[:8], cid[:8],
             )
         except Exception as _e:
             logger.warning(
-                "[captures] auto-dissolve of gid=%s failed: %s",
-                gid[:8], _e,
+                "[captures] auto-dissolve of sid=%s failed: %s",
+                sid[:8], _e,
             )
     try:
         import captures_merge_proposer
@@ -832,19 +838,19 @@ def clear_all(reporter_host: str = "") -> int:
     WARNING-logs the count + caller host for audit. Returns the count
     of captures deleted.
 
-    Also wipes capture_groups — the filesystem rmtree below clears
+    Also wipes capture_samples — the filesystem rmtree below clears
     the groups/ subtree along with the hex fanout dirs, so leaving
-    capture_groups rows alive would leave them pointing at vanished
+    capture_samples rows alive would leave them pointing at vanished
     files (the user's '404 merged audio missing' symptom)."""
     conn = _require_conn()
     audio_dir = _require_audio_dir()
     n_groups = 0
     try:
-        import capture_groups_store
-        n_groups = capture_groups_store.clear_all_groups()
+        import capture_samples_store
+        n_groups = capture_samples_store.clear_all_samples()
     except Exception as _e:
         logger.warning(
-            "[captures] clear_all_groups failed (continuing): %s", _e,
+            "[captures] clear_all_samples failed (continuing): %s", _e,
         )
     with _lock:
         row = conn.execute("SELECT COUNT(*) FROM captures").fetchone()
@@ -914,7 +920,7 @@ def reconcile_on_startup() -> tuple[int, int]:
                     known_paths.add(os.path.abspath(t_abs))
 
     # Walk the audio directory and unlink anything not in known_paths.
-    # The `groups/` subtree is owned by capture_groups_store and has its
+    # The `groups/` subtree is owned by capture_samples_store and has its
     # own reconcile pass — prune it here so we never see a merged-group
     # WAV as an orphan and delete it on every restart. Hex-fanout dirs
     # are "00".."ff", none of which equal "groups", so this is safe.
@@ -957,7 +963,7 @@ def sweep_retention() -> int:
     with _lock:
         rows = conn.execute(
             "SELECT id, audio_relpath, audio_trimmed_relpath FROM captures"
-            " WHERE created_ts < ? AND group_id IS NULL",
+            " WHERE created_ts < ? AND sample_id IS NULL",
             (cutoff,),
         ).fetchall()
         if not rows:

@@ -270,20 +270,28 @@ def trim_pcm_for_merge(
 
     pad = max(0, int(edge_pad_ms)) * _REQ_RATE // 1000
     max_gap = max(0, int(max_internal_gap_ms)) * _REQ_RATE // 1000
+    n_spans = len(speeches)
 
-    # Build kept spans in ORIGINAL samples. Each speech segment is padded by
-    # `pad` on both sides, clamped to the clip and to neighbouring segments so
-    # spans never overlap. Between two kept spans we keep at most `max_gap`
-    # silence; leading/trailing silence beyond `pad` is dropped.
+    # Build a SPEECH-BODY-ONLY result in ORIGINAL samples: outer leading and
+    # trailing silence is removed ENTIRELY (no outer pad), internal speech
+    # segments keep `pad` of context on their inner sides, and the silence
+    # between two kept spans is capped at `max_gap`. The merge layer
+    # (audio_merge.merge_wavs) then adds the uniform outer margin (EDGE) and
+    # the inter-member join silence, so all silence in the final clip is
+    # uniform and the per-member body carries no edge padding of its own.
     bsps = audio_merge.BYTES_PER_SAMPLE
     out_chunks: list[bytes] = []
     segments: list[list[int]] = []
     new_pos = 0          # cursor in trimmed-output samples
     prev_kept_end = 0    # original-sample end of the previous kept span
 
-    for seg in speeches:
-        s = max(0, int(seg["start"]) - pad)
-        e = min(n_samples, int(seg["end"]) + pad)
+    for idx, seg in enumerate(speeches):
+        # No pad on the clip's outer edges (first span's left, last span's
+        # right); internal span sides keep `pad` of context.
+        left_pad = 0 if idx == 0 else pad
+        right_pad = 0 if idx == n_spans - 1 else pad
+        s = max(0, int(seg["start"]) - left_pad)
+        e = min(n_samples, int(seg["end"]) + right_pad)
         # Don't let this span's padded start swallow audio already emitted by
         # the previous span (overlapping pads on close segments).
         if s < prev_kept_end:
@@ -317,7 +325,9 @@ def trim_pcm_for_merge(
     out_pcm = b"".join(out_chunks)
     new_n = new_pos
     new_duration_ms = _samples_to_ms(new_n)
-    lead_ms = _samples_to_ms(max(0, int(speeches[0]["start"]) - pad))
+    # Leading silence fully removed (info only; the merge layer owns outer
+    # margins now).
+    lead_ms = _samples_to_ms(int(speeches[0]["start"]))
 
     # Nothing meaningfully removed (under ~50 ms total) → identity, so the
     # merge keeps the original PCM and a clean identity map.

@@ -136,12 +136,20 @@ _FIELD_GROUPS: list[tuple[str, list[tuple[str | None, list[str]]]]] = [
             "CAPTURE_RECORDINGS_MAX_DURATION_SEC",
             "CAPTURE_RECORDINGS_AUDIO_BYTES_HARD_LIMIT",
         ]),
+        ("Sample sizing", [
+            "CAPTURES_SAMPLE_MIN_DURATION_S",
+            "CAPTURES_SAMPLE_MAX_DURATION_S",
+            "CAPTURES_SAMPLE_JOIN_STRATEGY",
+            "CAPTURES_PROPOSER_TARGET_S",
+            "CAPTURES_PROPOSER_SESSION_GAP_S",
+            "CAPTURES_PROPOSER_DUP_THRESHOLD",
+            "CAPTURES_PROPOSER_MAX_PROPOSALS",
+        ]),
         ("Training-form pipeline", [
             "CAPTURES_PIPELINE_RULES_EXCLUDE",
         ]),
         ("Silence trim (Silero VAD)", [
             "CAPTURES_VAD_TRIM_ENABLED_FOR_GROUPS",
-            "CAPTURES_VAD_MARGIN_SINGLETON_MS",
             "CAPTURES_VAD_MARGIN_GROUP_EDGE_MS",
             "CAPTURES_VAD_MARGIN_GROUP_INTERNAL_MS",
         ]),
@@ -1830,6 +1838,13 @@ function modelOverridesEditor(name, v) {
     APPEND_PUNCTUATIONS:         { kind: 'string' },
     OUTPUT_PREFIX:               { kind: 'string' },
     OUTPUT_SUFFIX:               { kind: 'string' },
+    CAPTURES_SAMPLE_MIN_DURATION_S:  { kind: 'float', min: 0, max: 30, step: 0.1 },
+    CAPTURES_SAMPLE_MAX_DURATION_S:  { kind: 'float', min: 1, max: 30, step: 0.1 },
+    CAPTURES_SAMPLE_JOIN_STRATEGY:   { kind: 'enum', opts: ['space','period_space'] },
+    CAPTURES_PROPOSER_TARGET_S:      { kind: 'float', min: 1, max: 30, step: 0.5 },
+    CAPTURES_PROPOSER_SESSION_GAP_S: { kind: 'int',   min: 1, max: 86400 },
+    CAPTURES_PROPOSER_DUP_THRESHOLD: { kind: 'float', min: 0, max: 1, step: 0.01 },
+    CAPTURES_PROPOSER_MAX_PROPOSALS: { kind: 'int',   min: 1, max: 200 },
   };
 
   // -------- helpers ------------------------------------------------------

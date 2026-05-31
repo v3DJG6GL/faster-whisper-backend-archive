@@ -612,13 +612,34 @@ CAPTURE_RECORDINGS_SAMPLE_RATE = 1.0
 
 # Duration filter — too-short clips are usually false starts, too-long
 # ones strain memory and need re-segmentation before fine-tuning anyway.
-CAPTURE_RECORDINGS_MIN_DURATION_SEC = 0.5
+# Min default 1.0 s: below ~1 s of speech a clip is mostly the 30 s zero-pad
+# Whisper applies, carrying little training signal (the conventional ASR
+# floor; LibriSpeech bottoms out near 1 s). This is the RAW ingestion gate;
+# the finished-sample floor is CAPTURES_SAMPLE_MIN_DURATION_S below.
+CAPTURE_RECORDINGS_MIN_DURATION_SEC = 1.0
 CAPTURE_RECORDINGS_MAX_DURATION_SEC = 600.0
 
 # Pre-transcribe size guard: skip eligibility roll for uploads larger
 # than this many bytes. Keeps a misbehaving client from filling the
 # captures dir with multi-100MB blobs.
 CAPTURE_RECORDINGS_AUDIO_BYTES_HARD_LIMIT = 100_000_000
+
+
+# Sample sizing — global bounds on a finished training sample (a packed
+# capture_samples row OR a single-capture sample). All measured on the
+# TRIMMED+spaced merged audio, not raw. These are the single source of
+# truth for the merge/preview/proposer paths (no per-merge overrides).
+#   MIN — finished-sample floor; just discards near-empty junk (the proposer
+#         packs the bulk toward TARGET so this only bites tiny solos).
+#   MAX — hard ceiling. Whisper truncates >30 s; keep a margin. The merge,
+#         the 28 s validation, the merge-estimate, and the proposer all read
+#         this one value (was four hardcoded 28 s sites).
+#   JOIN_STRATEGY — how member transcripts concatenate ("space" or
+#         "period_space"); applies to every new/regenerated sample.
+# Constraint (enforced in config_store): MIN <= PROPOSER_TARGET_S <= MAX < 30.
+CAPTURES_SAMPLE_MIN_DURATION_S = 1.0
+CAPTURES_SAMPLE_MAX_DURATION_S = 29.9
+CAPTURES_SAMPLE_JOIN_STRATEGY = "space"
 
 
 # ---------------------------------------------------------------------
@@ -660,11 +681,10 @@ CAPTURES_PIPELINE_RULES_EXCLUDE: "set[str]" = {
 # excessive leading/trailing silence (Calm-Whisper arXiv:2505.12969
 # documents silence-induced hallucination as a fine-tune failure mode).
 #
-# Groups: auto-trim after merge_wavs() produces the merged WAV.
-# Singletons: manual button on the /captures detail page (opt-in per
-#   sample; original audio is preserved at audio_relpath either way).
+# Auto-trim runs after merge_wavs() produces a sample's merged WAV. (The old
+# manual per-singleton "Trim silence" button was retired — a single capture is
+# trimmed by turning it into a one-member sample, same uniform model.)
 CAPTURES_VAD_TRIM_ENABLED_FOR_GROUPS = True
-CAPTURES_VAD_MARGIN_SINGLETON_MS = 300
 # Per-member group trim (CAPTURES_VAD_TRIM_ENABLED_FOR_GROUPS path): silence is
 # now trimmed from EVERY member before concatenation, not just the merged WAV's
 # outer edges. Without this, member i's trailing + the inter-segment gap +
@@ -684,15 +704,15 @@ CAPTURES_VAD_MARGIN_GROUP_INTERNAL_MS = 300
 # samples honoring the existing 28 s hard cap. Knobs:
 #   SESSION_GAP_S    — captures more than this many seconds apart start a
 #                      new session bucket (tractability + density score).
-#   MIN_CLIP_S       — exclude captures shorter than this from proposals.
 #   DUP_THRESHOLD    — difflib.ratio above this rejects pairing in a group
 #                      (near-duplicate redictation / echo guard).
 #   MAX_PROPOSALS    — cap on returned proposals per request.
-#   TARGET_S         — fill-score peak; should sit 1+ s below the 28 s cliff
-#                      so the proposer doesn't camp at the rejection edge.
+#   TARGET_S         — fill-score peak; should sit 1+ s below the sample-max
+#                      cliff so the proposer doesn't camp at the rejection edge.
 #   CACHE_TTL_S      — proposer result TTL; invalidated on capture writes.
+# (Per-capture min length is governed by CAPTURE_RECORDINGS_MIN_DURATION_SEC;
+# the finished-sample floor by CAPTURES_SAMPLE_MIN_DURATION_S.)
 CAPTURES_PROPOSER_SESSION_GAP_S = 600
-CAPTURES_PROPOSER_MIN_CLIP_S = 1.0
 CAPTURES_PROPOSER_DUP_THRESHOLD = 0.85
 CAPTURES_PROPOSER_MAX_PROPOSALS = 20
 CAPTURES_PROPOSER_TARGET_S = 26.0
@@ -834,8 +854,6 @@ USAGE_DB = _env_str("WHISPER_USAGE_DB", USAGE_DB)
 USAGE_RETENTION_DAYS = _env_int("WHISPER_USAGE_RETENTION_DAYS", USAGE_RETENTION_DAYS)
 CAPTURES_PROPOSER_SESSION_GAP_S = _env_int(
     "WHISPER_CAPTURES_PROPOSER_SESSION_GAP_S", CAPTURES_PROPOSER_SESSION_GAP_S)
-CAPTURES_PROPOSER_MIN_CLIP_S = _env_float(
-    "WHISPER_CAPTURES_PROPOSER_MIN_CLIP_S", CAPTURES_PROPOSER_MIN_CLIP_S)
 CAPTURES_PROPOSER_DUP_THRESHOLD = _env_float(
     "WHISPER_CAPTURES_PROPOSER_DUP_THRESHOLD", CAPTURES_PROPOSER_DUP_THRESHOLD)
 CAPTURES_PROPOSER_MAX_PROPOSALS = _env_int(
@@ -844,6 +862,12 @@ CAPTURES_PROPOSER_TARGET_S = _env_float(
     "WHISPER_CAPTURES_PROPOSER_TARGET_S", CAPTURES_PROPOSER_TARGET_S)
 CAPTURES_PROPOSER_CACHE_TTL_S = _env_int(
     "WHISPER_CAPTURES_PROPOSER_CACHE_TTL_S", CAPTURES_PROPOSER_CACHE_TTL_S)
+CAPTURES_SAMPLE_MIN_DURATION_S = _env_float(
+    "WHISPER_CAPTURES_SAMPLE_MIN_DURATION_S", CAPTURES_SAMPLE_MIN_DURATION_S)
+CAPTURES_SAMPLE_MAX_DURATION_S = _env_float(
+    "WHISPER_CAPTURES_SAMPLE_MAX_DURATION_S", CAPTURES_SAMPLE_MAX_DURATION_S)
+CAPTURES_SAMPLE_JOIN_STRATEGY = _env_str(
+    "WHISPER_CAPTURES_SAMPLE_JOIN_STRATEGY", CAPTURES_SAMPLE_JOIN_STRATEGY)
 
 
 # --- Schema-driven env application for every AdminConfig field ---------------

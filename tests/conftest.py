@@ -121,14 +121,14 @@ def captures_store_db(tmp_path):
 
 @pytest.fixture
 def groups_store_db(captures_store_db):
-    """capture_groups_store sharing the captures connection (as in main)."""
-    import capture_groups_store
-    capture_groups_store.init(
+    """capture_samples_store sharing the captures connection (as in main)."""
+    import capture_samples_store
+    capture_samples_store.init(
         captures_store_db._require_conn(), captures_store_db._require_audio_dir()
     )
-    yield capture_groups_store
-    capture_groups_store._conn = None
-    capture_groups_store._groups_audio_dir = None
+    yield capture_samples_store
+    capture_samples_store._conn = None
+    capture_samples_store._groups_audio_dir = None
 
 
 @pytest.fixture
@@ -390,10 +390,10 @@ def app_module(tmp_path, monkeypatch, fake_model):
 
     # The lifespan opens five store connections on a temp DB; close them so a
     # GC'd-without-close() sqlite3.Connection doesn't emit ResourceWarning noise
-    # (one per store × every route test). capture_groups_store shares the
+    # (one per store × every route test). capture_samples_store shares the
     # captures connection, so just drop its reference.
     import api_keys_store, reports_store, transcriptions_store
-    import usage_store, captures_store, capture_groups_store
+    import usage_store, captures_store, capture_samples_store
     import sessions_store
     for _mod in (api_keys_store, sessions_store, reports_store,
                  transcriptions_store, usage_store, captures_store):
@@ -404,7 +404,7 @@ def app_module(tmp_path, monkeypatch, fake_model):
             except Exception:
                 pass
             _mod._conn = None
-    capture_groups_store._conn = None
+    capture_samples_store._conn = None
 
 
 @pytest.fixture

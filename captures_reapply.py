@@ -76,7 +76,7 @@ def _run() -> None:
     try:
         import main
         import captures_store
-        import capture_groups_store
+        import capture_samples_store
         import config as cfg
 
         captures_excludes = getattr(cfg, "CAPTURES_PIPELINE_RULES_EXCLUDE", None)
@@ -86,7 +86,7 @@ def _run() -> None:
         with _state_lock:
             _state["total"] = int(total_row[0]) if total_row else 0
 
-        affected_group_ids: set[str] = set()
+        affected_sample_ids: set[str] = set()
         # Materialise the small projection up front — captures_store.update_capture
         # writes back to the same connection inside the loop, and an open
         # cursor on the same connection can skip/revisit rows when the
@@ -94,7 +94,7 @@ def _run() -> None:
         # short text columns (no words_json / segments_json), so memory
         # stays bounded even at tens of thousands of rows.
         rows = conn.execute(
-            "SELECT id, raw, final, text_for_training, model, group_id"
+            "SELECT id, raw, final, text_for_training, model, sample_id"
             " FROM captures ORDER BY created_ts DESC"
         ).fetchall()
         for r in rows:
@@ -114,8 +114,8 @@ def _run() -> None:
                 continue
             if new_final != (r["final"] or ""):
                 patch["final"] = new_final
-                if r["group_id"]:
-                    affected_group_ids.add(r["group_id"])
+                if r["sample_id"]:
+                    affected_sample_ids.add(r["sample_id"])
             # Training-form text reflects PIPELINE_RULES minus the
             # captures-specific excludes. When no excludes are configured
             # the pipeline output is identical — skip the second run.
@@ -139,8 +139,8 @@ def _run() -> None:
                 # falling back to final/raw, so a training-form change must
                 # also trigger a group rebuild — final may be unchanged when
                 # captures_excludes drops a rule from the training pipeline.
-                if r["group_id"]:
-                    affected_group_ids.add(r["group_id"])
+                if r["sample_id"]:
+                    affected_sample_ids.add(r["sample_id"])
             if patch:
                 captures_store.update_capture(cid, patch)
                 with _state_lock:
@@ -148,19 +148,19 @@ def _run() -> None:
             with _state_lock:
                 _state["processed"] += 1
 
-        if affected_group_ids:
+        if affected_sample_ids:
             from captures_routes import _build_default_transcript
-            for gid in affected_group_ids:
-                g = capture_groups_store.get_group(gid)
+            for sid in affected_sample_ids:
+                g = capture_samples_store.get_sample(sid)
                 if g is None or g.get("is_locked"):
                     continue
-                members = capture_groups_store.get_members(gid)
+                members = capture_samples_store.get_members(sid)
                 new_t = _build_default_transcript(
                     members, g.get("transcript_join_strategy") or "space",
                 )
                 if new_t != (g.get("transcript") or ""):
-                    capture_groups_store.update_group(
-                        gid, {"transcript": new_t},
+                    capture_samples_store.update_sample(
+                        sid, {"transcript": new_t},
                     )
                     with _state_lock:
                         _state["groups_updated"] += 1

@@ -2,7 +2,7 @@
 
 Already covered there: trimmed_duration_s (cache hit/miss + trim-disabled) and
 _build_proposal trimmed durations. Here we cover: _bcp47_primary,
-_normalize_text, _pick_text, _dur, _ratio, _build_group_score boundaries,
+_normalize_text, _pick_text, _dur, _ratio, _build_sample_score boundaries,
 _format_reason, _generate_candidates_for_bucket (dup-skip / <2 reject /
 over-cap), _eligible (every rejection branch + boundaries), and propose_merges
 (admin vs non-admin cache keys, per-(user,lang) partition, greedy
@@ -65,7 +65,7 @@ def test_ratio_bounds():
 
 
 # ---------------------------------------------------------------------------
-# _build_group_score
+# _build_sample_score
 # ---------------------------------------------------------------------------
 
 def _member(ts, dur, status="", trim=None):
@@ -78,45 +78,45 @@ def _member(ts, dur, status="", trim=None):
 def test_score_fill_peaks_at_target():
     # total_dur == target → fill_score 1.0.
     members = [_member(0, 13.0), _member(1, 12.7)]  # 25.7 + 0.3 gap = 26.0
-    s = P._build_group_score(members, 0.3, 26.0)
+    s = P._build_sample_score(members, 0.3, 26.0)
     assert s["fill_score"] == pytest.approx(1.0)
 
 
 def test_score_density_neutral_below_three_members():
     members = [_member(0, 5.0), _member(1, 5.0)]
-    s = P._build_group_score(members, 0.3, 26.0)
+    s = P._build_sample_score(members, 0.3, 26.0)
     assert s["density_score"] == 0.5  # n<3 neutralized
 
 
 def test_score_density_clamped_for_three_plus():
     members = [_member(0, 5.0), _member(1, 5.0), _member(2, 5.0)]
-    s = P._build_group_score(members, 0.3, 26.0)
+    s = P._build_sample_score(members, 0.3, 26.0)
     assert 0.0 <= s["density_score"] <= 1.0
 
 
 def test_score_member_peaks_at_four():
     four = [_member(i, 2.0) for i in range(4)]
-    s4 = P._build_group_score(four, 0.3, 26.0)
+    s4 = P._build_sample_score(four, 0.3, 26.0)
     assert s4["member_score"] == pytest.approx(1.0)
     two = [_member(i, 2.0) for i in range(2)]
-    s2 = P._build_group_score(two, 0.3, 26.0)
+    s2 = P._build_sample_score(two, 0.3, 26.0)
     # |2-4|/8 = 0.25 → 0.75
     assert s2["member_score"] == pytest.approx(0.75)
 
 
 def test_score_reviewed_boost():
     members = [_member(0, 5.0, "reviewed"), _member(1, 5.0, "reviewed")]
-    s = P._build_group_score(members, 0.3, 26.0)
+    s = P._build_sample_score(members, 0.3, 26.0)
     assert s["reviewed_count"] == 2
     # reviewed_boost = 0.1 * (2/2) = 0.1 baked into composite.
     none = [_member(0, 5.0), _member(1, 5.0)]
-    s0 = P._build_group_score(none, 0.3, 26.0)
+    s0 = P._build_sample_score(none, 0.3, 26.0)
     assert s["composite"] == pytest.approx(s0["composite"] + 0.1)
 
 
 def test_score_uses_trimmed_durations():
     members = [_member(0, 10.0, trim=2.0), _member(1, 10.0, trim=2.0)]
-    s = P._build_group_score(members, 0.3, 26.0)
+    s = P._build_sample_score(members, 0.3, 26.0)
     # total uses trimmed (2+2) + gap.
     assert s["total_dur"] == pytest.approx(4.3)
 
@@ -156,21 +156,22 @@ def _bkt_member(i, dur, text, ts=None):
     }
 
 
-def test_bucket_single_rejected():
-    # A bucket where nothing else fits → single member candidate dropped (<2).
+def test_bucket_single_over_cap_dropped():
+    # Single-capture samples are allowed now. The 5 s member becomes a valid
+    # solo candidate; the 30 s member is over the cap (alone or paired) → dropped.
     bucket = [_bkt_member(0, 5.0, "alpha"), _bkt_member(1, 30.0, "beta")]
     cands = P._generate_candidates_for_bucket(bucket, 0.3, 0.85, 26.0, 28.0)
-    # member 1 alone can't pair (over cap with anything); member 0 + member1
-    # overflows (5+30+0.3 > 28). So no candidate of size >=2.
-    assert cands == []
+    assert len(cands) == 1
+    assert [m["id"] for m in cands[0][1]] == ["c0"]
 
 
-def test_bucket_pairs_when_fits():
+def test_bucket_pairs_and_solo_when_fits():
     bucket = [_bkt_member(0, 5.0, "alpha"), _bkt_member(1, 5.0, "beta")]
     cands = P._generate_candidates_for_bucket(bucket, 0.3, 0.85, 26.0, 28.0)
-    # i=0 yields a 2-member candidate; i=1 yields single → dropped.
-    assert len(cands) == 1
-    assert len(cands[0][1]) == 2
+    # i=0 yields the 2-member pack; i=1 yields a 1-member (solo) candidate.
+    assert len(cands) == 2
+    sizes = sorted(len(m) for _, m in cands)
+    assert sizes == [1, 2]
 
 
 def test_bucket_skips_duplicate_text():
@@ -206,7 +207,7 @@ def test_bucket_over_cap_skipped_smaller_packed():
 
 def _row(**over):
     r = {
-        "id": "x", "status": "new", "group_id": None,
+        "id": "x", "status": "new", "sample_id": None,
         "duration_seconds": 5.0, "language": "de",
         "text_for_training": "hello", "final": "", "raw": "",
     }
@@ -215,48 +216,48 @@ def _row(**over):
 
 
 def test_eligible_happy_path():
-    assert P._eligible(_row(), 1.0) is True
+    assert P._eligible(_row(), 1.0, 28.0) is True
 
 
 @pytest.mark.parametrize("status", ["dismissed", "audio_missing"])
 def test_eligible_rejects_status(status):
-    assert P._eligible(_row(status=status), 1.0) is False
+    assert P._eligible(_row(status=status), 1.0, 28.0) is False
 
 
 def test_eligible_rejects_grouped():
-    assert P._eligible(_row(group_id="g1"), 1.0) is False
+    assert P._eligible(_row(sample_id="g1"), 1.0, 28.0) is False
 
 
 def test_eligible_rejects_too_short():
-    assert P._eligible(_row(duration_seconds=0.5), 1.0) is False
+    assert P._eligible(_row(duration_seconds=0.5), 1.0, 28.0) is False
 
 
 def test_eligible_rejects_too_long():
-    assert P._eligible(_row(duration_seconds=P._GROUP_HARD_CAP_S + 1), 1.0) is False
+    assert P._eligible(_row(duration_seconds=28.0 + 1), 1.0, 28.0) is False
 
 
 def test_eligible_boundary_min_clip_inclusive():
     # dur == min_clip_s passes (not < min).
-    assert P._eligible(_row(duration_seconds=1.0), 1.0) is True
+    assert P._eligible(_row(duration_seconds=1.0), 1.0, 28.0) is True
 
 
 def test_eligible_boundary_hard_cap_inclusive():
-    assert P._eligible(_row(duration_seconds=P._GROUP_HARD_CAP_S), 1.0) is True
+    assert P._eligible(_row(duration_seconds=28.0), 1.0, 28.0) is True
 
 
 def test_eligible_rejects_missing_language():
-    assert P._eligible(_row(language=""), 1.0) is False
-    assert P._eligible(_row(language="   "), 1.0) is False
+    assert P._eligible(_row(language=""), 1.0, 28.0) is False
+    assert P._eligible(_row(language="   "), 1.0, 28.0) is False
 
 
 def test_eligible_rejects_no_text():
     assert P._eligible(
-        _row(text_for_training="", final="", raw=""), 1.0) is False
+        _row(text_for_training="", final="", raw=""), 1.0, 28.0) is False
 
 
 def test_eligible_accepts_raw_only_text():
     assert P._eligible(
-        _row(text_for_training="", final="", raw="r"), 1.0) is True
+        _row(text_for_training="", final="", raw="r"), 1.0, 28.0) is True
 
 
 # ---------------------------------------------------------------------------
@@ -403,10 +404,13 @@ def test_propose_no_eligible_returns_empty(captures_store_db, monkeypatch, trim_
 def test_propose_session_gap_splits(captures_store_db, monkeypatch, trim_disabled):
     cs = captures_store_db
     monkeypatch.setattr(P.cfg, "CAPTURES_PROPOSER_SESSION_GAP_S", 100, raising=False)
-    # Clip 1 and 2 are far apart in time (> gap) → different sessions → can't
-    # be grouped together (each session needs >=2 to propose).
+    # Clip 1 and 2 are far apart in time (> gap) → different sessions → can't be
+    # grouped TOGETHER. With single-capture samples allowed, each isolated clip
+    # is proposed as its own one-member sample (never a cross-session pair).
     _insert_eligible(cs, "capgap000000001", ts=1000.0, text="lonely one")
     _insert_eligible(cs, "capgap000000002", ts=9000.0, text="lonely two")
     proposals, _ = P.propose_merges(
         user_id_filter=None, is_admin=True, caller_user_id="admin")
-    assert proposals == []
+    assert len(proposals) == 2
+    for p in proposals:
+        assert p["member_count"] == 1
