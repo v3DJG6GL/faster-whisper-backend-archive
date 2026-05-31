@@ -382,11 +382,13 @@ async def get_capture_api(
     )
     _audit_cross_user_read(user, row, "capture", cid)
     _refresh_final_if_stale(row)
-    row["words"] = _align_words_to_final(
-        row.get("words") or [],
-        row.get("final") or "",
-        model_name=row.get("model"),
-    )
+    # Attach BOTH the runtime-`final` token (`word`) and the EXCLUDE-aware
+    # training token (`train_word`/`train_removed`) per raw word — the same
+    # shape the merge/proposal path produces. The Corrections strip + chips
+    # display the training token so they match what the Final result and the
+    # export actually emit (CAPTURES_PIPELINE_RULES_EXCLUDE respected); the
+    # runtime form stays visible on the "runtime (dictation-map applied)" line.
+    row["words"] = _align_member_words(row)
     # Shift word/segment timestamps onto the trimmed-audio timeline
     # when the capture has been VAD-trimmed; the karaoke band plays the
     # trimmed WAV so time math has to match. Stored words stay in
@@ -1934,7 +1936,17 @@ def _align_member_words(m: dict[str, Any]) -> list[dict[str, Any]]:
             tw = wt[i] if i < len(wt) else None
             if tw is None:
                 continue
-            w["train_word"] = tw.get("word") or ""
+            # Preserve the raw word's leading whitespace in front of the
+            # training token. `_align_words_to_final` strips the lead off
+            # MATCHED tokens, so without this a multi-word Corrections range
+            # would join into a run with no inter-word spaces ("134Schrägstrich92")
+            # and fail to match the training text. The Corrections strip's
+            # `.replace(/^\s+/,' ')` normalizes the display lead, and
+            # `_renderGroundSpans` .trim()s, so neither is affected.
+            raw_w = (words[i].get("word") if i < len(words) else "") or ""
+            lead = raw_w[: len(raw_w) - len(raw_w.lstrip())]
+            core = (tw.get("word") or "").lstrip()
+            w["train_word"] = (lead + core) if core else ""
             if tw.get("removed"):
                 w["train_removed"] = True
     return ws
@@ -2798,6 +2810,9 @@ _CAPTURES_HTML = r"""<!doctype html>
   .cc-textline .tag {
     text-transform: lowercase; color: var(--help);
     font-size: var(--fs-xs); font-family: var(--font-sans);
+    /* Don't let double-click word-selection extend from the value onto the
+       "raw"/"post-processing"/"runtime" label. */
+    -webkit-user-select: none; user-select: none;
   }
   .cc-textline.raw   .val { color: var(--fg); }
   .cc-textline.final .val { color: var(--bold); }
@@ -4082,11 +4097,12 @@ _CAPTURES_HTML = r"""<!doctype html>
     state.words.forEach(function(w, i) {
       var sp = document.createElement('span');
       sp.className = 'word';
-      sp.textContent = (w.word || '').replace(/^\s+/, ' ');
-      if (w.removed) {
+      var dw = _dispWord(w);
+      sp.textContent = (dw || '').replace(/^\s+/, ' ');
+      if (_dispRemoved(w)) {
         sp.classList.add('rule-removed');
         sp.title = 'removed by pipeline rule';
-      } else if (w.raw_word) {
+      } else if (w.raw_word && (w.raw_word || '').trim() !== (dw || '').trim()) {
         sp.title = 'raw: ' + w.raw_word;
         sp.classList.add('post-edited');
       }
@@ -4314,6 +4330,20 @@ _CAPTURES_HTML = r"""<!doctype html>
     if (el) el.classList.toggle('selected', on);
   }
 
+  // Display/correction token for a word in the editable Corrections strip.
+  // Prefer the EXCLUDE-aware training token (`train_word`) so the strip, the
+  // chip `wrong` text, the Final result preview and the server export all
+  // agree on what CAPTURES_PIPELINE_RULES_EXCLUDE leaves in the text; fall
+  // back to the runtime `final` token when no excluded rule changed this word.
+  function _dispWord(w) {
+    return (w && w.train_word !== undefined) ? (w.train_word || '')
+                                             : ((w && w.word) || '');
+  }
+  function _dispRemoved(w) {
+    return (w && w.train_word !== undefined) ? !!w.train_removed
+                                             : !!(w && w.removed);
+  }
+
   // Recompute a chip's denormalized `wrong` from the current display
   // words at its idx..idx_end. Lets stored chips (whose `wrong` was
   // the raw STT form before the karaoke band started showing
@@ -4325,7 +4355,7 @@ _CAPTURES_HTML = r"""<!doctype html>
     var parts = [];
     for (var i = chip.idx; i <= b; i++) {
       var w = state.words[i];
-      if (w) parts.push((w.word || ''));
+      if (w) parts.push(_dispWord(w));
     }
     return parts.join('').replace(/^\s+/, '');
   }
@@ -4375,7 +4405,7 @@ _CAPTURES_HTML = r"""<!doctype html>
     // carries leading space + trailing punctuation, so the joined
     // string preserves the original spacing/punctuation.
     var parts = [];
-    for (var i = a; i <= b; i++) parts.push(state.words[i].word || '');
+    for (var i = a; i <= b; i++) parts.push(_dispWord(state.words[i]));
     return parts.join('').replace(/^\s+/, '');
   }
   function focusLastInput(state) {
@@ -4397,9 +4427,11 @@ _CAPTURES_HTML = r"""<!doctype html>
       state.cursorIdx = idx;
       _redrawCursor(state);
     }
-    if (clicked && clicked.removed) {
-      // Rule deleted this token from `final` — a chip would have no
-      // anchor in the exported text. Click still seeks audio.
+    if (clicked && _dispRemoved(clicked)) {
+      // The token is absent from the EXCLUDE-aware training/export text — a
+      // chip would have no anchor in the exported text. Click still seeks
+      // audio. (A token merged away only in the runtime `final` but present
+      // in the training text is NOT removed here, so it stays correctable.)
       if (state.audio) {
         try { state.audio.currentTime = parseFloat(clicked.start) || 0; }
         catch (_) {}
@@ -4420,7 +4452,7 @@ _CAPTURES_HTML = r"""<!doctype html>
       return;
     }
     state.corrections.push({
-      wrong: (state.words[idx].word || '').replace(/^\s+/, ''),
+      wrong: _dispWord(state.words[idx]).replace(/^\s+/, ''),
       correct: '',
       idx: idx,
       idx_end: idx,
@@ -5173,11 +5205,12 @@ _CAPTURES_HTML = r"""<!doctype html>
     words.forEach(function(w, i) {
       var sp = document.createElement('span');
       sp.className = 'word';
-      sp.textContent = (w.word || '').replace(/^\s+/, ' ');
-      if (w.removed) {
+      var dw = _dispWord(w);
+      sp.textContent = (dw || '').replace(/^\s+/, ' ');
+      if (_dispRemoved(w)) {
         sp.classList.add('rule-removed');
         sp.title = 'removed by pipeline rule';
-      } else if (w.raw_word) {
+      } else if (w.raw_word && (w.raw_word || '').trim() !== (dw || '').trim()) {
         sp.classList.add('post-edited');
         sp.title = 'raw: ' + w.raw_word;
       }
@@ -5559,6 +5592,14 @@ _CAPTURES_HTML = r"""<!doctype html>
     durEl.className = 'dur';
     toggleBtn.appendChild(iconEl);
     toggleBtn.appendChild(durEl);
+    if (opts.inlinePlayer) {
+      // Match the single-capture player: a plain ▶ at the LEFT edge of the
+      // seek bar (the duration is already shown in the card's meta row, so
+      // hide the on-button label here).
+      toggleBtn.classList.add('compact-player-btn');
+      durEl.style.display = 'none';
+      toggleBtn.title = 'Play / pause (Space)';
+    }
     toggleBtn._setIcon = function(s) { iconEl.textContent = s; };
     toggleBtn._refreshDur = function() {
       var d = durationFn();
@@ -5577,7 +5618,10 @@ _CAPTURES_HTML = r"""<!doctype html>
 
     var panel = document.createElement('div');
     panel.className = 'merge-preview-panel';
-    panel.hidden = true;
+    // Inline-player cards show the seek bar (with its left-edge ▶) up front;
+    // the Corrections/Final sections stay hidden until the first play loads
+    // the words. Other callers keep the whole panel hidden until ▶ is clicked.
+    panel.hidden = !opts.inlinePlayer;
     var controls = document.createElement('div');
     controls.className = 'compact-player';
     var scrub = document.createElement('input');
@@ -5592,6 +5636,7 @@ _CAPTURES_HTML = r"""<!doctype html>
     var totalEl = document.createElement('span');
     totalEl.className = 'compact-player-time';
     totalEl.textContent = '0:00';
+    if (opts.inlinePlayer) controls.appendChild(toggleBtn);  // ▶ at seek-bar left
     controls.appendChild(scrub);
     controls.appendChild(timeEl);
     controls.appendChild(sep);
@@ -5634,6 +5679,15 @@ _CAPTURES_HTML = r"""<!doctype html>
     panel.appendChild(controls);
     panel.appendChild(corrSec);
     if (!externalGround) panel.appendChild(gtSec);
+
+    if (opts.inlinePlayer) {
+      // Keep the editing surfaces collapsed until the first play fetches the
+      // words; the inline player row stays visible from the start.
+      corrSec.hidden = true;
+      if (!externalGround) gtSec.hidden = true;
+    }
+    panel._corrSec = corrSec;
+    panel._gtSec = externalGround ? null : gtSec;
 
     panel._toggleBtn = toggleBtn;
     panel._scrub = scrub;
@@ -5713,6 +5767,8 @@ _CAPTURES_HTML = r"""<!doctype html>
         };
         // Wire UI before src so events fire correctly.
         panel.hidden = false;
+        if (panel._corrSec) panel._corrSec.hidden = false;
+        if (panel._gtSec) panel._gtSec.hidden = false;
         _previewActivePanel = panel;
         state.wordEls = _renderWordStrip(stripEl, wordsArr, function(i, sh) {
           onWordClick(state, i, sh);
@@ -5880,9 +5936,11 @@ _CAPTURES_HTML = r"""<!doctype html>
         var sel = document.getElementById('propose-silence');
         return (sel && parseInt(sel.value, 10)) || 300;
       },
-      function() { return p.total_duration_s; }
+      function() { return p.total_duration_s; },
+      // Inline player: the ▶ lives at the left edge of the seek bar inside the
+      // panel (mirrors the single-capture player), not in this meta row.
+      { inlinePlayer: true }
     );
-    row1.appendChild(previewCtl.toggleBtn);
 
     var sp = document.createElement('span');
     sp.style.flex = '1';
@@ -5901,8 +5959,9 @@ _CAPTURES_HTML = r"""<!doctype html>
     reason.textContent = p.reason || '';
     card.appendChild(reason);
 
-    // Preview panel host: full-width inline expansion below the card head.
-    // Stays hidden until the user clicks ▶ on this card.
+    // Preview panel host: full-width inline player below the card head. The
+    // seek bar (with its left-edge ▶) shows up front; the Corrections/Final
+    // sections appear once the user clicks ▶ and the words load.
     card.appendChild(previewCtl.panel);
 
     var members = document.createElement('div');
@@ -6254,6 +6313,18 @@ _CAPTURES_HTML = r"""<!doctype html>
 
   function _onBatchTouchStart(e) {
     if (!e.touches || !e.touches.length) return;
+    // Don't start a card swipe when the gesture begins on an interactive
+    // control — otherwise dragging the seek bar, opening a dropdown, editing a
+    // correction chip, or marking a word would also fling the card to the next
+    // proposal. The browser handles those drags natively; swipe-navigation only
+    // arms on neutral card surface.
+    var t = e.target;
+    if (t && t.closest && t.closest(
+        'input, select, textarea, button, [contenteditable], ' +
+        '.word, .compact-player, .cc-corrections, a')) {
+      _batchTouchState = null;
+      return;
+    }
     _batchTouchState = { x0: e.touches[0].clientX, x: e.touches[0].clientX };
     if (_batchCurrentCard) _batchCurrentCard.classList.add('swiping');
   }
@@ -6751,11 +6822,12 @@ _CAPTURES_HTML = r"""<!doctype html>
               sp.style.marginLeft = '0.4rem';
             }
             prevMember = w.member_idx;
-            sp.textContent = (w.word || '').replace(/^\s+/, ' ');
-            if (w.removed) {
+            var dw = _dispWord(w);
+            sp.textContent = (dw || '').replace(/^\s+/, ' ');
+            if (_dispRemoved(w)) {
               sp.classList.add('rule-removed');
               sp.title = 'removed by pipeline rule';
-            } else if (w.raw_word) {
+            } else if (w.raw_word && (w.raw_word || '').trim() !== (dw || '').trim()) {
               sp.title = 'raw: ' + w.raw_word;
               sp.classList.add('post-edited');
             }

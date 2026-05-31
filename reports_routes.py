@@ -453,6 +453,8 @@ _REPORTS_HTML = """<!doctype html>
   .rc-textline .tag {
     text-transform: lowercase; color: var(--help);
     font-size: var(--fs-xs); font-family: var(--font-sans);
+    /* Keep double-click word-selection off the raw/final label. */
+    -webkit-user-select: none; user-select: none;
   }
   .rc-textline.raw   .val { color: var(--fg); }
   .rc-textline.final .val { color: var(--bold); }
@@ -467,7 +469,8 @@ _REPORTS_HTML = """<!doctype html>
     gap: 0.5rem; padding: 0.1rem 0 0.1rem 1rem;
     font-family: var(--font-mono); font-size: var(--fs-sm);
   }
-  .rc-step .step-label { color: var(--cyan); }
+  .rc-step .step-label { color: var(--cyan);
+    -webkit-user-select: none; user-select: none; }
   .rc-step .step-before { color: var(--help); text-decoration: line-through; }
   .rc-step .step-after { color: var(--bold); }
 

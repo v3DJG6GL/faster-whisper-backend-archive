@@ -181,3 +181,72 @@ def test_output_length_always_matches_raw_count(monkeypatch):
 def test_empty_words_returns_empty(monkeypatch):
     _install_word_map(monkeypatch, {})
     assert cr._align_words_to_final([], "anything") == []
+
+
+# ---------------------------------------------------------------------------
+# _align_member_words: dual alignment (runtime `final` + EXCLUDE-aware
+# `text_for_training`). The editable Corrections strip displays the training
+# token so it matches the Final result + export; see the "134/92" write-up.
+# ---------------------------------------------------------------------------
+
+def test_align_member_words_attaches_training_tokens(monkeypatch):
+    # Identity per-word map: the "134 Schrägstrich 92" -> "134/92" merge is a
+    # cross-word rule, modeled here purely by the differing final/training
+    # STRINGS (CAPTURES_PIPELINE_RULES_EXCLUDE drops it from training).
+    _install_word_map(monkeypatch, {})
+    m = {
+        "words": _words(" Tag", " und", " Nacht", " 134", " Schrägstrich", " 92"),
+        "final": "Tag und Nacht 134/92",
+        "text_for_training": "Tag und Nacht 134 Schrägstrich 92",
+        "model": None,
+    }
+    out = cr._align_member_words(m)
+    # Runtime `word`: the dictation-map form; "Schrägstrich"/"92" merged away.
+    assert out[3]["word"] == "134/92"
+    assert out[4].get("removed") is True
+    assert out[5].get("removed") is True
+    # Training tokens are index-parallel, carry the raw leading space, and are
+    # NOT removed (the merge rule is excluded for captures) — so the strip
+    # shows them as normal, clickable, correctable words.
+    assert [w.get("train_word") for w in out] == [
+        " Tag", " und", " Nacht", " 134", " Schrägstrich", " 92"]
+    assert not out[4].get("train_removed")
+    assert not out[5].get("train_removed")
+    # A multi-word chip `wrong` (join of train tokens, leading space stripped)
+    # reconstructs the training/export text verbatim, so it actually applies.
+    rng = "".join(w["train_word"] for w in out[3:6]).lstrip()
+    assert rng == "134 Schrägstrich 92"
+    assert rng in m["text_for_training"]
+
+
+def test_align_member_words_no_train_when_equal(monkeypatch):
+    # When training == final there is no excluded-rule difference, so no
+    # train_word is attached and the strip falls back to the runtime token.
+    _install_word_map(monkeypatch, {})
+    m = {
+        "words": _words(" Hallo", " Welt"),
+        "final": "Hallo Welt",
+        "text_for_training": "Hallo Welt",
+        "model": None,
+    }
+    out = cr._align_member_words(m)
+    assert all("train_word" not in w for w in out)
+
+
+def test_apply_chips_consistency_with_training_tokens():
+    # The server export substitutes the chip `wrong` verbatim in the training
+    # text. A chip built from the TRAINING token applies; one built from the
+    # runtime-only "134/92" token is silently dropped (it isn't in the text).
+    training = "Tag und Nacht 134 Schrägstrich 92"
+    assert cr._apply_chips_to_text(
+        training, [{"wrong": "134", "correct": "134/92", "idx": 3}],
+    ) == "Tag und Nacht 134/92 Schrägstrich 92"
+    assert cr._apply_chips_to_text(
+        training, [{"wrong": "134/92", "correct": "X", "idx": 3}],
+    ) == training
+    # A range correction over the whole "134 Schrägstrich 92" span applies.
+    assert cr._apply_chips_to_text(
+        training,
+        [{"wrong": "134 Schrägstrich 92", "correct": "134/92",
+          "idx": 3, "idx_end": 5}],
+    ) == "Tag und Nacht 134/92"

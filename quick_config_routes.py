@@ -815,7 +815,10 @@ _QUICK_CONFIG_HTML = r"""<!doctype html>
   .trace-raw { color: var(--dim); margin-bottom: 0.25rem; }
   .trace-tag { display: inline-block; min-width: 3rem; color: var(--dim);
     font-family: var(--font-sans); font-size: var(--fs-xs);
-    margin-right: 0.5rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    margin-right: 0.5rem; text-transform: uppercase; letter-spacing: 0.05em;
+    /* Keep double-click word-selection off the tag so selecting the first
+       word of the adjacent text doesn't also grab "RAW"/"FINAL". */
+    -webkit-user-select: none; user-select: none; }
   .trace-final { color: var(--bold); }
   .trace-final .trace-tag { color: var(--green); }
   details.trace-steps { margin-top: 0.375rem; }
@@ -825,7 +828,8 @@ _QUICK_CONFIG_HTML = r"""<!doctype html>
     border-left: 2px solid var(--border); margin-top: 0.25rem; }
   .trace-step.skipped { opacity: 0.55; }
   .trace-step .step-label { color: var(--dim); display: block;
-    font-family: var(--font-sans); margin-bottom: 0.125rem; }
+    font-family: var(--font-sans); margin-bottom: 0.125rem;
+    -webkit-user-select: none; user-select: none; }
   .trace-step .step-label .skipped-tag { color: var(--yellow);
     margin-left: 0.25rem; }
   .trace-step .step-before, .trace-step .step-after {
