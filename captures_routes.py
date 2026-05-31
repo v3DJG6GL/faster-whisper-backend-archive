@@ -2834,7 +2834,7 @@ _CAPTURES_HTML = r"""<!doctype html>
     background: var(--input-bg); color: var(--bold);
     border: 1px solid var(--border); border-radius: 4px;
     padding: 0.5rem 0.6rem; font-family: var(--font-mono);
-    font-size: var(--fs-md); margin-top: 0.25rem;
+    font-size: var(--fs-md); line-height: 1.85; margin-top: 0.25rem;
     white-space: pre-wrap; word-wrap: break-word;
     user-select: text; cursor: text;
   }

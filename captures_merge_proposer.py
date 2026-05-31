@@ -11,7 +11,7 @@ Heuristic rationale (see captures-finetune-findings.md + research notes):
     timestamp-prediction (HF, SwissText 2024, ivrit.ai 2025). Short padded
     clips erode it.
   - Same recording session → similar acoustic environment → bias toward
-    same-session grouping. SESSION_GAP_S of 10 min segments sessions but
+    same-session grouping. SESSION_GAP_S of 30 min segments sessions but
     is also penalized softly via the density score.
   - Avoid grouping near-duplicate transcripts (echo / redictation pairs);
     duplication inside one 30 s window inflates effective batch duplicates.

@@ -625,7 +625,7 @@ FIELD_DESCRIPTIONS: dict[str, str] = {
         "sample min and max.",
     "CAPTURES_PROPOSER_SESSION_GAP_S":
         "Captures more than this many seconds apart start a new session "
-        "bucket for proposal grouping (default 600).",
+        "bucket for proposal grouping (default 1800).",
     "CAPTURES_PROPOSER_DUP_THRESHOLD":
         "Reject pairing two captures in one proposal when their transcript "
         "similarity ratio exceeds this (0–1, default 0.85) — a near-"
