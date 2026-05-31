@@ -3197,7 +3197,8 @@ _CAPTURES_HTML = r"""<!doctype html>
 
   /* Shared merge-preview play button (used in propose-modal and merge-modal) */
   .merge-preview-btn {
-    display: inline-flex; align-items: center; gap: 0.3rem;
+    display: inline-flex; align-items: center; justify-content: center;
+    gap: 0.3rem; line-height: 1;
     background: var(--input-bg); color: var(--fg);
     border: 1px solid var(--border); border-radius: 3px;
     padding: 0.15rem 0.5rem; cursor: pointer;
@@ -3226,6 +3227,8 @@ _CAPTURES_HTML = r"""<!doctype html>
     display: none;
   }
   .compact-player-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    line-height: 1;
     background: var(--input-bg); color: var(--fg);
     border: 1px solid var(--border); border-radius: 3px;
     padding: 0.15rem 0.5rem; cursor: pointer;
@@ -3236,6 +3239,9 @@ _CAPTURES_HTML = r"""<!doctype html>
     background: #21262d; color: var(--bold);
   }
   .compact-player-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  /* Inline SVG glyphs (play/pause/skip-to-start/undo) — block so flex
+     centering applies cleanly; sized in em so they ride the --fs-* scale. */
+  .compact-player-btn svg, .merge-preview-btn svg { display: block; }
   /* Slider matches the page aesthetic: thin rectangular track in the
      same color as .meter-bar, progress fill in accent, a small vertical
      playhead-style thumb (no circles — the UI is all rectangles). */
@@ -3347,8 +3353,23 @@ _CAPTURES_HTML = r"""<!doctype html>
   #propose-batch .batch-actions .accept {
     color: var(--green); border-color: #2e5d2e; font-weight: 700;
   }
-  #propose-batch .batch-actions .replay {
+  /* Secondary controls: small, edge/interior, icon-centered. Replay is
+     neutral; Revert is amber (echoes Tinder's gold Rewind) and dims when
+     there's nothing to undo. */
+  #propose-batch .batch-actions .replay,
+  #propose-batch .batch-actions .revert {
     flex: 0 0 auto; min-width: 3rem;
+    display: inline-flex; align-items: center; justify-content: center;
+    line-height: 1;
+  }
+  #propose-batch .batch-actions .replay svg,
+  #propose-batch .batch-actions .revert svg { display: block; }
+  #propose-batch .batch-actions .revert {
+    color: var(--yellow); border-color: #5a4a1a;
+  }
+  #propose-batch .batch-actions .revert:disabled {
+    color: var(--dim); border-color: var(--border); opacity: 0.5;
+    cursor: not-allowed;
   }
   #propose-batch .batch-actions button:hover:not(:disabled) {
     background: #21262d;
@@ -5183,7 +5204,7 @@ _CAPTURES_HTML = r"""<!doctype html>
     if (_previewActivePanel) {
       _previewActivePanel.hidden = true;
       var t = _previewActivePanel._toggleBtn;
-      if (t) { t._setIcon('▶'); t.disabled = false; }
+      if (t) { t._setIcon('play'); t.disabled = false; }
       _previewActivePanel = null;
     }
     if (_previewAudio) {
@@ -5440,6 +5461,42 @@ _CAPTURES_HTML = r"""<!doctype html>
     });
   }
 
+  // Inline-SVG icon factory. Glyphs (▶ ⏸ ⏮ ↶) used to be Unicode text,
+  // but the play/pause triangles have asymmetric advance widths (icon
+  // drifted off-center + nudged on toggle), and the curved-arrow family
+  // (rewind/replay/undo) is visually overloaded. SVG paths render
+  // identically everywhere and let us split "replay audio" (media
+  // transport ⏮) from "revert action" (undo arrow ↶) into distinct
+  // glyph families. Sized in em so they scale with --fs-*.
+  var _SVG_NS = 'http://www.w3.org/2000/svg';
+  var _SVG_PATHS = {
+    play:     'M8 5v14l11-7z',
+    pause:    'M6 5h4v14H6zm8 0h4v14h-4z',
+    skipprev: 'M6 6h2v12H6zm3.5 6 8.5 6V6z',
+    undo:     'M12.5 8c-2.65 0-5.05.99-6.9 2.6L2 7v9h9l-3.62-3.62c1.39-1.16 '
+            + '3.16-1.88 5.12-1.88 3.54 0 6.55 2.31 7.6 5.5l2.37-.78C21.08 '
+            + '11.03 17.15 8 12.5 8z',
+  };
+  function _svgIcon(name) {
+    var svg = document.createElementNS(_SVG_NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('width', '1em');
+    svg.setAttribute('height', '1em');
+    svg.setAttribute('fill', 'currentColor');
+    svg.setAttribute('aria-hidden', 'true');
+    svg.setAttribute('focusable', 'false');
+    var p = document.createElementNS(_SVG_NS, 'path');
+    p.setAttribute('d', _SVG_PATHS[name] || _SVG_PATHS.play);
+    svg.appendChild(p);
+    return svg;
+  }
+  // Replace an element's contents with a single SVG glyph.
+  function _setBtnIcon(el, name) {
+    if (!el) return;
+    el.textContent = '';
+    el.appendChild(_svgIcon(name));
+  }
+
   // Wrap an <audio> element in a compact play/pause + scrubber + time
   // strip. Replaces native <audio controls> in single-capture and group-
   // expand panels for visual consistency with the merge-preview controls.
@@ -5457,8 +5514,9 @@ _CAPTURES_HTML = r"""<!doctype html>
     var btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'compact-player-btn';
-    btn.textContent = '▶';
+    _setBtnIcon(btn, 'play');
     btn.title = 'Play / pause (Space)';
+    btn.setAttribute('aria-label', 'Play / pause');
 
     var scrub = document.createElement('input');
     scrub.type = 'range'; scrub.min = '0'; scrub.max = '1000'; scrub.value = '0';
@@ -5491,8 +5549,8 @@ _CAPTURES_HTML = r"""<!doctype html>
         audio.pause();
       }
     });
-    audio.addEventListener('play',  function() { btn.textContent = '⏸'; });
-    audio.addEventListener('pause', function() { btn.textContent = '▶'; });
+    audio.addEventListener('play',  function() { _setBtnIcon(btn, 'pause'); });
+    audio.addEventListener('pause', function() { _setBtnIcon(btn, 'play'); });
     audio.addEventListener('timeupdate', function() {
       if (!seeking && audio.duration) {
         scrub.value = (audio.currentTime / audio.duration) * 1000;
@@ -5543,8 +5601,8 @@ _CAPTURES_HTML = r"""<!doctype html>
       scrub.disabled = false;
       if (toggleBtn && toggleBtn._setDurSeconds) toggleBtn._setDurSeconds(audio.duration);
     }
-    function onPause() { toggleBtn._setIcon('▶'); }
-    function onPlay()  { toggleBtn._setIcon('⏸'); }
+    function onPause() { toggleBtn._setIcon('play'); }
+    function onPlay()  { toggleBtn._setIcon('pause'); }
     function onScrubInput() {
       seeking = true;
       if (audio.duration) {
@@ -5587,7 +5645,8 @@ _CAPTURES_HTML = r"""<!doctype html>
     toggleBtn.className = 'merge-preview-btn';
     toggleBtn.title = 'Preview the merged audio with word-level karaoke';
     var iconEl = document.createElement('span');
-    iconEl.textContent = '▶';
+    iconEl.style.display = 'inline-flex';
+    _setBtnIcon(iconEl, 'play');
     var durEl = document.createElement('span');
     durEl.className = 'dur';
     toggleBtn.appendChild(iconEl);
@@ -5600,7 +5659,12 @@ _CAPTURES_HTML = r"""<!doctype html>
       durEl.style.display = 'none';
       toggleBtn.title = 'Play / pause (Space)';
     }
-    toggleBtn._setIcon = function(s) { iconEl.textContent = s; };
+    // Accepts 'play' | 'pause' | 'loading'. Loading keeps a text ellipsis
+    // (no dedicated glyph) while the trimmed preview audio is fetched.
+    toggleBtn._setIcon = function(s) {
+      if (s === 'loading') { iconEl.textContent = '…'; return; }
+      _setBtnIcon(iconEl, s === 'pause' ? 'pause' : 'play');
+    };
     toggleBtn._refreshDur = function() {
       var d = durationFn();
       durEl.textContent = (typeof d === 'number' && isFinite(d))
@@ -5715,7 +5779,7 @@ _CAPTURES_HTML = r"""<!doctype html>
       var ids = memberIdsFn() || [];
       if (ids.length < 2) { toast('Need at least 2 members to preview', true); return; }
       toggleBtn.disabled = true;
-      toggleBtn._setIcon('…');
+      toggleBtn._setIcon('loading');
       try {
         var headers = {
           'Content-Type': 'application/json',
@@ -5794,13 +5858,13 @@ _CAPTURES_HTML = r"""<!doctype html>
         _previewBound = _bindPanelToAudio(audio, panel, wordsArr, state.wordEls);
         _previewBlobUrl = URL.createObjectURL(blob);
         audio.src = _previewBlobUrl;
-        toggleBtn._setIcon('⏸');
+        toggleBtn._setIcon('pause');
         toggleBtn.disabled = false;
         try { await audio.play(); }
         catch (e) { if (e && e.name !== 'AbortError') throw e; }
       } catch (e) {
         toggleBtn.disabled = false;
-        toggleBtn._setIcon('▶');
+        toggleBtn._setIcon('play');
         if (e && e.message) toast(e.message, true);
       }
     });
@@ -6076,12 +6140,17 @@ _CAPTURES_HTML = r"""<!doctype html>
   var _batchCurrentCard = null;
   var _batchKeyHandler = null;
   var _batchTouchState = null;
+  // Single-level undo for the last Dismiss/Accept (Ctrl+↓ or the ↶ button).
+  // Holds a pre-mutation snapshot of _proposals plus, for accepts, the
+  // created group_id so revert can dissolve it. Null = nothing to revert.
+  var _batchUndo = null;
 
   function _enterBatchMode() {
     if (_batchActive) return;
     _batchActive = true;
     _batchAccepted = 0;
     _batchDismissed = 0;
+    _batchUndo = null;
     document.getElementById('propose-list').hidden = true;
     document.getElementById('propose-batch').hidden = false;
     _batchKeyHandler = function(e) { _onBatchKey(e); };
@@ -6135,8 +6204,21 @@ _CAPTURES_HTML = r"""<!doctype html>
     host.appendChild(card);
     _batchCurrentCard = card;
 
+    // Action row, left→right: ↶ Revert · ✗ Dismiss · ⏮ Replay · ✓ Accept.
+    // Tinder geometry — the undo (Revert) sits at the far-left edge as a
+    // small amber secondary control, away from the primary Dismiss/Accept
+    // pair so it can't be mis-tapped; Replay is the interior media control
+    // (skip-to-start ⏮, deliberately NOT a curved arrow so it can't read
+    // as "undo").
     var actions = document.createElement('div');
     actions.className = 'batch-actions';
+    var revertBtn = document.createElement('button');
+    revertBtn.type = 'button'; revertBtn.className = 'revert';
+    revertBtn.title = 'Revert last action (Ctrl+↓)';
+    revertBtn.setAttribute('aria-label', 'Revert last action');
+    revertBtn.appendChild(_svgIcon('undo'));
+    revertBtn.disabled = !_batchUndo;
+    revertBtn.addEventListener('click', function() { _revertBatch(); });
     var dismissBtn = document.createElement('button');
     dismissBtn.type = 'button'; dismissBtn.className = 'dismiss';
     dismissBtn.textContent = '✗ Dismiss';
@@ -6144,12 +6226,14 @@ _CAPTURES_HTML = r"""<!doctype html>
     var replayBtn = document.createElement('button');
     replayBtn.type = 'button'; replayBtn.className = 'replay';
     replayBtn.title = 'Replay from start (Ctrl+↑)';
-    replayBtn.textContent = '⏪';
+    replayBtn.setAttribute('aria-label', 'Replay audio from start');
+    replayBtn.appendChild(_svgIcon('skipprev'));
     replayBtn.addEventListener('click', function() { _batchReplay(); });
     var acceptBtn = document.createElement('button');
     acceptBtn.type = 'button'; acceptBtn.className = 'accept primary';
     acceptBtn.textContent = '✓ Accept';
     acceptBtn.addEventListener('click', function() { _advanceBatch('accept'); });
+    actions.appendChild(revertBtn);
     actions.appendChild(dismissBtn);
     actions.appendChild(replayBtn);
     actions.appendChild(acceptBtn);
@@ -6157,7 +6241,8 @@ _CAPTURES_HTML = r"""<!doctype html>
 
     var hint = document.createElement('div');
     hint.className = 'batch-hint';
-    hint.textContent = 'Ctrl+← Dismiss · Ctrl+→ Accept · Space pause · Ctrl+↑ Replay · Esc Exit';
+    hint.textContent = 'Ctrl+← Dismiss · Ctrl+→ Accept · Ctrl+↓ Revert · '
+      + 'Space pause · Ctrl+↑ Replay · Esc Exit';
     host.appendChild(hint);
 
     // Touch swipe gestures on the card itself.
@@ -6243,8 +6328,11 @@ _CAPTURES_HTML = r"""<!doctype html>
       _stopAnyPreview();
       var join = (document.getElementById('propose-join') || {}).value || 'space';
       var silenceMs = parseInt((document.getElementById('propose-silence') || {}).value, 10) || 300;
+      // Snapshot the proposal queue BEFORE we splice it so Revert can
+      // restore the accepted proposal + any overlapping ones it removed.
+      var acceptSnap = _proposals.slice();
       try {
-        await api('POST', '/captures/api/groups', {
+        var resp = await api('POST', '/captures/api/groups', {
           member_ids: p.member_ids,
           join_strategy: join,
           silence_ms: silenceMs,
@@ -6259,6 +6347,14 @@ _CAPTURES_HTML = r"""<!doctype html>
           if (other === p) return false;
           return !(other.member_ids || []).some(function(id) { return consumed[id]; });
         });
+        // Remember how to undo this accept: dissolve the created group +
+        // restore the pre-splice queue. group_id comes from create_group_api.
+        _batchUndo = {
+          action: 'accept',
+          proposals: acceptSnap,
+          gid: (resp && resp.group_id) || null,
+          clips: p.member_count || p.member_ids.length,
+        };
         load();   // refresh main captures list in background
       } catch (e) {
         if (e && e.message !== 'unauthorized' && e.message !== 'not-admin') {
@@ -6267,8 +6363,11 @@ _CAPTURES_HTML = r"""<!doctype html>
         return;   // don't advance on failure; let user retry
       }
     } else if (action === 'dismiss') {
+      // Snapshot before shift so Revert can put the proposal back at front.
+      var dismissSnap = _proposals.slice();
       _batchDismissed++;
       _proposals.shift();
+      _batchUndo = { action: 'dismiss', proposals: dismissSnap };
     }
 
     if (card) {
@@ -6285,12 +6384,68 @@ _CAPTURES_HTML = r"""<!doctype html>
     }
   }
 
+  // Undo the last Dismiss/Accept (single level). Dismiss is a pure local
+  // re-enqueue; Accept dissolves the server-side group it created and
+  // restores the spliced queue. Tolerant of a 404 (group already gone).
+  async function _revertBatch() {
+    if (!_batchActive) return;
+    var u = _batchUndo;
+    if (!u) { toast('Nothing to revert'); return; }
+    if (u.action === 'dismiss') {
+      _proposals = u.proposals;
+      _batchDismissed = Math.max(0, _batchDismissed - 1);
+      _batchUndo = null;
+      toast('Reverted — proposal restored');
+      _renderBatchCard();
+      return;
+    }
+    // accept → dissolve the created group, then restore the queue.
+    // Disable the button while the DELETE is in flight (no double-fire).
+    var btn = _batchCurrentCard
+      && _batchCurrentCard.parentNode
+      && _batchCurrentCard.parentNode.querySelector('.batch-actions .revert');
+    if (btn) btn.disabled = true;
+    try {
+      if (u.gid) {
+        await api('DELETE', '/captures/api/groups/' + encodeURIComponent(u.gid));
+      }
+    } catch (e) {
+      // 404 = already dissolved elsewhere; treat as success. Anything else
+      // is a real failure — keep the undo entry so the user can retry.
+      if (!(e && /404|not found/i.test(e.message || ''))) {
+        if (e && e.message !== 'unauthorized') {
+          toast('Revert failed: ' + (e.message || 'error'), true);
+        }
+        if (btn) btn.disabled = false;
+        return;
+      }
+    }
+    _proposals = u.proposals;
+    _batchAccepted = Math.max(0, _batchAccepted - 1);
+    _batchUndo = null;
+    toast('Reverted — group dissolved');
+    load();              // refresh main captures list (members freed again)
+    _renderBatchCard();
+  }
+
+  // Resolve the word-strip state of the card currently on screen, so plain
+  // arrow keys can drive Corrections navigation without a prior click.
+  function _activeBatchState() {
+    if (!_batchCurrentCard) return null;
+    var panel = _batchCurrentCard.querySelector('.merge-preview-panel');
+    return (panel && panel._state) || null;
+  }
+
   function _onBatchKey(e) {
     if (!_batchActive) return;
-    // Don't hijack typing in chip inputs.
-    var tag = (e.target && e.target.tagName || '').toLowerCase();
-    if (tag === 'input' || tag === 'textarea') {
-      // Allow Esc to exit even from inputs.
+    // The focused word-strip handles its own arrows/typing and calls
+    // preventDefault — bail so we never double-handle the same event.
+    if (e.defaultPrevented) return;
+    // Don't hijack keys the browser owns inside editable / native controls
+    // (chip inputs, the seek slider, <select>s). Esc still exits.
+    var t = e.target;
+    if (t && t.closest && t.closest(
+        'input, textarea, select, [contenteditable], [role="slider"]')) {
       if (e.key === 'Escape') { e.preventDefault(); _exitBatchMode(); }
       return;
     }
@@ -6305,10 +6460,32 @@ _CAPTURES_HTML = r"""<!doctype html>
       }
       return;
     }
-    if (!e.ctrlKey) return;
-    if (e.key === 'ArrowRight') { e.preventDefault(); _advanceBatch('accept'); }
-    else if (e.key === 'ArrowLeft')  { e.preventDefault(); _advanceBatch('dismiss'); }
-    else if (e.key === 'ArrowUp')    { e.preventDefault(); _batchReplay(); }
+    if (e.ctrlKey || e.metaKey) {
+      if (e.key === 'ArrowRight')      { e.preventDefault(); _advanceBatch('accept'); }
+      else if (e.key === 'ArrowLeft')  { e.preventDefault(); _advanceBatch('dismiss'); }
+      else if (e.key === 'ArrowUp')    { e.preventDefault(); _batchReplay(); }
+      else if (e.key === 'ArrowDown')  { e.preventDefault(); _revertBatch(); }
+      return;
+    }
+    if (e.altKey) return;
+    // Plain arrows (no modifier) → Corrections word navigation, anywhere in
+    // the popup. Focus the strip afterward so typing flows into the chip.
+    var st = _activeBatchState();
+    if (!st || !st.words || !st.words.length) return;
+    var cur = st.cursorIdx < 0 ? -1 : st.cursorIdx;
+    var n = st.words.length;
+    var handled = true;
+    if (e.key === 'ArrowLeft')       { _moveCursor(st, Math.max(0, (cur < 0 ? 0 : cur) - 1)); }
+    else if (e.key === 'ArrowRight') { _moveCursor(st, Math.min(n - 1, cur + 1)); }
+    else if (e.key === 'ArrowUp')    { _moveCursorLine(st, 'up'); }
+    else if (e.key === 'ArrowDown')  { _moveCursorLine(st, 'down'); }
+    else if (e.key === 'Home')       { _moveCursor(st, 0); }
+    else if (e.key === 'End')        { _moveCursor(st, n - 1); }
+    else { handled = false; }
+    if (handled) {
+      e.preventDefault();
+      if (st.stripEl) { try { st.stripEl.focus({ preventScroll: true }); } catch (_) {} }
+    }
   }
 
   function _onBatchTouchStart(e) {
