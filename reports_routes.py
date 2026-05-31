@@ -371,7 +371,6 @@ _REPORTS_HTML = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <title>{{HEADER_TITLE}}</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
 {{PAGE_META}}
 {{SCALE_BOOTSTRAP_HEAD}}
 <style>

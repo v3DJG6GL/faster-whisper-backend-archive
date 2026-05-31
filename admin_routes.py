@@ -757,7 +757,6 @@ async def post_restart(request: Request) -> JSONResponse:
 
 _SETTINGS_VIEWER_HTML = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{HEADER_TITLE}}</title>
 {{PAGE_META}}
 {{SCALE_BOOTSTRAP_HEAD}}
@@ -1039,6 +1038,16 @@ _SETTINGS_VIEWER_HTML = r"""<!doctype html>
     flex: 1; min-width: 0; color: var(--fg);
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
+  /* Phone: the load-bearing name is the only flex item that shrinks, so on a
+     crowded row it collapsed to "R…". Drop it onto its own full-width line and
+     let it wrap in full instead of truncating (flex-basis:100% breaks the flex
+     line; the slug/pills/edit wrap below it). Desktop keeps the single line. */
+  @media (max-width: 40em) {
+    .rule-row .rule-label {
+      flex-basis: 100%;
+      white-space: normal; overflow: visible; text-overflow: clip;
+    }
+  }
   .rule-row .drag-handle { cursor: grab; user-select: none; color: var(--dim);
     padding: 0.125rem 0.25rem; }
   .rule-row .drag-handle:active { cursor: grabbing; }
@@ -1163,8 +1172,12 @@ _SETTINGS_VIEWER_HTML = r"""<!doctype html>
     border-left: 3px solid transparent; min-width: 0; }
   .mo-list-item:hover { background: #1c2230; }
   .mo-list-item.active { background: #1c2230; border-left-color: var(--cyan); }
+  /* Model name wraps instead of truncating: in the vertical sidebar it spills
+     to a second line (readable); in the ≤56rem horizontal-scroller it just
+     shows in full (scroll to reach). Was ellipsis-on-nowrap, which clipped
+     longer names to "distil-large-v…". */
   .mo-list-item .mo-list-label { flex: 1; min-width: 0;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    white-space: normal; overflow-wrap: anywhere; }
   .mo-list-item .mo-count { color: var(--dim); font-size: var(--fs-xs);
     flex-shrink: 0; }
   /* Collapse indicator on the active sidebar entry. ▾ when the detail

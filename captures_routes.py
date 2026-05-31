@@ -2476,7 +2476,6 @@ _CAPTURES_HTML = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <title>{{HEADER_TITLE}}</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
 {{PAGE_META}}
 {{SCALE_BOOTSTRAP_HEAD}}
 <style>
@@ -3106,7 +3105,7 @@ _CAPTURES_HTML = r"""<!doctype html>
   }
   .proposal .members .m {
     display: flex; gap: 0.5rem; padding: 0.15rem 0;
-    align-items: baseline;
+    align-items: baseline; flex-wrap: wrap; row-gap: 0.1rem;
   }
   .proposal .members .m .ts,
   .proposal .members .m .dur,
@@ -3119,6 +3118,14 @@ _CAPTURES_HTML = r"""<!doctype html>
     flex: 1 1 auto; min-width: 0;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     color: var(--fg); font-family: var(--font-sans);
+  }
+  /* Phone: drop the transcript onto its own full-width line under the
+     timestamp/speaker meta and let it wrap in full instead of truncating. */
+  @media (max-width: 40em) {
+    .proposal .members .m .m-text {
+      flex-basis: 100%; white-space: normal;
+      overflow: visible; text-overflow: clip;
+    }
   }
   .proposal .meter-bar {
     display: inline-block; width: 7rem; height: 0.4rem;

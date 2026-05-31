@@ -252,7 +252,6 @@ async def stats_stream() -> StreamingResponse:
 
 _STATS_VIEWER_HTML = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{HEADER_TITLE}}</title>
 {{PAGE_META}}
 {{SCALE_BOOTSTRAP_HEAD}}

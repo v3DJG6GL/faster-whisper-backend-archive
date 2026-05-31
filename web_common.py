@@ -552,12 +552,18 @@ header .page-link.allowed { display: inline-flex; }
 
 
 # Injected at the top of every page's <head>:
-#   1. the favicon links — scalable SVG first (modern browsers), then PNG +
+#   1. the viewport meta — MANDATORY for any responsive CSS to take effect.
+#      Without it mobile browsers use a ~980px layout viewport and shrink to
+#      fit, so no @media query ever matches. Centralised here (rather than
+#      per-page) so a page can never silently ship without it. Standard form
+#      only — never add maximum-scale / user-scalable=no (WCAG 1.4.4 failure).
+#   2. the favicon links — scalable SVG first (modern browsers), then PNG +
 #      ICO fallbacks (Safari/legacy don't render SVG favicons) and an
 #      apple-touch-icon. All brand-mark assets live in static/.
-#   2. a bootstrap script that applies the persisted UI scale BEFORE the
+#   3. a bootstrap script that applies the persisted UI scale BEFORE the
 #      page's CSS parses, avoiding a flash-of-default-size on navigation.
 SCALE_BOOTSTRAP_HEAD = (
+    '<meta name="viewport" content="width=device-width, initial-scale=1">'
     '<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">'
     '<link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png">'
     '<link rel="icon" type="image/png" sizes="16x16" href="/static/favicon-16.png">'
@@ -645,11 +651,28 @@ NAV_DRAWER_JS = """
   var bd=document.querySelector('.nav-backdrop');
   if(!hdr||!btn||!nav)return;
   var lastFocus=null;
+  // Mark everything OUTSIDE the header's branch inert while the drawer is open.
+  // Walk header -> body and inert each path node's siblings, so this works
+  // whether <header> is a direct <body> child (most pages) or wrapped in a
+  // container like /settings' <div id="app-wrap"> (where inerting the wrapper
+  // would otherwise cascade onto the header and kill the drawer links). Track
+  // only what we set so close() never clears pre-existing inert.
+  var _inerted=[];
   function inertRest(on){
-    Array.prototype.forEach.call(document.body.children,function(el){
-      if(el===hdr)return;
-      if(on)el.setAttribute('inert','');else el.removeAttribute('inert');
-    });
+    if(on){
+      _inerted=[];
+      var n=hdr;
+      while(n&&n!==document.body){
+        var p=n.parentElement; if(!p)break;
+        Array.prototype.forEach.call(p.children,function(s){
+          if(s!==n&&!s.hasAttribute('inert')){s.setAttribute('inert','');_inerted.push(s);}
+        });
+        n=p;
+      }
+    }else{
+      _inerted.forEach(function(e){e.removeAttribute('inert');});
+      _inerted=[];
+    }
   }
   function onKey(e){if(e.key==='Escape'){e.preventDefault();close();}}
   function open(){
