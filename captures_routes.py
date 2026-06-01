@@ -744,6 +744,17 @@ def _global_silence_ms() -> int:
         return 300
 
 
+def _global_edge_ms() -> int:
+    """Outer-margin silence (both ends of the merged WAV), sourced from the
+    global VAD edge knob. Mirrors `_global_silence_ms()` so the edge default
+    lives in one place instead of being repeated at each merge/preview site."""
+    import config as cfg
+    try:
+        return int(getattr(cfg, "CAPTURES_VAD_MARGIN_GROUP_EDGE_MS", 300))
+    except (TypeError, ValueError):
+        return 300
+
+
 def _global_join_strategy() -> str:
     """Transcript join strategy, sourced from the global setting."""
     import config as cfg
@@ -956,7 +967,7 @@ def _validate_merge_payload(
     import config as cfg
     n_members = len(member_ids)
     total_gap_ms = int(silence_ms) * max(0, n_members - 1)
-    edge_ms = int(getattr(cfg, "CAPTURES_VAD_MARGIN_GROUP_EDGE_MS", 300))
+    edge_ms = _global_edge_ms()
     total_edge_ms = 2 * edge_ms if n_members >= 1 else 0
     cap_ms = int(float(getattr(cfg, "CAPTURES_SAMPLE_MAX_DURATION_S", 29.9)) * 1000)
     total_ms = total_trimmed_ms + total_gap_ms + total_edge_ms
@@ -1015,7 +1026,7 @@ def _build_merged_wav(
         res = audio_merge.merge_wavs(
             member_paths, dst_abs, gap_ms=silence_ms,
             trim=bool(getattr(cfg, "CAPTURES_VAD_TRIM_ENABLED_FOR_GROUPS", False)),
-            edge_pad_ms=int(getattr(cfg, "CAPTURES_VAD_MARGIN_GROUP_EDGE_MS", 300)),
+            edge_pad_ms=_global_edge_ms(),
             max_internal_gap_ms=int(
                 getattr(cfg, "CAPTURES_VAD_MARGIN_GROUP_INTERNAL_MS", 300)),
         )
@@ -1066,7 +1077,7 @@ def _preview_member_trims(
         return {}
     import audio_merge
     import audio_vad_trim
-    edge = int(getattr(cfg, "CAPTURES_VAD_MARGIN_GROUP_EDGE_MS", 300))
+    edge = _global_edge_ms()
     max_gap = int(getattr(cfg, "CAPTURES_VAD_MARGIN_GROUP_INTERNAL_MS", 300))
     join_ms = int(_global_silence_ms())
     trims: dict[str, Any] = {}
@@ -1199,7 +1210,7 @@ async def preview_merge_audio_api(
         audio_merge.merge_wavs(
             member_paths, tmp_path, gap_ms=_global_silence_ms(),
             trim=bool(getattr(cfg, "CAPTURES_VAD_TRIM_ENABLED_FOR_GROUPS", False)),
-            edge_pad_ms=int(getattr(cfg, "CAPTURES_VAD_MARGIN_GROUP_EDGE_MS", 300)),
+            edge_pad_ms=_global_edge_ms(),
             max_internal_gap_ms=int(
                 getattr(cfg, "CAPTURES_VAD_MARGIN_GROUP_INTERNAL_MS", 300)),
         )
@@ -1285,7 +1296,7 @@ async def merge_estimate_api(
     n = len(payload.member_ids)
     gap_ms = int(_global_silence_ms()) * max(0, n - 1)
     import config as cfg
-    edge_ms = int(getattr(cfg, "CAPTURES_VAD_MARGIN_GROUP_EDGE_MS", 300))
+    edge_ms = _global_edge_ms()
     total_edge_ms = 2 * edge_ms if n >= 1 else 0
     cap_ms = int(float(getattr(cfg, "CAPTURES_SAMPLE_MAX_DURATION_S", 29.9)) * 1000)
     trimmed_total = trimmed_ms + gap_ms + total_edge_ms
@@ -1952,8 +1963,7 @@ def _build_merged_words(
         # Preview path: no stored merged duration — derive it.
         n = len(members)
         if new_layout:
-            import config as cfg
-            edge_ms = float(getattr(cfg, "CAPTURES_VAD_MARGIN_GROUP_EDGE_MS", 300))
+            edge_ms = float(_global_edge_ms())
             last_end = 0.0
             for m in members:
                 info = (member_trims or {}).get(m["id"]) or {}
