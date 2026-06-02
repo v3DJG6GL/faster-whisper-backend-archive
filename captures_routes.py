@@ -4909,7 +4909,13 @@ _CAPTURES_HTML = r"""<!doctype html>
             if (prog && myToken === _jobPollToken) prog.hidden = true;
           }, 6000);
         }
-      }).catch(function() { if (myToken === _jobPollToken) _jobPollTimer = null; });
+      }).catch(function() {
+        // A transient status fetch failure (network blip, momentary 5xx, CSRF
+        // refresh) must not permanently strand the poller while the job keeps
+        // running server-side — retry on the same cadence until a newer job
+        // supersedes this one (token guard) or the status resolves terminal.
+        if (myToken === _jobPollToken) _jobPollTimer = setTimeout(tick, 1000);
+      });
     }
     tick();
   }
