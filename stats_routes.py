@@ -832,6 +832,11 @@ function fmtSec(s) {
 function fmtAgo(ts) {
   return fmtSec(Math.max(0, Date.now() / 1000 - ts)) + ' ago';
 }
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
 function setBar(barEl, pct) {
   const bar = barEl.querySelector('i');
   bar.style.width = Math.max(0, Math.min(100, pct)).toFixed(1) + '%';
@@ -966,9 +971,9 @@ function render(snap) {
       ? `${cold.first}s / ~${cold.last5_avg}s avg (${cold.count})`
       : '—';
     return `<tr>
-      <td data-label="name">${m.name}</td>
-      <td data-label="device">${m.device || '—'}</td>
-      <td data-label="compute">${m.compute_type || '—'}</td>
+      <td data-label="name">${esc(m.name)}</td>
+      <td data-label="device">${esc(m.device || '—')}</td>
+      <td data-label="compute">${esc(m.compute_type || '—')}</td>
       <td class="num" data-label="VRAM (MB)">${m.vram_mb != null ? m.vram_mb.toFixed(0) : '—'}</td>
       <td data-label="state"><span class="badge ${warm ? 'warm' : 'cold'}">${warm ? 'warm' : 'cold'}</span></td>
       <td class="num" data-label="age">${fmtSec(m.age_sec)}</td>
@@ -988,7 +993,7 @@ function render(snap) {
   } else {
     $('rt-rows').innerHTML = rt.slice().reverse().map(r => `<tr>
       <td class="ts" data-label="when">${fmtAgo(r.ts)}</td>
-      <td data-label="model">${r.model}</td>
+      <td data-label="model">${esc(r.model)}</td>
       <td class="num" data-label="audio">${r.audio_dur.toFixed(1)} s</td>
       <td class="num" data-label="wall">${r.proc_dur.toFixed(2)} s</td>
       <td class="num" data-label="RTF">${r.rtf != null ? r.rtf.toFixed(2) + '×' : '—'}</td>
