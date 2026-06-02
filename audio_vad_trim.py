@@ -207,11 +207,14 @@ def trim_pcm_for_merge(
     """Plan + apply a per-member silence trim for the group merge path.
 
     Unlike `trim_wav` (singleton button: outer leading/trailing only), this
-    trims a member's outer edges down to `edge_pad_ms` AND collapses any
-    internal silence longer than `max_internal_gap_ms` down to that cap. The
-    result feeds `audio_merge.merge_wavs`, which then joins trimmed members
-    with the inter-segment gap — so all silence in the final clip is uniform
-    and bounded (the multi-second dead air at member joins is removed).
+    removes a member's outer leading/trailing silence ENTIRELY (no outer pad —
+    the merge layer owns the uniform outer margin), pads only the inner sides
+    of internal speech spans by `edge_pad_ms`, AND collapses any internal
+    silence longer than `max_internal_gap_ms` down to that cap. The result
+    feeds `audio_merge.merge_wavs`, which then adds the uniform outer margin
+    and joins trimmed members with the inter-segment gap — so all silence in
+    the final clip is uniform and bounded (the multi-second dead air at member
+    joins is removed).
 
     Operates on in-memory PCM only; the caller never touches the original
     capture file on disk (so ungroup still restores raw audio).
