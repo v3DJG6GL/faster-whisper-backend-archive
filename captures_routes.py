@@ -4827,6 +4827,7 @@ _CAPTURES_HTML = r"""<!doctype html>
   // Clear-all (typed confirmation)
   // -------------------------------------------------------------------
   function onClearAll() {
+    _closeAdvMenu();
     var m = document.getElementById('confirm-modal');
     var inp = document.getElementById('confirm-input');
     var ok = document.getElementById('confirm-ok');
