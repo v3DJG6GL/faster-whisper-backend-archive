@@ -334,8 +334,16 @@ def propose_merges(
     # Inter-member gap estimate mirrors the global silence knob (the merge
     # inserts this between members), so "packs to X s" matches the real WAV.
     gap_s = float(getattr(cfg, "CAPTURES_VAD_MARGIN_GROUP_INTERNAL_MS", 300)) / 1000.0
-    # Uniform outer margin on both ends of the merged WAV (counts toward cap).
-    edge_s = float(getattr(cfg, "CAPTURES_VAD_MARGIN_GROUP_EDGE_MS", 300)) / 1000.0
+    # Uniform outer margin on both ends of the merged WAV (counts toward cap),
+    # but only when group trimming is on — the legacy/trim-off merge path emits
+    # no outer margin (audio_merge.merge_wavs), so counting it here would
+    # over-pack the cap budget by ~2×edge_s and depress fill scores, diverging
+    # from captures_routes._validate_merge_payload's same trim-gated estimate.
+    edge_s = (
+        float(getattr(cfg, "CAPTURES_VAD_MARGIN_GROUP_EDGE_MS", 300)) / 1000.0
+        if getattr(cfg, "CAPTURES_VAD_TRIM_ENABLED_FOR_GROUPS", False)
+        else 0.0
+    )
     # Finished-sample floor — drop proposals (incl. solos) shorter than this.
     min_sample_s = float(getattr(cfg, "CAPTURES_SAMPLE_MIN_DURATION_S", 1.0))
 
