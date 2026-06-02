@@ -2603,9 +2603,16 @@ _CAPTURES_HTML = r"""<!doctype html>
   .adv-menu[hidden] { display: none; }
   .adv-menu button { width: 100%; text-align: left; white-space: nowrap; }
   .adv-sep { height: 1px; background: var(--border); margin: 0.15rem 0; }
+  /* Popover under the Advanced ▾ button, positioned independently of the
+     menu (which is closed while a job runs) so the live progress line is
+     actually visible. */
   .adv-progress {
+    position: absolute; right: 0; top: calc(100% + 0.25rem); z-index: 49;
+    min-width: 16rem; padding: 0.35rem 0.5rem;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 0.375rem; box-shadow: 0 0.5rem 1.25rem rgba(0,0,0,0.45);
     font-size: var(--fs-xs); color: var(--help); font-family: var(--font-mono);
-    padding: 0.2rem 0.3rem; white-space: normal;
+    white-space: normal;
   }
   .adv-progress[hidden] { display: none; }
 
@@ -3415,10 +3422,13 @@ _CAPTURES_HTML = r"""<!doctype html>
         <div id="adv-menu" class="adv-menu" hidden role="menu">
           <button id="btn-reprocess-all" role="menuitem" title="Re-run PIPELINE_RULES on every capture's raw text (text only). Use after editing rules.">Reprocess all · Pipeline rules</button>
           <button id="btn-reprocess-vad" role="menuitem" title="Rebuild every sample's audio with the current global silence settings. Use after editing Sample sizing / Silence trim.">Reprocess all · VAD silence</button>
-          <div id="adv-progress" class="adv-progress" hidden></div>
           <div class="adv-sep"></div>
           <button id="btn-clear" class="danger" role="menuitem" title="Permanently delete every capture">Clear all</button>
         </div>
+        <!-- Sibling of (not inside) #adv-menu: the job handlers close the menu
+             before polling, so a nested progress line would be display:none for
+             the whole run. -->
+        <div id="adv-progress" class="adv-progress" hidden></div>
       </div>
     </div>
   </div>
@@ -3833,11 +3843,14 @@ _CAPTURES_HTML = r"""<!doctype html>
         .then(function(j) {
           if (token !== _meterEstimateToken) return;  // superseded
           var t = j.trimmed_total_s || 0;
+          var capS = j.hard_cap_s || SAMPLE_CAP_S;
           meter.textContent = 'Σ ' + t.toFixed(2)
-            + ' s / ' + (j.hard_cap_s || SAMPLE_CAP_S).toFixed(2) + ' s';
+            + ' s / ' + capS.toFixed(2) + ' s';
           meter.classList.remove('amber', 'red');
+          // Amber = "approaching cap"; derive it from the configurable cap
+          // (80%) instead of a literal 24 s tied to the old 30 s default.
           if (!j.fits) meter.classList.add('red');
-          else if (t > 24) meter.classList.add('amber');
+          else if (t > capS * 0.8) meter.classList.add('amber');
           mergeBtn.disabled = !j.fits;
         })
         .catch(function() {
@@ -4870,11 +4883,16 @@ _CAPTURES_HTML = r"""<!doctype html>
   // Shared progress poller for the two background jobs. Polls the job's
   // status endpoint into the Advanced menu's progress line until it finishes.
   var _jobPollTimer = null;
+  var _jobPollToken = 0;
   function _pollJob(statusUrl, render) {
     if (_jobPollTimer) { clearTimeout(_jobPollTimer); _jobPollTimer = null; }
+    // Token guards against a previous job's still-in-flight status response
+    // overwriting this job's progress / firing the wrong completion toast.
+    var myToken = ++_jobPollToken;
     var prog = document.getElementById('adv-progress');
     function tick() {
       api('GET', statusUrl).then(function(s) {
+        if (myToken !== _jobPollToken) return;  // superseded by a newer job
         if (prog) { prog.hidden = false; prog.textContent = render(s); }
         if (s && s.status === 'running') {
           _jobPollTimer = setTimeout(tick, 1000);
@@ -4884,7 +4902,7 @@ _CAPTURES_HTML = r"""<!doctype html>
           else toast('Reprocess done.');
           load();  // refresh the list (durations / stale pills may have changed)
         }
-      }).catch(function() { _jobPollTimer = null; });
+      }).catch(function() { if (myToken === _jobPollToken) _jobPollTimer = null; });
     }
     tick();
   }
@@ -6916,9 +6934,13 @@ _CAPTURES_HTML = r"""<!doctype html>
             ? 'Regenerate audio (clear stale)'
             : 'Regenerate audio';
 
-          // 4. Lock / Dissolve label & visibility.
+          // 4. Lock / Dissolve / Regenerate label & visibility. A locked
+          // sample is admin-frozen exported data: the server 409s a non-admin
+          // regenerate (mirrors dissolve), so hide both rather than surface a
+          // confusing error toast.
           lockBtn.textContent = d.is_locked ? 'Unlock' : 'Lock';
           dissolveBtn.style.display = d.is_locked ? 'none' : '';
+          regenBtn.style.display = d.is_locked ? 'none' : '';
 
           // 5. Word strip (alternating per-member tints via mem-even /
           // mem-odd classes; styles in the .word-strip CSS block).
@@ -7053,6 +7075,7 @@ _CAPTURES_HTML = r"""<!doctype html>
                 var isLocked = !!d.is_locked;
                 lockBtn.textContent = isLocked ? 'Unlock' : 'Lock';
                 dissolveBtn.style.display = isLocked ? 'none' : '';
+                regenBtn.style.display = isLocked ? 'none' : '';
                 // Sync the collapsed-list header so the lock-pill in
                 // _renderSampleCard reflects the new state on next render().
                 var idx = _allSamples.findIndex(function(x) { return x.id === g.id; });
