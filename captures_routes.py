@@ -4901,6 +4901,13 @@ _CAPTURES_HTML = r"""<!doctype html>
           if (s && s.status === 'error') toast('Reprocess failed: ' + (s.error || ''), true);
           else toast('Reprocess done.');
           load();  // refresh the list (durations / stale pills may have changed)
+          // The progress popover is a sibling of (not inside) #adv-menu so it
+          // stays visible during the run; closing the menu does NOT dismiss it.
+          // Leave the final summary up briefly, then hide it — unless a newer
+          // job has since taken over the popover.
+          setTimeout(function() {
+            if (prog && myToken === _jobPollToken) prog.hidden = true;
+          }, 6000);
         }
       }).catch(function() { if (myToken === _jobPollToken) _jobPollTimer = null; });
     }
