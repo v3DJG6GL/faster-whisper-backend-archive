@@ -5149,7 +5149,6 @@ _CAPTURES_HTML = r"""<!doctype html>
     if (panelHost) panelHost.innerHTML = '';
     var previewCtl = _makeMergePreviewBtn(
       function() { return rows.map(function(r) { return r.id; }); },
-      function() { return GAP_EST_MS; },
       function() {
         var totalAudio = rows.reduce(function(s, r) { return s + (r.duration_seconds || 0); }, 0);
         var gap = GAP_EST_MS / 1000;
@@ -5663,7 +5662,7 @@ _CAPTURES_HTML = r"""<!doctype html>
   // manual merge modal passes its #merge-transcript so that prominent box
   // karaokes (no duplicate Final result); batch/proposal cards omit it and get
   // the in-panel Final result.
-  function _makeMergePreviewBtn(memberIdsFn, silenceMsFn, durationFn, opts) {
+  function _makeMergePreviewBtn(memberIdsFn, durationFn, opts) {
     opts = opts || {};
     var externalGround = opts.groundEl || null;
     var toggleBtn = document.createElement('button');
@@ -5871,7 +5870,7 @@ _CAPTURES_HTML = r"""<!doctype html>
         state.onMarkDirty = function() {
           if (saveTimer) clearTimeout(saveTimer);
           saveTimer = setTimeout(function() {
-            _saveProposalChips(state, ids, silenceMsFn() || 300).catch(function(e) {
+            _saveProposalChips(state, ids).catch(function(e) {
               if (e && e.message) toast(e.message, true);
             });
           }, 250);
@@ -5899,7 +5898,7 @@ _CAPTURES_HTML = r"""<!doctype html>
   // global-indexed chips to per-member captures. On success, refresh
   // baselineCorrections so the next save sends the user's current
   // intent against the now-canonical server state.
-  async function _saveProposalChips(state, memberIds, silenceMs) {
+  async function _saveProposalChips(state, memberIds) {
     var headers = {
       'Content-Type': 'application/json',
       'X-CSRF-Token': window._csrfToken ? window._csrfToken() : '',
@@ -6019,7 +6018,6 @@ _CAPTURES_HTML = r"""<!doctype html>
 
     var previewCtl = _makeMergePreviewBtn(
       function() { return p.member_ids; },
-      function() { return 300; },   // nominal gap; server uses the global
       function() { return p.total_duration_s; },
       // Inline player: the ▶ lives at the left edge of the seek bar inside the
       // panel (mirrors the single-capture player), not in this meta row.
