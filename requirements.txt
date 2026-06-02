@@ -31,6 +31,6 @@ python-dotenv>=1.2.2
 # re-exports from nvidia-ml-py). It is pure-Python and optional at runtime —
 # system_stats.py degrades gracefully when import fails or no NVIDIA GPU is
 # present (AMD GPU / CPU dev box / macOS).
-nvidia-ml-py>=13.595.45
+nvidia-ml-py>=13.610.43
 psutil>=7.2.2
 pydantic>=2.13.4
