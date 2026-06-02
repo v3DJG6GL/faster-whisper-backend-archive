@@ -2130,6 +2130,8 @@ async def regenerate_sample_api(
         g, "captures", user.get("user_id") or "",
     )
     _audit_cross_user_read(user, g, "sample-regenerate", sid)
+    if g["is_locked"] and not user.get("is_admin"):
+        raise HTTPException(status.HTTP_409_CONFLICT, "sample is locked")
     members = capture_samples_store.get_members(sid)
     silence_ms = _global_silence_ms()
     with _get_rebuild_lock(sid):
