@@ -4909,11 +4909,20 @@ _CAPTURES_HTML = r"""<!doctype html>
             if (prog && myToken === _jobPollToken) prog.hidden = true;
           }, 6000);
         }
-      }).catch(function() {
-        // A transient status fetch failure (network blip, momentary 5xx, CSRF
-        // refresh) must not permanently strand the poller while the job keeps
-        // running server-side — retry on the same cadence until a newer job
-        // supersedes this one (token guard) or the status resolves terminal.
+      }).catch(function(e) {
+        // A transient status fetch failure (network blip, momentary 5xx) must
+        // not permanently strand the poller while the job keeps running
+        // server-side — retry on the same cadence until a newer job supersedes
+        // this one (token guard) or the status resolves terminal. An auth
+        // rejection is terminal, NOT transient: api() already re-opened the
+        // token modal (401) or rendered the no-access landing (403), and
+        // retrying would re-fire that side effect every second — clearing the
+        // modal's key input (locking the user out) or re-rendering the landing
+        // — so stop polling on those.
+        if (e && (e.message === 'unauthorized' || e.message === 'not-admin')) {
+          if (myToken === _jobPollToken) _jobPollTimer = null;
+          return;
+        }
         if (myToken === _jobPollToken) _jobPollTimer = setTimeout(tick, 1000);
       });
     }
