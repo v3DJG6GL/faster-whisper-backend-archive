@@ -201,6 +201,20 @@ def test_bucket_over_cap_skipped_smaller_packed():
     assert ids == ["c0", "c2"]  # big member skipped, small one packed
 
 
+def test_bucket_packs_no_more_than_api_member_cap():
+    # Silence-heavy captures (raw above the eligibility floor but VAD-trimmed
+    # to a fraction of a second) could otherwise pack far more than the merge
+    # endpoints' member_ids max_length=30 under the duration cap, producing a
+    # top-ranked proposal that 422s on accept. The packer must stop at the cap.
+    bucket = [_bkt_member(i, 0.15, f"distinct text number {i}") for i in range(60)]
+    # dup_threshold=1.0 disables the near-duplicate filter so this isolates the
+    # member-count cap (60 short members would otherwise all pack under 28 s).
+    cands = P._generate_candidates_for_bucket(bucket, 0.3, 1.0, 26.0, 28.0)
+    assert cands  # at least the largest pack survives
+    assert all(len(members) <= P._MAX_MEMBERS for _, members in cands)
+    assert max(len(members) for _, members in cands) == P._MAX_MEMBERS
+
+
 # ---------------------------------------------------------------------------
 # _eligible
 # ---------------------------------------------------------------------------

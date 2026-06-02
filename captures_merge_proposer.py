@@ -41,7 +41,14 @@ logger = logging.getLogger(__name__)
 # The finished-sample duration cap is the global cfg.CAPTURES_SAMPLE_MAX_DURATION_S
 # (read in _generate); the inter-member gap mirrors the global VAD-internal
 # silence. Kept out of imports to avoid a circular dep with captures_routes.
-_DEFAULT_GAP_MS = 300
+
+# Hard cap on members per proposal — must not exceed the merge endpoints'
+# CreateSampleIn/PreviewMergeIn `member_ids` Field(max_length=30), or an
+# accepted proposal would 422 on POST. Packing is by trimmed duration, so a
+# bucket of silence-heavy captures (raw above the eligibility floor but VAD-
+# trimmed to a fraction of a second) can otherwise pack far more than 30 under
+# the duration cap.
+_MAX_MEMBERS = 30
 
 # Sentinel cache key for admin "all users" view.
 _ALL_USERS = "__all__"
@@ -209,6 +216,9 @@ def _generate_candidates_for_bucket(
         # Outer margins (both ends) count toward the cap from the start.
         used_dur = 2.0 * edge_s + _dur(bucket[i])
         for j in range(i + 1, n):
+            if len(members) >= _MAX_MEMBERS:
+                # At the API member cap; emitting more would 422 on accept.
+                break
             cand = bucket[j]
             cand_dur = _dur(cand)
             # Adding j costs cand_dur + one gap (between prior member and j).
