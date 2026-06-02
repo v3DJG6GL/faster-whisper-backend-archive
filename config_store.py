@@ -611,7 +611,7 @@ FIELD_DESCRIPTIONS: dict[str, str] = {
         "single-capture samples. Must be ≤ the proposer target.",
     "CAPTURES_SAMPLE_MAX_DURATION_S":
         "Hard maximum length of a finished sample, in seconds (default "
-        "29.9; must be < 30, Whisper's window). The single source of truth "
+        "29.9; must be ≤ 30, Whisper's window). The single source of truth "
         "for the merge, the pre-merge validation, the merge estimate, and "
         "the proposer cap. Must be ≥ the proposer target.",
     "CAPTURES_SAMPLE_JOIN_STRATEGY":
@@ -1066,7 +1066,7 @@ class AdminConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_sample_sizing(self) -> "AdminConfig":
-        # Enforce MIN ≤ TARGET ≤ MAX < 30 on the EFFECTIVE values (a None
+        # Enforce MIN ≤ TARGET ≤ MAX ≤ 30 on the EFFECTIVE values (a None
         # override means "unchanged", so fall back to the live config default
         # for the comparison — catches e.g. lowering MAX below the target).
         import config as _cfg

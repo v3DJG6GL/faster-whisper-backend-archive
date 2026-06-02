@@ -632,11 +632,11 @@ CAPTURE_RECORDINGS_AUDIO_BYTES_HARD_LIMIT = 100_000_000
 #   MIN — finished-sample floor; just discards near-empty junk (the proposer
 #         packs the bulk toward TARGET so this only bites tiny solos).
 #   MAX — hard ceiling. Whisper truncates >30 s; keep a margin. The merge,
-#         the 28 s validation, the merge-estimate, and the proposer all read
+#         the cap validation, the merge-estimate, and the proposer all read
 #         this one value (was four hardcoded 28 s sites).
 #   JOIN_STRATEGY — how member transcripts concatenate ("space" or
 #         "period_space"); applies to every new/regenerated sample.
-# Constraint (enforced in config_store): MIN <= PROPOSER_TARGET_S <= MAX < 30.
+# Constraint (enforced in config_store): MIN <= PROPOSER_TARGET_S <= MAX <= 30.
 CAPTURES_SAMPLE_MIN_DURATION_S = 1.0
 CAPTURES_SAMPLE_MAX_DURATION_S = 29.9
 CAPTURES_SAMPLE_JOIN_STRATEGY = "space"

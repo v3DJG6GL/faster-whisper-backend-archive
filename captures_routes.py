@@ -692,7 +692,7 @@ async def reprocess_vad_status_api() -> JSONResponse:
 
 
 # ---------------------------------------------------------------------
-# Capture groups (≤28 s packed training samples)
+# Capture samples (packed training clips within the configured duration cap)
 # ---------------------------------------------------------------------
 
 # Join strategy + inter-member silence are GLOBAL admin settings now
@@ -897,12 +897,12 @@ def _validate_merge_payload(
     a group, all members belong to the same user (and the caller is either
     that user or admin), audio files are present on disk, and — when
     `enforce_cap` — the TRIMMED merged duration (per-member VAD trim + inter-
-    segment silence) ≤ 28 s. The cap is measured on trimmed audio because
+    segment silence) is within the configured cap. The cap is measured on trimmed audio because
     that's what the merged WAV actually is (and what the proposer packs to);
     measuring raw would reject groups that comfortably fit after trimming.
 
     `enforce_cap=False` skips only the cap (used by the merge-estimate
-    endpoint, which needs the totals even when they exceed 28 s).
+    endpoint, which needs the totals even when they exceed the cap).
 
     Returns (captures, owner_user_id, member_paths, total_trimmed_ms) so
     downstream callers don't re-fetch the same rows."""
@@ -995,7 +995,7 @@ def _build_merged_wav(
     merge, return (duration_ms, member_hash_map, member_trims). When
     `member_paths` is None, looks them up via captures_store + validates each
     file exists. Caller must have validated member_ids belong to the same
-    user and total ≤28 s.
+    user and the total is within the configured cap.
 
     `member_trims` maps member_id → {lead_ms, new_duration_ms, segments} when
     CAPTURES_VAD_TRIM_ENABLED_FOR_GROUPS trims each member; _build_merged_words
@@ -1285,7 +1285,7 @@ async def merge_estimate_api(
 ) -> JSONResponse:
     """Return the raw + TRIMMED merged-duration totals for a hypothetical
     merge so the manual-selection meter can show (and gate on) the real
-    post-trim length instead of the raw sum. Skips the 28 s cap so the UI can
+    post-trim length instead of the raw sum. Skips the cap so the UI can
     display an over-cap value and disable Merge itself. Same ownership gates
     as the other merge endpoints; reuses the proposer's cached per-capture
     trim."""
@@ -1951,7 +1951,7 @@ def _build_merged_words(
     `get_members` strips heavy fields for the list view, so callers hydrate
     `words` first. Each member's words go through `_align_words_to_final`
     (LCS-align raw→final). Cost is bounded — ≤30 members, ≤a few hundred words
-    per ≤28 s group — and only runs on expand."""
+    per packed sample — and only runs on expand."""
     silence_s = max(0, int(silence_ms)) / 1000.0
     eff_dur_s: float | None = None
     if merged_duration_ms is not None:
@@ -2322,7 +2322,7 @@ def _build_manifest_row(
 def _build_export_stream(only_status: str | None, include_audio: bool):
     """Generator that yields tar.gz bytes containing manifest.jsonl and,
     optionally, audio/<id>.wav entries. One manifest entry per training
-    unit — a "unit" is either a capture group (≤28 s packed sample) OR
+    unit — a "unit" is either a capture group (packed sample) OR
     an ungrouped singleton capture. Group members never appear as
     singletons (no double-counting; the group transcript covers them).
 
@@ -2973,8 +2973,9 @@ _CAPTURES_HTML = r"""<!doctype html>
   /* ---- Capture grouping ----
    * Selection state lives in JS and projects to per-row .selected CSS.
    * The sticky action bar appears when ≥1 row is selected; Σ duration
-   * goes amber at 24 s and red at 28 s — visual feedback for the
-   * Whisper-encoder hard cap (≤30 s). */
+   * turns red when the server reports the selection exceeds the
+   * configured sample cap (CAPTURES_SAMPLE_MAX_DURATION_S, ≤30 s — the
+   * Whisper-encoder window), with an amber near-cap warning below that. */
   .cc-head .sel-checkbox {
     margin: 0 0.4rem 0 0; cursor: pointer;
   }
@@ -3438,7 +3439,7 @@ _CAPTURES_HTML = r"""<!doctype html>
   <div class="box">
     <h3>Merge into one training sample</h3>
     <p style="color:var(--help);font-size:var(--fs-sm);margin:0 0 0.6rem;">
-      Concatenates the selected captures (same speaker, ≤28 s total) into a
+      Concatenates the selected captures (same speaker) into a
       single ≤30 s Whisper training sample. Inter-segment silence is
       preserved at the joins per the Low-Resource Whisper paper.
     </p>
