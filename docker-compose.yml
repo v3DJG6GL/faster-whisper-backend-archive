@@ -1,6 +1,6 @@
 # Deploy by pulling the published image from GHCR (default), or build locally.
 #   CPU:  docker compose up -d
-#   GPU:  docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+#   GPU:  docker compose -f docker-compose.gpu.yml up -d   (standalone, see that file)
 # Runtime state is kept in named volumes so it survives down/up and image bumps.
 # If the GHCR package is private, `docker login ghcr.io` first.
 services:

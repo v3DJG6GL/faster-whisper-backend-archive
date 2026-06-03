@@ -1,20 +1,16 @@
-# GPU overlay for docker-compose.yml — pulls the CUDA image and exposes the
-# host's NVIDIA GPU(s). Use it ALONGSIDE the base file:
-#
-#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
-#
-# Requires the NVIDIA Container Toolkit on the host (see Dockerfile.gpu header).
-# Ports, volumes, env and container_name are inherited from the base file.
+# GPU deployment — standalone (does NOT need docker-compose.yml). Identical to
+# docker-compose.yml except for the GPU-specific bits, marked "# GPU:" below.
+#   GPU:  docker compose -f docker-compose.gpu.yml up -d
+# Requires the NVIDIA driver + NVIDIA Container Toolkit on the host (see
+# Dockerfile.gpu). Runtime state is kept in named volumes so it survives
+# down/up and image bumps. If the GHCR package is private, `docker login
+# ghcr.io` first.
 services:
   faster-whisper-backend:
-    # GPU image variant published by CI from Dockerfile.gpu.
+    # GPU: CUDA image variant published by CI from Dockerfile.gpu (vs :latest).
     image: ghcr.io/v3djg6gl/faster-whisper-backend:latest-gpu
-    # To build the GPU image locally instead of pulling from GHCR, uncomment:
-    # build:
-    #   context: .
-    #   dockerfile: Dockerfile.gpu
-    # Compose v2 device reservation — passes through all NVIDIA GPUs
-    # (equivalent to `docker run --gpus all`).
+    container_name: faster-whisper-backend
+    # GPU: expose all NVIDIA GPUs (Compose v2 reservation, == `docker run --gpus all`).
     deploy:
       resources:
         reservations:
@@ -22,7 +18,49 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    # MODEL_DEVICE already defaults to "cuda" + float16 (config.py), so no extra
-    # env is needed. To pin a specific GPU on a multi-GPU host, uncomment:
-    # environment:
-    #   WHISPER_DEVICE_INDEX: "0"
+    # To build the GPU image locally instead of pulling from GHCR, uncomment:
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile.gpu
+    ports:
+      # To serve on another port, set WHISPER_SERVER_PORT to match AND change
+      # both sides here, e.g. "9000:9000".
+      - "8000:8000"
+    # Optional: tune any WHISPER_* setting from a local .env file (copy it from
+    # .env.example). Values in `environment:` below and real env vars win over it.
+    # env_file:
+    #   - .env
+    environment:
+      # Pin the runtime state under /data (volumes below) instead of the repo
+      # dir, so the image stays stateless. Every other WHISPER_* setting can be
+      # added here too — see .env.example for the full list and defaults.
+      WHISPER_API_KEYS_DB: /data/api_keys.local.sqlite3
+      WHISPER_SESSIONS_DB: /data/sessions.local.sqlite3
+      WHISPER_REPORTS_DB: /data/reports.local.sqlite3
+      WHISPER_RECENT_TRANSCRIPTIONS_DB: /data/recent_transcriptions.local.sqlite3
+      WHISPER_USAGE_DB: /data/usage.local.sqlite3
+      WHISPER_CAPTURES_DB: /data/captures.local.sqlite3
+      WHISPER_CAPTURES_DIR: /data/captures
+      WHISPER_LOG_FILE: /data/logs/whisper.log
+      WHISPER_DOWNLOAD_ROOT: /models
+      # GPU: MODEL_DEVICE already defaults to "cuda" + float16 (config.py), so no
+      # extra env is needed. To pin a specific GPU on a multi-GPU host, uncomment:
+      # WHISPER_DEVICE_INDEX: "0"
+      # Optional: bootstrap the first admin without the UI. Prefer the *_FILE
+      # form so the secret stays out of `docker inspect` / the process env:
+      # WHISPER_BOOTSTRAP_ADMIN_KEY_FILE: /run/secrets/bootstrap_admin_key
+    volumes:
+      - whisper-data:/data
+      - whisper-models:/models
+    restart: unless-stopped
+    # Mount file-based secrets and reference them with the *_FILE vars above.
+    # secrets:
+    #   - bootstrap_admin_key
+
+volumes:
+  whisper-data:
+  whisper-models:
+
+# secrets:
+#   bootstrap_admin_key:
+#     file: ./secrets/bootstrap_admin_key.txt

@@ -68,15 +68,17 @@ also tagged `:v<version>` / `:v<version>-gpu` and `:sha-<short>` / `:sha-<short>
 # CPU — pulls ghcr.io/<owner>/faster-whisper-backend:latest
 docker compose up -d
 
-# GPU — pulls the :latest-gpu image and passes through the host NVIDIA GPU(s)
-docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+# GPU — standalone file: pulls :latest-gpu and passes through the host NVIDIA GPU(s)
+docker compose -f docker-compose.gpu.yml up -d
 ```
 
-The GPU path needs an NVIDIA driver (CUDA 12.x) **and** the NVIDIA Container
-Toolkit on the host; the device is exposed via `docker-compose.gpu.yml`. With no
-GPU visible, model load auto-falls back to CPU/int8. To build locally instead of
-pulling, uncomment `build:` in the compose file(s) (the GPU build uses
-`Dockerfile.gpu`). If the GHCR package is private, `docker login ghcr.io` first.
+`docker-compose.gpu.yml` is a self-contained mirror of `docker-compose.yml` —
+same ports/env/volumes, differing only in the GPU bits (`:latest-gpu` image +
+the NVIDIA device reservation). The GPU path needs an NVIDIA driver (CUDA 12.x)
+**and** the NVIDIA Container Toolkit on the host. With no GPU visible, model load
+auto-falls back to CPU/int8. To build locally instead of pulling, uncomment
+`build:` in the compose file (the GPU build uses `Dockerfile.gpu`). If the GHCR
+package is private, `docker login ghcr.io` first.
 
 ### Windows (production, service)
 

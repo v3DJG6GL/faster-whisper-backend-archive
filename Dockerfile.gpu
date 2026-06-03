@@ -7,7 +7,7 @@
 # auto-falls back to CPU/int8 (config.py MODEL_DEVICE_FALLBACK), still functional.
 #
 # Build/run:
-#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
+#   docker compose -f docker-compose.gpu.yml up -d   (standalone GPU compose file)
 FROM python:3.14-slim
 
 ENV PYTHONUNBUFFERED=1 \
