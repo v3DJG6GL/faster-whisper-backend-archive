@@ -1,0 +1,34 @@
+# GPU image — same base as the CPU Dockerfile, plus the NVIDIA CUDA 12 / cuDNN 9
+# runtime wheels (requirements-gpu.txt) that ctranslate2 loads for GPU inference.
+#
+# HOST requirements: an NVIDIA driver (CUDA 12.x-capable) + the NVIDIA Container
+# Toolkit, and the container must be started with GPU access — see
+# docker-compose.gpu.yml. With no GPU visible at runtime, model load
+# auto-falls back to CPU/int8 (config.py MODEL_DEVICE_FALLBACK), still functional.
+#
+# Build/run:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
+FROM python:3.14-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+# Base + GPU deps first, for layer caching. The GPU wheels are large (~1 GB).
+COPY requirements.txt requirements-gpu.txt ./
+RUN pip install --upgrade pip \
+ && pip install -r requirements.txt -r requirements-gpu.txt
+
+# ctranslate2 dlopens libcublas / libcudnn at runtime but does not search
+# site-packages, and main.py's CUDA-lib preloader is Windows-only — so put the
+# pip-installed NVIDIA .so dirs on the loader path here. The path is fixed by the
+# python:3.14-slim base; update the "python3.14" segment if you bump the base.
+ENV LD_LIBRARY_PATH=/usr/local/lib/python3.14/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.14/site-packages/nvidia/cudnn/lib
+
+# App code. Runtime state lives on mounted volumes — see docker-compose.yml.
+COPY . .
+
+EXPOSE 8000
+
+CMD ["python", "main.py"]

@@ -1,0 +1,28 @@
+# GPU overlay for docker-compose.yml — pulls the CUDA image and exposes the
+# host's NVIDIA GPU(s). Use it ALONGSIDE the base file:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+#
+# Requires the NVIDIA Container Toolkit on the host (see Dockerfile.gpu header).
+# Ports, volumes, env and container_name are inherited from the base file.
+services:
+  faster-whisper-backend:
+    # GPU image variant published by CI from Dockerfile.gpu.
+    image: ghcr.io/v3djg6gl/faster-whisper-backend:latest-gpu
+    # To build the GPU image locally instead of pulling from GHCR, uncomment:
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile.gpu
+    # Compose v2 device reservation — passes through all NVIDIA GPUs
+    # (equivalent to `docker run --gpus all`).
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # MODEL_DEVICE already defaults to "cuda" + float16 (config.py), so no extra
+    # env is needed. To pin a specific GPU on a multi-GPU host, uncomment:
+    # environment:
+    #   WHISPER_DEVICE_INDEX: "0"

@@ -64,19 +64,35 @@ jobs:
           echo "test job aggregate result: ${{ needs.test.result }}"
           test "${{ needs.test.result }}" = "success"
 
-  # Build (and, off PRs, publish) the container image — only AFTER the test
+  # Build (and, off PRs, publish) the container images — only AFTER the test
   # gate is green. `needs: [all-ci]` means this job is skipped whenever the
-  # suite fails, so a broken build never reaches ghcr.io. PRs build the image
-  # to validate the Dockerfile but do not push (forks lack packages: write and
+  # suite fails, so a broken build never reaches ghcr.io. PRs build the images
+  # to validate the Dockerfiles but do not push (forks lack packages: write and
   # we don't want PRs clobbering published tags); push to main / a v* tag
   # publishes.
+  #
+  # Two variants build in parallel from the same context:
+  #   cpu — Dockerfile      → :latest, :v*, :sha-<short>          (CPU-only base)
+  #   gpu — Dockerfile.gpu  → :latest-gpu, :v*-gpu, :sha-<short>-gpu
+  #         (adds the CUDA 12 / cuDNN 9 wheels from requirements-gpu.txt)
+  # The gpu suffix is applied to every tag via metadata-action's flavor.suffix.
   build:
-    name: build image
+    name: build image (${{ matrix.variant }})
     needs: [all-ci]
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: cpu
+            dockerfile: Dockerfile
+            suffix: ''
+          - variant: gpu
+            dockerfile: Dockerfile.gpu
+            suffix: '-gpu'
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -102,6 +118,12 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ${{ steps.img.outputs.name }}
+          # latest=false: we control the `latest` tag via the type=raw rule below
+          # (default-branch only). suffix appends "-gpu" to every tag for the gpu
+          # leg; onlatest=true ensures it reaches the raw `latest` tag too.
+          flavor: |
+            latest=false
+            suffix=${{ matrix.suffix }},onlatest=true
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=tag
@@ -111,8 +133,10 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
+          file: ${{ matrix.dockerfile }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Per-variant cache scope so the cpu and gpu builds don't evict each other.
+          cache-from: type=gha,scope=${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}

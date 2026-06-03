@@ -60,12 +60,23 @@ python main.py                             # serves on http://0.0.0.0:8000
 
 ### Docker (any OS)
 
+CI publishes two images to GHCR on every push to `main` (and on `v*` tags):
+`:latest` (CPU) and `:latest-gpu` (adds the CUDA 12 / cuDNN 9 wheels). Both are
+also tagged `:v<version>` / `:v<version>-gpu` and `:sha-<short>` / `:sha-<short>-gpu`.
+
 ```bash
-docker compose up --build   # serves on http://localhost:8000; state in volumes
+# CPU — pulls ghcr.io/<owner>/faster-whisper-backend:latest
+docker compose up -d
+
+# GPU — pulls the :latest-gpu image and passes through the host NVIDIA GPU(s)
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
 ```
 
-For GPU in Docker, build a derived image that also installs `requirements-gpu.txt`
-and run with `--gpus all` on an NVIDIA host.
+The GPU path needs an NVIDIA driver (CUDA 12.x) **and** the NVIDIA Container
+Toolkit on the host; the device is exposed via `docker-compose.gpu.yml`. With no
+GPU visible, model load auto-falls back to CPU/int8. To build locally instead of
+pulling, uncomment `build:` in the compose file(s) (the GPU build uses
+`Dockerfile.gpu`). If the GHCR package is private, `docker login ghcr.io` first.
 
 ### Windows (production, service)
 
@@ -366,7 +377,8 @@ install-service.ps1        Windows Service installer (WinSW-based, self-elevatin
 uninstall-service.ps1      Windows Service uninstaller
 install-service.sh         Linux systemd installer (self-elevating, auto-bootstraps venv); --gpu adds CUDA wheels
 uninstall-service.sh       Linux systemd uninstaller
-Dockerfile / .dockerignore / docker-compose.yml
+Dockerfile / Dockerfile.gpu / .dockerignore
+docker-compose.yml / docker-compose.gpu.yml   CPU base + GPU overlay (NVIDIA)
                            CPU container image + compose (named volumes for state); run on any OS
 requirements.txt           Base (CPU, cross-platform) deps; transitive resolved by pip
 requirements-gpu.txt       NVIDIA CUDA wheels (opt-in, additive)

@@ -1,10 +1,14 @@
-# CPU deployment. `docker compose up` builds the image and serves on :8000.
-# Runtime state is kept in named volumes so it survives `down`/`up` and image
-# rebuilds. For GPU, see the README (derived image + `gpus: all`).
+# Deploy by pulling the published image from GHCR (default), or build locally.
+#   CPU:  docker compose up -d
+#   GPU:  docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+# Runtime state is kept in named volumes so it survives down/up and image bumps.
+# If the GHCR package is private, `docker login ghcr.io` first.
 services:
-  whisper-api:
-    build: .
-    image: faster-whisper-backend
+  faster-whisper-backend:
+    image: ghcr.io/v3djg6gl/faster-whisper-backend:latest
+    container_name: faster-whisper-backend
+    # To build the image locally instead of pulling from GHCR, uncomment:
+    # build: .
     ports:
       # To serve on another port, set WHISPER_SERVER_PORT to match AND change
       # both sides here, e.g. "9000:9000".
