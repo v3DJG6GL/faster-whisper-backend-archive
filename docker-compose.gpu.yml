@@ -43,6 +43,11 @@ services:
       WHISPER_CAPTURES_DIR: /data/captures
       WHISPER_LOG_FILE: /data/logs/whisper.log
       WHISPER_DOWNLOAD_ROOT: /models
+      # HF download backend (hf_xet) writes its cache + logs under HF_HOME;
+      # unset it defaults to ~/.cache, which fails ("Permission denied") when
+      # the platform runs the container as a non-root UID with HOME=/. Point it
+      # at the writable, persistent /models volume so the cache survives too.
+      HF_HOME: /models
       # GPU: MODEL_DEVICE already defaults to "cuda" + float16 (config.py), so no
       # extra env is needed. To pin a specific GPU on a multi-GPU host, uncomment:
       # WHISPER_DEVICE_INDEX: "0"
