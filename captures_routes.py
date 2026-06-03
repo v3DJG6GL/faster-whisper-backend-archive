@@ -6059,7 +6059,9 @@ _CAPTURES_HTML = r"""<!doctype html>
       line.className = 'm';
       var ts = document.createElement('span');
       ts.className = 'ts';
-      ts.textContent = absTime(m.created_ts || 0);
+      var _mts = m.created_ts || 0;
+      ts.textContent = fmtWhen(_mts);
+      if (_mts) { ts.dataset.ts = String(_mts); ts.title = absTime(_mts); }
       line.appendChild(ts);
       var dur = document.createElement('span');
       dur.className = 'dur';

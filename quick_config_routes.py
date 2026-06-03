@@ -1251,7 +1251,9 @@ function renderTrace(entry) {
   meta.className = 'trace-meta';
   const ts = document.createElement('span');
   ts.className = 'trace-ts';
-  ts.textContent = absTime(entry.ts || 0);
+  const _ets = entry.ts || 0;
+  ts.textContent = fmtWhen(_ets);
+  if (_ets) { ts.dataset.ts = String(_ets); ts.title = absTime(_ets); }
   meta.appendChild(ts);
   if (entry.model) {
     const mdl = document.createElement('span');
@@ -2451,10 +2453,11 @@ load().then(() => {
 {{TIME_HELPERS_JS}}
 
 <script>
-// Must run AFTER TIME_HELPERS_JS defines timeTick. Re-queries [data-ts] every
-// tick, so it also refreshes cb:map date cells created by later renderCards()
-// calls; the cells already carry static fmtWhen() text from _makeMapRow.
-timeTick('.map-date[data-ts]');
+// Must run AFTER TIME_HELPERS_JS defines timeTick. Default [data-ts] selector
+// refreshes both the cb:map date cells created by later renderCards() calls and
+// the Recent-transcriptions .trace-ts nodes; all carry static fmtWhen() text at
+// creation, this just ages the relative suffix in place.
+timeTick();
 </script>
 
 </body>

@@ -1888,7 +1888,17 @@ async def transcribe(
                     audio_dur_s = float(getattr(info, "duration", 0.0) or 0.0)
                     min_s = float(getattr(cfg, "CAPTURE_RECORDINGS_MIN_DURATION_SEC", 0.5))
                     max_s = float(getattr(cfg, "CAPTURE_RECORDINGS_MAX_DURATION_SEC", 600.0))
-                    if min_s <= audio_dur_s <= max_s:
+                    if not raw_full_text.strip():
+                        # Pure-silence clip: Whisper returned no speech, so the
+                        # capture would store as "(empty)" with zero training
+                        # value. Skip it. The tmp audio is unlinked by the outer
+                        # finally, so nothing is orphaned. raw_full_text is the
+                        # exact text that would be passed as raw= below.
+                        logger.info(
+                            "[capture] skipped empty transcription (no speech) req=%s",
+                            request_id[:8],
+                        )
+                    elif min_s <= audio_dur_s <= max_s:
                         # Disk-free guard. Skip on <1 GB free; don't fail
                         # the transcription. Best-effort: a failure to
                         # query free space (e.g. inaccessible dir) is

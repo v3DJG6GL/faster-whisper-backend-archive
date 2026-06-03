@@ -917,7 +917,7 @@ OPEN_MODE_BANNER_JS = r"""
 #
 # Format contract: HH:MM:SS | YYYY.MM.DD — 24-hour clock, dot-separated date,
 # space-pipe-space separator. fmtWhen appends a relative suffix (e.g.
-# " · 5m ago") while the event is within 24 h, then drops it.
+# " | 5m ago") while the event is within 24 h, then drops it.
 #
 # `timeTick(rootSelector, intervalMs=30000)` walks every element matching
 # rootSelector (defaults to `[data-ts]`) and re-renders its textContent from
@@ -947,7 +947,7 @@ function relTime(ts) {
 function fmtWhen(ts) {
   if (!ts) return '—';
   var a = absTime(ts), r = relTime(ts);
-  return r ? (a + ' · ' + r) : a;
+  return r ? (a + ' | ' + r) : a;
 }
 
 function timeTick(sel, ms) {

@@ -1074,7 +1074,10 @@ _API_KEYS_HTML = r"""<!doctype html>
             // shared .activity cell. Empty ts (never-used key) renders an
             // em-dash so the cell keeps its height and the grid stays aligned.
             var hasValue = !!ts;
-            var v = hasValue ? escapeHtml(absTime(ts)) : '—';
+            var v = hasValue
+              ? '<span data-ts="' + ts + '" title="' + escapeHtml(absTime(ts)) + '">'
+                  + escapeHtml(fmtWhen(ts)) + '</span>'
+              : '—';
             return '<div class="ts' + (hasValue ? '' : ' empty') + '">'
                  + '<div class="ts-label">' + label + '</div>'
                  + '<div class="ts-value">' + v + '</div>'
@@ -1260,6 +1263,13 @@ _API_KEYS_HTML = r"""<!doctype html>
 
   load();
 })();
+</script>
+<script>
+// Runs AFTER TIME_HELPERS_JS defines timeTick. Ages the relative suffix on the
+// per-key created/last-used cells in place; the cells already carry static
+// fmtWhen() text at render time, and timeTick re-queries [data-ts] each tick so
+// it also catches cells added by later list reloads.
+timeTick();
 </script>
 </body></html>
 """
