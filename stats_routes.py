@@ -829,9 +829,6 @@ function fmtSec(s) {
   if (s < 86400) return (s / 3600).toFixed(1) + ' h';
   return (s / 86400).toFixed(1) + ' d';
 }
-function fmtAgo(ts) {
-  return fmtSec(Math.max(0, Date.now() / 1000 - ts)) + ' ago';
-}
 function esc(s) {
   return String(s == null ? '' : s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;')
@@ -991,8 +988,8 @@ function render(snap) {
     $('rt-rows').innerHTML =
       '<tr><td colspan="7" class="empty">— no requests yet —</td></tr>';
   } else {
-    $('rt-rows').innerHTML = rt.slice().reverse().map(r => `<tr>
-      <td class="ts" data-label="when">${fmtAgo(r.ts)}</td>
+    $('rt-rows').innerHTML = rt.map(r => `<tr>
+      <td class="ts" data-label="when" data-ts="${r.ts || 0}" title="${absTime(r.ts)}">${fmtWhen(r.ts)}</td>
       <td data-label="model">${esc(r.model)}</td>
       <td class="num" data-label="audio">${r.audio_dur.toFixed(1)} s</td>
       <td class="num" data-label="wall">${r.proc_dur.toFixed(2)} s</td>
@@ -1088,10 +1085,12 @@ fetch('/stats/snapshot', { cache: 'no-store' })
 <script>
 // --- Usage-over-time section (independent of the live SSE dashboard) -------
 // Self-contained IIFE: builds its own uPlot time-series chart + leaderboard,
-// fetched once on load and on every selector change. Does NOT use the
-// TIME_HELPERS_JS helpers (not injected on this page) — day labels are
-// formatted inline from the days-since-epoch value the server returns
-// (day*86400 = UTC midnight of that local calendar date → correct date label).
+// fetched once on load and on every selector change. The chart formats its own
+// axis/tooltip dates inline rather than via the shared TIME_HELPERS_JS fmtWhen
+// (now injected lower down for the recent-transcriptions table): its x-values
+// are day*86400 = UTC midnight of each bucket's calendar date, so labels read
+// the date with getUTC* (correct on any operator timezone) — fmtWhen would
+// apply the local clock, which is meaningless for a whole-day bucket.
 (() => {
 'use strict';
 const $ = id => document.getElementById(id);
@@ -1129,7 +1128,10 @@ function fmtDur(sec) {
 function fmtMetric(metric, v) {
   return metric === 'audio_s' ? fmtDur(v) : fmtCount(v);
 }
-function fmtDate(ts) { return new Date(ts * 1000).toISOString().slice(0, 10); }
+function fmtDate(ts) {
+  const d = new Date(ts * 1000), p2 = n => ('0' + n).slice(-2);
+  return d.getUTCFullYear() + '.' + p2(d.getUTCMonth() + 1) + '.' + p2(d.getUTCDate());
+}
 
 // Floating cursor tooltip: bucket date + every line's value, with the line
 // nearest the cursor (by data-space y distance) bolded. Driven by uPlot's
@@ -1185,21 +1187,37 @@ function buildChart() {
     padding: [remPx(0.5), remPx(0.6), remPx(0.2), remPx(0.4)],
     legend: { show: false },
     // drag:{x:false,y:false} removes uPlot's default drag-to-zoom.
-    cursor: { y: false, drag: { x: false, y: false }, points: { show: false } },
+    // points.show:true draws a per-series highlight dot on the hovered bucket
+    // (series stroke colour, via uPlot's .u-cursor-pt), so the tooltip has a
+    // concrete on-chart target instead of floating beside a bare guide line.
+    cursor: { y: false, drag: { x: false, y: false }, points: { show: true } },
     scales: { x: { time: true }, y: { range: { min: { pad: 0.05, mode: 1 }, max: { pad: 0.1, mode: 1 } } } },
     hooks: { setCursor: [updateTip] },
     axes: [
       { stroke: '#6e7681', grid: { stroke: '#21262d', width: 1 },
         ticks: { stroke: '#30363d', width: 1, size: 3 },
         font: remPx(0.733) + 'px ' + MONO,
-        // Region-standard tick labels (24h in DE, am/pm in en-US, etc.) via the
-        // browser locale, instead of uPlot's hardcoded am/pm + M/D/YY defaults.
-        // Day-or-coarser increments show a locale date; finer ones a locale time.
-        values: (u, splits, axisIdx, foundSpace, foundIncr) => splits.map(s => {
+        // Buckets are whole days (or weeks): put a tick ON each bucket, subsampled
+        // to ~one label / 64px, so uPlot never auto-picks a sub-day increment and
+        // falls back to time-of-day labels (the old foundIncr<86400 branch).
+        splits: (u) => {
+          const xs = u.data[0] || [];
+          if (xs.length < 2) return xs;
+          const px = u.over.clientWidth || 600;
+          const maxTicks = Math.max(2, Math.floor(px / 64));
+          const step = Math.max(1, Math.ceil(xs.length / maxTicks));
+          const out = [];
+          for (let i = 0; i < xs.length; i += step) out.push(xs[i]);
+          return out;
+        },
+        // Fixed MM.DD, locale-independent (matches the project's YYYY.MM.DD norm).
+        // x-values are UTC midnight of each bucket day, so getUTC* yields the
+        // server-intended calendar date on every operator timezone. The hover
+        // tooltip carries the full year-qualified date.
+        values: (u, splits) => splits.map(s => {
           const d = new Date(s * 1000);
-          return (foundIncr >= 86400)
-            ? d.toLocaleDateString(undefined, { year: '2-digit', month: 'numeric', day: 'numeric' })
-            : d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+          const p2 = n => ('0' + n).slice(-2);
+          return p2(d.getUTCMonth() + 1) + '.' + p2(d.getUTCDate());
         }) },
       { stroke: '#6e7681', size: remPx(2.8), gap: 4,
         grid: { stroke: '#21262d', width: 1 },
@@ -1310,6 +1328,13 @@ function loadUsage() {
 loadUsage();
 })();
 </script>
+{{TIME_HELPERS_JS}}
 {{SCALE_PICKER_JS}}
 {{SEV_POLLER_JS}}
+<script>
+// Runs AFTER TIME_HELPERS_JS defines timeTick. Ages the relative suffix on the
+// recent-transcriptions WHEN cells between SSE snapshots; re-queries [data-ts]
+// each tick so it also catches rows added by the next snapshot render.
+timeTick('#rt-rows [data-ts]');
+</script>
 </body></html>"""
