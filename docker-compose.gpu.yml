@@ -48,6 +48,12 @@ services:
       # the platform runs the container as a non-root UID with HOME=/. Point it
       # at the writable, persistent /models volume so the cache survives too.
       HF_HOME: /models
+      # Disable the Xet transfer backend: on restrictive/proxied networks its
+      # CAS endpoint gets rate-limited (429) and stalls (concurrency throttles
+      # to 1 and the model download hangs). "1" forces the plain HTTPS/CDN path,
+      # which is slower but reliable. Remove this to re-enable Xet if your egress
+      # to cas-bridge/transfer.xethub.hf.co is unrestricted.
+      HF_HUB_DISABLE_XET: "1"
       # GPU: MODEL_DEVICE already defaults to "cuda" + float16 (config.py), so no
       # extra env is needed. To pin a specific GPU on a multi-GPU host, uncomment:
       # WHISPER_DEVICE_INDEX: "0"
