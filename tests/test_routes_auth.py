@@ -144,3 +144,73 @@ def test_sse_missing_key_rejected_when_locked(client, make_user_key):
         assert e.status_code == 401
     else:
         raise AssertionError("expected 401 HTTPException")
+
+
+# --- host-OR-key gates: /docs, /redoc, /openapi.json (any key) and /sev,
+#     /logs (admin key). Loopback always passes; remote needs the right key. ---
+
+_REMOTE = ("203.0.113.9", 1234)  # TEST-NET-3, never in the default allowlist
+_DOCS = ("/docs", "/redoc", "/openapi.json")
+_ADMIN_PUB = ("/sev", "/logs")
+
+
+def test_docs_open_mode_remote_ok(app_module):
+    # No admin key => open mode => docs reachable even from a remote host.
+    with TestClient(app_module.app, client=_REMOTE) as c:
+        for path in _DOCS:
+            assert c.get(path).status_code == 200, path
+
+
+def test_docs_locked_remote_no_key_401(client, make_user_key):
+    make_user_key("root", is_admin=True)  # flip to locked-down
+    with TestClient(client.app, client=_REMOTE) as c:
+        for path in _DOCS:
+            assert c.get(path).status_code == 401, path
+
+
+def test_docs_locked_remote_any_user_key_ok(client, make_user_key):
+    make_user_key("root", is_admin=True)
+    _uid, raw = make_user_key("alice", is_admin=False)  # NON-admin is enough
+    with TestClient(client.app, client=_REMOTE) as c:
+        for path in _DOCS:
+            assert c.get(path, headers=bearer(raw)).status_code == 200, path
+
+
+def test_docs_locked_loopback_ok(client, make_user_key):
+    make_user_key("root", is_admin=True)
+    for path in _DOCS:  # default client is loopback -> host gate admits
+        assert client.get(path).status_code == 200, path
+
+
+def test_sev_logs_locked_remote_no_key_401(client, make_user_key):
+    make_user_key("root", is_admin=True)
+    with TestClient(client.app, client=_REMOTE) as c:
+        for path in _ADMIN_PUB:
+            assert c.get(path).status_code == 401, path
+
+
+def test_sev_logs_locked_remote_non_admin_403(client, make_user_key):
+    make_user_key("root", is_admin=True)
+    _uid, raw = make_user_key("alice", is_admin=False)
+    with TestClient(client.app, client=_REMOTE) as c:
+        for path in _ADMIN_PUB:
+            assert c.get(path, headers=bearer(raw)).status_code == 403, path
+
+
+def test_sev_logs_locked_remote_admin_ok(client, make_user_key):
+    _uid, raw = make_user_key("root", is_admin=True)
+    with TestClient(client.app, client=_REMOTE) as c:
+        for path in _ADMIN_PUB:
+            assert c.get(path, headers=bearer(raw)).status_code == 200, path
+
+
+def test_sev_allows_stats_only_host(client, make_user_key, monkeypatch):
+    # /sev's host check is the ADMIN ∪ STATS union: a host allowed for /stats
+    # but not for admin, with no key, still reaches /sev (pill keeps updating).
+    import config as cfg
+    make_user_key("root", is_admin=True)
+    monkeypatch.setattr(cfg, "STATS_ALLOWED_HOSTS", [_REMOTE[0]], raising=False)
+    with TestClient(client.app, client=_REMOTE) as c:
+        assert c.get("/sev").status_code == 200
+        # /logs uses the admin list only, so it stays gated from this host.
+        assert c.get("/logs").status_code == 401

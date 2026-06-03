@@ -1482,7 +1482,13 @@ async def lifespan(app: FastAPI):
     system_stats.shutdown()
 
 
-app = FastAPI(title="Faster Whisper API", version="1.0.0", lifespan=lifespan)
+# docs_url/redoc_url/openapi_url=None disables FastAPI's built-in (unauthenticated)
+# docs; they're re-added below behind _docs_gate so the API surface isn't exposed
+# to arbitrary hosts.
+app = FastAPI(
+    title="Faster Whisper API", version="1.0.0", lifespan=lifespan,
+    docs_url=None, redoc_url=None, openapi_url=None,
+)
 
 # Static assets for the /stats dashboard (vendored uPlot, etc). Local-only —
 # do not put anything sensitive under static/.
@@ -1492,6 +1498,39 @@ app.mount(
     StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")),
     name="static",
 )
+
+# Host-OR-key gates (web_common host allowlist OR a valid API key). Built once;
+# the lambdas re-read cfg per request so runtime allowlist edits take effect.
+#   _docs_gate  — /docs, /redoc, /openapi.json: ADMIN_ALLOWED_HOSTS or ANY key.
+#   _admin_gate — /logs:                        ADMIN_ALLOWED_HOSTS or ADMIN key.
+#   _sev_gate   — /sev:  ADMIN ∪ STATS hosts or ADMIN key (so the nav severity
+#                 pill keeps live-updating on /stats viewers, which are gated by
+#                 STATS_ALLOWED_HOSTS rather than the admin list).
+from auth import require_host_or_auth as _require_host_or_auth
+from fastapi.openapi.docs import get_swagger_ui_html, get_redoc_html
+from fastapi.responses import JSONResponse as _JSONResponse
+
+_docs_gate = _require_host_or_auth(lambda: cfg.ADMIN_ALLOWED_HOSTS, admin=False)
+_admin_gate = _require_host_or_auth(lambda: cfg.ADMIN_ALLOWED_HOSTS, admin=True)
+_sev_gate = _require_host_or_auth(
+    lambda: list(cfg.ADMIN_ALLOWED_HOSTS) + list(cfg.STATS_ALLOWED_HOSTS),
+    admin=True,
+)
+
+
+@app.get("/openapi.json", include_in_schema=False, dependencies=[Depends(_docs_gate)])
+async def _openapi_json():
+    return _JSONResponse(app.openapi())
+
+
+@app.get("/docs", include_in_schema=False, dependencies=[Depends(_docs_gate)])
+async def _swagger_ui():
+    return get_swagger_ui_html(openapi_url="/openapi.json", title=app.title + " — docs")
+
+
+@app.get("/redoc", include_in_schema=False, dependencies=[Depends(_docs_gate)])
+async def _redoc_ui():
+    return get_redoc_html(openapi_url="/openapi.json", title=app.title + " — redoc")
 
 # Per-request metrics middleware. Records (path, status, duration) for every
 # HTTP request — bumps in_flight tracked separately by the transcribe handler.
@@ -2556,12 +2595,13 @@ def _require_logs_page_sse(request: Request) -> dict:
     return rec
 
 
-@app.get("/logs", response_class=HTMLResponse)
+@app.get("/logs", response_class=HTMLResponse, dependencies=[Depends(_admin_gate)])
 async def logs_viewer():
-    # HTML page is open — the bearer isn't available on initial
-    # navigation. The SSE /logs/stream endpoint gates by
-    # `require_page("logs")` with a ?key= fallback for EventSource;
-    # the page's first stream-open 403s for non-permitted users.
+    # Shell gated by _admin_gate: ADMIN_ALLOWED_HOSTS (loopback always) OR an
+    # admin key. On a browser navigation the host check or the session cookie
+    # (set by /auth/login) satisfies it. The SSE /logs/stream + /logs/older
+    # endpoints keep their own require_page("logs") gate (with a ?key= fallback
+    # for EventSource), so the data layer is unchanged.
     import web_common
     return HTMLResponse(
         web_common.render_page(_LOG_VIEWER_HTML, current="logs"),
@@ -2691,16 +2731,19 @@ async def logout(request: Request, response: Response):
     return {"ok": True}
 
 
-@app.get("/sev")
+@app.get("/sev", dependencies=[Depends(_sev_gate)])
 async def severity_snapshot():
     """Tiny JSON endpoint polled by every page's nav-row pill poller.
 
     Returns the same `severity_counts()` the server uses everywhere else
     (nav HTML render, /stats payload) — WARNING+ records since process
-    start, bounded by the 2000-entry ring. Wide-open like /logs — three
-    integers, no PII. The poller in web_common.SEV_POLLER_JS hits this
-    every 5 s on /logs, /stats, and /settings so all three pages stay
-    synced to the server-side truth."""
+    start, bounded by the 2000-entry ring. Three integers, no PII.
+
+    Gated by _sev_gate: ADMIN_ALLOWED_HOSTS ∪ STATS_ALLOWED_HOSTS (loopback
+    always) OR an admin key. The host union covers every page that embeds
+    SEV_POLLER_JS — /logs + /settings (admin hosts) and /stats (stats hosts)
+    — so the pill keeps live-updating wherever it's shown. A 403 here fails
+    the poller silently; the nav still shows the server-rendered count."""
     import web_common
     return web_common.severity_counts()
 

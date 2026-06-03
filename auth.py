@@ -195,6 +195,21 @@ def get_current_user(
     Returns a dict with keys: key_id, user_id, username, is_admin,
     permissions (a `Permissions` policy object).
     """
+    rec = _resolve_user(request, creds)
+    if rec is None:
+        raise _UNAUTH
+    return rec
+
+
+def _resolve_user(
+    request: Request,
+    creds: HTTPAuthorizationCredentials | None,
+) -> dict[str, Any] | None:
+    """Non-raising core of `get_current_user`: returns the resolved record or
+    None (locked down + no/invalid credential). In OPEN mode returns the
+    synthetic admin. Shared with `require_host_or_auth` so the host-OR-key gates
+    can fall back to auth without catching exceptions.
+    """
     if not api_keys_store.is_locked_down():
         rec = dict(api_keys_store.OPEN_MODE_USER)
     else:
@@ -204,7 +219,7 @@ def get_current_user(
         if rec is None:
             rec = user_from_session_cookie(request)
         if rec is None:
-            raise _UNAUTH
+            return None
     # Attach the policy object so routes can ask can(page)/scope(page)
     # without each one re-parsing the JSON.
     rec["permissions"] = Permissions(
@@ -212,6 +227,38 @@ def get_current_user(
         bool(rec.get("is_admin")),
     )
     return rec
+
+
+def require_host_or_auth(
+    allowlist_ref: "Callable[[], list[str]]",
+    *,
+    admin: bool = False,
+):
+    """Dependency factory: pass if the client host is in `allowlist_ref()`
+    (loopback always allowed) OR the caller presents a valid API key (bearer
+    header or session cookie). When `admin=True` the key must belong to an admin.
+
+    Used to gate endpoints that should be reachable from trusted hosts without a
+    key but otherwise require one — e.g. /docs (any key) and /sev, /logs (admin
+    key). OPEN mode → synthetic admin → always passes, so bootstrapping is
+    unaffected. Returns 401 when locked down with no/invalid key, 403 when a
+    valid non-admin key hits an admin-only gate.
+    """
+    import web_common  # local import avoids any module-load ordering concerns
+
+    def _dep(
+        request: Request,
+        creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
+    ) -> None:
+        if web_common.host_in_allowlist(request, allowlist_ref()):
+            return
+        rec = _resolve_user(request, creds)
+        if rec is None:
+            raise _UNAUTH
+        if admin and not rec.get("is_admin"):
+            raise _FORBIDDEN
+
+    return _dep
 
 
 def require_admin(
