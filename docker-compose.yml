@@ -21,6 +21,7 @@ services:
       # Pin the runtime state under /data (volumes below) instead of the repo
       # dir, so the image stays stateless. Every other WHISPER_* setting can be
       # added here too — see .env.example for the full list and defaults.
+      WHISPER_CONFIG_LOCAL: /data/config.local.json
       WHISPER_API_KEYS_DB: /data/api_keys.local.sqlite3
       WHISPER_SESSIONS_DB: /data/sessions.local.sqlite3
       WHISPER_REPORTS_DB: /data/reports.local.sqlite3

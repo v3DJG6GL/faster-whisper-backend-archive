@@ -726,52 +726,6 @@ _QUICK_CONFIG_HTML = r"""<!doctype html>
     color: var(--fg); font-size: var(--fs-sm); display: none; z-index: 10; }
   #toast.err { border-color: var(--red); color: var(--red); }
   #toast.ok { border-color: var(--green); color: var(--green); }
-  /* API-key login modal — matches /captures, /reports, /settings */
-  #token-modal { position: fixed; inset: 0; background: rgba(0,0,0,0.65);
-    display: none; align-items: center; justify-content: center; z-index: 8; }
-  #token-modal.show { display: flex; }
-  #token-modal .box {
-    background: var(--panel); border: 1px solid var(--border);
-    border-radius: 6px; padding: 1.4rem 1.5rem 1.2rem;
-    width: 30rem; max-width: 92vw;
-    box-shadow: 0 12px 40px rgba(0,0,0,0.5);
-  }
-  #token-modal h3 {
-    margin: 0 0 0.5rem 0; color: var(--bold); font-size: var(--fs-xl);
-  }
-  #token-modal p {
-    margin: 0 0 0.9rem 0; line-height: 1.45;
-    color: var(--help, var(--dim)); font-size: var(--fs-sm);
-  }
-  #token-modal p code { color: var(--fg); font-family: var(--font-mono); }
-  #token-modal input {
-    box-sizing: border-box; width: 100%;
-    background: var(--input-bg); color: var(--fg);
-    border: 1px solid var(--border); border-radius: 4px;
-    padding: 0.55rem 0.7rem; font-family: var(--font-mono);
-    font-size: var(--fs-md); line-height: 1.4;
-  }
-  #token-modal input:focus { outline: none; border-color: var(--cyan); }
-  #token-modal .actions {
-    display: flex; gap: 0.6rem; justify-content: flex-end;
-    margin-top: 1.1rem; padding-top: 0.85rem;
-    border-top: 1px solid var(--border);
-  }
-  #token-modal .actions button {
-    font: inherit; font-size: var(--fs-md);
-    line-height: 1.4;
-    padding: 0.45rem 1rem;
-    min-height: 2.25rem;
-    border-radius: 4px;
-    cursor: pointer;
-    background: var(--input-bg);
-    color: var(--fg);
-    border: 1px solid var(--border);
-  }
-  #token-modal .actions button:hover { background: #21262d; color: var(--bold); }
-  #token-modal .actions button.primary {
-    color: var(--green); border-color: var(--green);
-  }
 
   /* Recent transcriptions panel */
   #recent-panel { margin-top: 1.5rem; border-top: 1px solid var(--border);
@@ -994,22 +948,6 @@ _QUICK_CONFIG_HTML = r"""<!doctype html>
 
 <div id="toast"></div>
 
-<div id="token-modal">
-  <div class="box">
-    <h3>API key</h3>
-    <p style="color:var(--dim);font-size:var(--fs-sm);margin:0 0 0.5rem 0;">
-      Paste your <code>wk_…</code> API key. Your admin issues one per user in
-      <code>/settings/api-keys</code>.
-    </p>
-    <input id="token-input" type="password" autocomplete="off" spellcheck="false"
-           placeholder="wk_…">
-    <div class="actions">
-      <button id="token-cancel">cancel</button>
-      <button id="token-ok" class="primary">ok</button>
-    </div>
-  </div>
-</div>
-
 {{RULE_EDITOR_JS}}
 
 <script>
@@ -1019,21 +957,6 @@ _QUICK_CONFIG_HTML = r"""<!doctype html>
 let initialRules = [];      // last-loaded rules from server (deep-copy snapshot)
 let liveRules = [];         // editable rules — diffed against initialRules to build patch
 let dirty = new Set();      // slugs with changes
-
-// Exchange a pasted key for the HttpOnly session cookie. Returns true on
-// success. Dispatches whisper:auth-changed so the shared chrome refreshes.
-async function doLogin(key) {
-  try {
-    const r = await fetch('/auth/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key }),
-    });
-    if (!r.ok) return false;
-    try { window.dispatchEvent(new Event('whisper:auth-changed')); } catch(_) {}
-    return true;
-  } catch (_) { return false; }
-}
 
 async function api(method, path, body) {
   // Session cookie sent automatically; mutations carry the CSRF token.
@@ -1061,40 +984,15 @@ function setStatus(s) {
   document.getElementById('status').textContent = s;
 }
 
-function promptToken() {
-  return new Promise((resolve) => {
-    const m = document.getElementById('token-modal');
-    const inp = document.getElementById('token-input');
-    inp.value = '';
-    m.classList.add('show');
-    inp.focus();
-    function done(val) {
-      m.classList.remove('show');
-      document.getElementById('token-ok').onclick = null;
-      document.getElementById('token-cancel').onclick = null;
-      inp.onkeydown = null;
-      resolve(val);
-    }
-    document.getElementById('token-ok').onclick = () => done(inp.value);
-    document.getElementById('token-cancel').onclick = () => done(null);
-    inp.onkeydown = (e) => { if (e.key === 'Enter') done(inp.value); };
-  });
-}
-
 async function ensureToken() {
-  // Probe /quick-config/state. On 401 prompt; retry once. On 403
-  // (valid bearer, no quick_config scope) render the shared no-access
-  // landing and keep the bearer so the user can navigate elsewhere
-  // without re-logging in.
+  // Probe /quick-config/state. On 401 the shared login gate (web_common)
+  // prompts for a key and reloads on success. On 403 (valid bearer, no
+  // quick_config scope) render the shared no-access landing and keep the
+  // bearer so the user can navigate elsewhere without re-logging in.
   let r = await api('GET', '/quick-config/state');
   if (r.status === 401) {
-    const t = await promptToken();
-    if (!t) return null;
-    if (!(await doLogin(t))) {
-      showToast('invalid key', 'err');
-      return null;
-    }
-    r = await api('GET', '/quick-config/state');
+    if (window._showLoginGate) window._showLoginGate();
+    return null;
   }
   if (r.status === 403 && typeof _renderNoAccessLanding === 'function') {
     // Refresh whoami so the landing can list reachable pages.

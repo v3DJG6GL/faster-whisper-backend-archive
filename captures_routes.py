@@ -2933,56 +2933,6 @@ _CAPTURES_HTML = r"""<!doctype html>
   #toast.show { opacity: 1; }
   #toast.err { border-color: var(--red); color: var(--red); }
 
-  #token-modal {
-    position: fixed; inset: 0; background: rgba(0,0,0,0.65);
-    display: none; align-items: center; justify-content: center; z-index: 30;
-  }
-  #token-modal.show { display: flex; }
-  #token-modal .box {
-    background: var(--panel); border: 1px solid var(--border);
-    border-radius: 6px; padding: 1.4rem 1.5rem 1.2rem;
-    width: 30rem; max-width: 92vw;
-    box-shadow: 0 12px 40px rgba(0,0,0,0.5);
-  }
-  #token-modal h3 {
-    margin: 0 0 0.5rem 0; color: var(--bold); font-size: var(--fs-xl);
-  }
-  #token-modal p {
-    margin: 0 0 0.9rem 0; line-height: 1.45;
-    color: var(--help); font-size: var(--fs-sm);
-  }
-  #token-modal p code { color: var(--fg); }
-  #token-modal input[type=password] {
-    box-sizing: border-box; width: 100%;
-    background: var(--input-bg); color: var(--fg);
-    border: 1px solid var(--border); border-radius: 4px;
-    padding: 0.55rem 0.7rem; font: inherit; font-size: var(--fs-md);
-    line-height: 1.4;
-  }
-  #token-modal input[type=password]:focus {
-    outline: none; border-color: var(--cyan);
-  }
-  #token-modal .actions {
-    display: flex; gap: 0.6rem; justify-content: flex-end;
-    margin-top: 1.1rem; padding-top: 0.85rem;
-    border-top: 1px solid var(--border);
-  }
-  #token-modal .actions button {
-    font: inherit; font-size: var(--fs-md);
-    line-height: 1.4;
-    padding: 0.45rem 1rem;
-    min-height: 2.25rem;
-    border-radius: 4px;
-    cursor: pointer;
-    background: var(--input-bg);
-    color: var(--fg);
-    border: 1px solid var(--border);
-  }
-  #token-modal .actions button:hover { background: #21262d; color: var(--bold); }
-  #token-modal .actions button.primary {
-    color: var(--green); border-color: var(--green);
-  }
-
   /* ---- Capture grouping ----
    * Selection state lives in JS and projects to per-row .selected CSS.
    * The sticky action bar appears when ≥1 row is selected; Σ duration
@@ -3525,19 +3475,6 @@ _CAPTURES_HTML = r"""<!doctype html>
   </div>
 </div>
 
-<div id="token-modal">
-  <div class="box">
-    <h3>API key</h3>
-    <p>Paste your <code>wk_…</code> API key. You'll stay signed in on this
-    browser until you sign out.</p>
-    <input id="token-input" type="password" autocomplete="off" placeholder="wk_…">
-    <div class="actions">
-      <button id="token-cancel">Cancel</button>
-      <button id="token-save" class="primary">Save</button>
-    </div>
-  </div>
-</div>
-
 <div id="toast"></div>
 
 {{SCALE_PICKER_JS}}
@@ -3552,43 +3489,9 @@ _CAPTURES_HTML = r"""<!doctype html>
   // real cap instead of a stale literal.
   var SAMPLE_CAP_S = {{SAMPLE_CAP_S}};
 
-  // -------------------------------------------------------------------
-  // Sign-in (HttpOnly session cookie; mirrors /reports)
-  // -------------------------------------------------------------------
-  // Exchange a pasted key for the session cookie. Returns true on success.
-  async function doLogin(key) {
-    try {
-      var r = await fetch('/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key: key }),
-      });
-      if (!r.ok) return false;
-      try { window.dispatchEvent(new Event('whisper:auth-changed')); } catch(_) {}
-      return true;
-    } catch (_) { return false; }
-  }
-  function showTokenModal(onSaved) {
-    var m = document.getElementById('token-modal');
-    var inp = document.getElementById('token-input');
-    inp.value = '';
-    m.classList.add('show');
-    setTimeout(function() { inp.focus(); inp.select(); }, 50);
-    function close() { m.classList.remove('show'); }
-    document.getElementById('token-cancel').onclick = close;
-    document.getElementById('token-save').onclick = async function() {
-      if (await doLogin(inp.value.trim())) {
-        close();
-        if (onSaved) onSaved();
-      } else {
-        toast('that key was rejected', true);
-      }
-    };
-    inp.onkeydown = function(e) {
-      if (e.key === 'Enter') document.getElementById('token-save').click();
-      if (e.key === 'Escape') close();
-    };
-  }
+  // Sign-in is handled by the shared full-screen login gate (web_common):
+  // on a 401 we call window._showLoginGate(), which prompts for a key and
+  // reloads the page on success.
 
   // -------------------------------------------------------------------
   // Toast
@@ -3651,11 +3554,8 @@ _CAPTURES_HTML = r"""<!doctype html>
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     if (resp.status === 401) {
-      // After the user pastes a key, re-run load() so the page actually
-      // populates (and body.role-admin gets added). Without this the
-      // modal save closed the dialog but left the page stuck on the
-      // static toolbar with admin nav hidden.
-      showTokenModal(function() { load(); });
+      // Shared login gate prompts + reloads on success (which re-runs load()).
+      if (window._showLoginGate) window._showLoginGate();
       throw new Error('unauthorized');
     }
     if (resp.status === 403) {
@@ -4108,7 +4008,7 @@ _CAPTURES_HTML = r"""<!doctype html>
     // transcoded on write), so browser decode is reliable cross-platform.
     fetch('/captures/api/' + encodeURIComponent(r.id) + '/audio').then(function(resp) {
       if (resp.status === 401) {
-        showTokenModal(function() { toast('Re-open the row to load audio.'); });
+        if (window._showLoginGate) window._showLoginGate();
         throw new Error('unauthorized');
       }
       if (resp.status === 410) throw new Error('audio file is gone');
@@ -4986,7 +4886,7 @@ _CAPTURES_HTML = r"""<!doctype html>
   function onExport() {
     fetch('/captures/api/export?only_status=ready&include_audio=1').then(function(resp) {
       if (resp.status === 401) {
-        showTokenModal(function() { onExport(); });
+        if (window._showLoginGate) window._showLoginGate();
         throw new Error('unauthorized');
       }
       if (!resp.ok) throw new Error('HTTP ' + resp.status);

@@ -1146,16 +1146,6 @@ _SETTINGS_VIEWER_HTML = r"""<!doctype html>
   .modal-actions { display: flex; gap: 0.5rem; justify-content: flex-end;
     margin-top: 0.875rem; flex-wrap: wrap; }
   .modal-actions button { padding: 0.3125rem 0.75rem; }
-  .login { max-width: 30rem; margin: 3.75rem auto; background: var(--panel);
-    border: 1px solid var(--border); border-radius: 6px; padding: 1.25rem 1.5rem; }
-  .login h1 { color: var(--bold); margin: 0 0 0.375rem; font-size: var(--fs-xl); }
-  .login p { color: var(--dim); margin: 0.375rem 0 0.75rem; }
-  .login input { width: 100%; box-sizing: border-box; background: var(--input-bg);
-    color: var(--fg); border: 1px solid var(--border); padding: 0.5rem;
-    border-radius: 4px; font-size: inherit; line-height: inherit; }
-  .login button { margin-top: 0.625rem; background: #238636; border: 1px solid #2ea043;
-    color: var(--bold); padding: 0.4375rem 0.875rem; border-radius: 4px; cursor: pointer;
-    font: inherit; }
   #toast { position: fixed; bottom: 1rem; right: 1rem; background: var(--panel);
     border: 1px solid var(--border); border-radius: 4px; padding: 0.5rem 0.75rem;
     color: var(--fg); display: none; }
@@ -1336,17 +1326,7 @@ _SETTINGS_VIEWER_HTML = r"""<!doctype html>
 </style></head>
 <body>
 
-<div id="login-wrap" class="login" style="display:none">
-  <h1>faster-whisper-backend · admin</h1>
-  <p>Paste your <strong>API key</strong> to continue. Keys are issued in
-  <code>/settings/api-keys</code> by an admin. You'll stay signed in on this
-  browser until you sign out.</p>
-  <input id="login-token" type="password" autocomplete="off" placeholder="wk_…">
-  <button id="login-btn">Unlock</button>
-  <p id="login-err" class="err"></p>
-</div>
-
-<div id="app-wrap" style="display:none">
+<div id="app-wrap">
   <header>
     <div class="header-inner">
       <span class="title">{{HEADER_BRAND}}</span>
@@ -1422,39 +1402,24 @@ async function api(method, path, body) {
   }
   const r = await fetch(path, opts);
   if (r.status === 401) {
-    window.dispatchEvent(new Event('whisper:auth-changed'));
-    showLogin('session expired — sign in again');
+    // Shared full-screen login gate (web_common) prompts + reloads on success.
+    if (window._showLoginGate) window._showLoginGate('Session expired — sign in again.');
   }
   return r;
 }
 
-function showLogin(errMsg) {
-  $('login-wrap').style.display = '';
-  $('app-wrap').style.display = 'none';
-  $('login-err').textContent = errMsg || '';
-}
-
-function showApp() {
-  $('login-wrap').style.display = 'none';
-  $('app-wrap').style.display = '';
-}
-
 async function loadState() {
   const r = await api('GET', '/settings/state');
-  if (r.status === 401) return;  // showLogin already called
+  if (r.status === 401) return;  // the shared login gate is already showing
   if (r.status === 403 && typeof _renderNoAccessLanding === 'function') {
     // Valid bearer but no admin scope — render the shared landing
     // instead of falling through to the generic toast (which would
     // leave the page blank). Refresh whoami so the landing can list
-    // pages this user CAN reach. showApp() is mandatory: <main> lives
-    // inside #app-wrap which is display:none until showApp flips it;
-    // rendering into a hidden subtree leaves the user with a blank
-    // page on F5 reload.
+    // pages this user CAN reach.
     try {
       const w = await fetch('/auth/whoami');
       if (w.ok) window.__whoami = await w.json();
     } catch (_) {}
-    showApp();
     _renderNoAccessLanding({ page: 'config' });
     return;
   }
@@ -4232,26 +4197,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.addEventListener('admin:dirty', (e) => {
     if (e && e.detail && e.detail.name) refreshFieldReset(e.detail.name);
   });
-  $('login-btn').addEventListener('click', async () => {
-    const t = $('login-token').value.trim();
-    if (!t) return;
-    let r;
-    try {
-      r = await fetch('/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key: t }),
-      });
-    } catch (_) { showLogin('network error — try again'); return; }
-    if (!r.ok) { showLogin('that key was rejected'); return; }
-    $('login-token').value = '';
-    window.dispatchEvent(new Event('whisper:auth-changed'));
-    showApp();
-    await loadState();
-  });
-  $('login-token').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') $('login-btn').click();
-  });
+  // Sign-in is handled by the shared full-screen login gate (web_common):
+  // a 401 from loadState()/api() shows it; it prompts + reloads on success.
   // #logout-btn + #reload-btn are wired globally in OPEN_MODE_BANNER_JS;
   // expose this page's soft refresh (re-fetch config) as the reload hook.
   window._pageReload = loadState;
@@ -4285,22 +4232,19 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Probe the state endpoint to figure out whether a sign-in is required.
   const probe = await fetch('/settings/state', { cache: 'no-store' });
   if (probe.status === 401) {
-    showLogin('Sign in to continue.');
+    // Shared full-screen login gate prompts + reloads on success.
+    if (window._showLoginGate) window._showLoginGate('Sign in to continue.');
     return;
   }
   if (probe.status === 403) {
     // 403 with a presented bearer = signed-in but not admin. Render the
-    // shared no-access landing. CRITICAL: the landing replaces <main>'s
-    // innerHTML, but <main> lives inside `#app-wrap` which is hidden by
-    // default — so we must call showApp() first or the landing renders
-    // into a display:none subtree and the user sees a blank page.
+    // shared no-access landing (#app-wrap is always visible now).
     try {
       const wr = await fetch('/auth/whoami');
       if (wr.ok) {
         const wj = await wr.json();
         try { window.__whoami = wj; } catch (_) {}
         if (wj && wj.is_admin === false) {
-          showApp();
           _renderNoAccessLanding({ page: 'config' });
           return;
         }
@@ -4313,7 +4257,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       + 'Check service logs.</main>';
     return;
   }
-  showApp();
   await loadState();
 });
 

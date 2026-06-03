@@ -581,20 +581,6 @@ _API_KEYS_HTML = r"""<!doctype html>
   </div>
 </div>
 
-<!-- API key prompt -->
-<div id="token-modal" class="modal">
-  <div class="box">
-    <h3>Admin API key</h3>
-    <p>Paste your <code>wk_&hellip;</code> admin key to manage users and
-    keys. In OPEN mode (no admin key configured yet) any value works.</p>
-    <input id="token-input" type="password" placeholder="wk_&hellip;">
-    <p id="token-err" class="err"></p>
-    <div class="actions">
-      <button id="token-cancel">Cancel</button>
-      <button id="token-save" class="primary">Save</button>
-    </div>
-  </div>
-</div>
 
 {{SCALE_PICKER_JS}}
 {{SEV_POLLER_JS}}
@@ -604,21 +590,8 @@ _API_KEYS_HTML = r"""<!doctype html>
 (function() {
   'use strict';
 
-  // Exchange a pasted key for an HttpOnly session cookie. Returns true on
-  // success. Dispatches whisper:auth-changed so the shared chrome refreshes.
-  async function doLogin(key) {
-    try {
-      var r = await fetch('/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key: key }),
-      });
-      if (!r.ok) return false;
-      try { window.dispatchEvent(new Event('whisper:auth-changed')); } catch(_) {}
-      return true;
-    } catch (_) { return false; }
-  }
-
+  // Sign-in is handled by the shared full-screen login gate (web_common):
+  // on a 401 we call window._showLoginGate(), which prompts + reloads.
   async function api(method, path, body) {
     // The HttpOnly session cookie is sent automatically; mutations also
     // carry the double-submit CSRF token.
@@ -676,37 +649,6 @@ _API_KEYS_HTML = r"""<!doctype html>
     setTimeout(function(){ el.style.display = 'none'; }, 3000);
   }
 
-
-  function showTokenModal() {
-    return new Promise(function(resolve){
-      var m = document.getElementById('token-modal');
-      var inp = document.getElementById('token-input');
-      var err = document.getElementById('token-err');
-      err.textContent = '';
-      inp.value = '';
-      m.classList.add('show');
-      setTimeout(function(){ inp.focus(); }, 50);
-      function done(v) {
-        m.classList.remove('show');
-        document.getElementById('token-save').onclick = null;
-        document.getElementById('token-cancel').onclick = null;
-        inp.onkeydown = null;
-        resolve(v);
-      }
-      document.getElementById('token-save').onclick = function() {
-        var v = inp.value.trim();
-        if (!v) { err.textContent = 'Empty value'; return; }
-        done(v);
-      };
-      document.getElementById('token-cancel').onclick = function() {
-        done(null);
-      };
-      inp.onkeydown = function(e) {
-        if (e.key === 'Enter') document.getElementById('token-save').click();
-        if (e.key === 'Escape') document.getElementById('token-cancel').click();
-      };
-    });
-  }
 
   function showKeyModal(rawKey, username) {
     document.getElementById('key-modal-user').textContent = username;
@@ -1191,23 +1133,9 @@ _API_KEYS_HTML = r"""<!doctype html>
   async function load() {
     var r = await api('GET', '/settings/api-keys/api/users');
     if (r.status === 401) {
-      var v = await showTokenModal();
-      if (!v) return;
-      // The typed key wasn't recognised → the login request itself fails.
-      if (!(await doLogin(v))) {
-        document.getElementById('token-err').textContent = 'invalid key';
-        return;
-      }
-      r = await api('GET', '/settings/api-keys/api/users');
-      // 403 after a valid session = "valid key, no admin scope" — render
-      // the no-access landing rather than re-prompting.
-      if (r.status === 403 && await _check403(r)) return;
-      // Other non-2xx (5xx, network): surface the status without
-      // nuking the bearer.
-      if (!r.ok) {
-        showToast('Load failed: HTTP ' + r.status, 'err');
-        return;
-      }
+      // Shared login gate prompts + reloads on success (which re-runs load()).
+      if (window._showLoginGate) window._showLoginGate();
+      return;
     }
     if (await _check403(r)) return;
     if (!r.ok) {

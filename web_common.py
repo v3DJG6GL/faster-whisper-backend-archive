@@ -571,6 +571,87 @@ header .page-link.allowed { display: inline-flex; }
     transition: transform .18s ease; }
   header.nav-open .nav-backdrop { display: block; }
 }
+
+/* ── Unified login gate ─────────────────────────────────────────────────────
+   Full-viewport authentication screen shown by OPEN_MODE_BANNER_JS whenever
+   /auth/whoami 401s (locked-down + no session). Opaque cover → the page behind
+   it stays hidden until the user authenticates, exactly like the old /settings
+   login card, but shared by every page. Terminal-dark + the waveform brand,
+   with one signature moment: the logo's bars rise on load. */
+#login-gate[hidden] { display: none; }
+#login-gate {
+  position: fixed; inset: 0; z-index: 9999;
+  display: flex; align-items: center; justify-content: center; padding: 2rem;
+  background-color: #0b0e14;
+  background-image:
+    radial-gradient(120% 80% at 50% -10%, rgba(121,192,255,0.12), transparent 60%),
+    radial-gradient(90% 60% at 50% 112%, rgba(126,231,135,0.09), transparent 60%);
+  font-family: var(--font-mono);
+  animation: lg-fade .25s ease-out;
+}
+@keyframes lg-fade { from { opacity: 0 } to { opacity: 1 } }
+#login-gate .lg-card {
+  position: relative; width: 27rem; max-width: 100%;
+  background: rgba(22,27,34,0.74);
+  border: 1px solid var(--border, #30363d); border-radius: 0.9rem;
+  padding: 2.4rem 2.2rem 1.9rem;
+  box-shadow: 0 1.5rem 4rem rgba(0,0,0,0.6), 0 0 0 1px rgba(121,192,255,0.05);
+  -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+  animation: lg-card-in .42s cubic-bezier(.2,.8,.2,1) both;
+}
+@keyframes lg-card-in { from { opacity: 0; transform: translateY(0.8rem) } to { opacity: 1; transform: none } }
+#login-gate .lg-brand { display: flex; flex-direction: column; align-items: center; gap: 0.85rem; }
+#login-gate .lg-mark { width: 4.5rem; height: 4.5rem; flex-shrink: 0;
+  filter: drop-shadow(0 0 1.2rem rgba(121,192,255,0.22)); }
+#login-gate .lg-bar { transform-box: fill-box; transform-origin: center bottom;
+  animation: lg-bar-rise .55s ease-out backwards; }
+#login-gate .lg-bar:nth-child(1) { animation-delay: .06s }
+#login-gate .lg-bar:nth-child(2) { animation-delay: .13s }
+#login-gate .lg-bar:nth-child(3) { animation-delay: .20s }
+#login-gate .lg-bar:nth-child(4) { animation-delay: .27s }
+#login-gate .lg-bar:nth-child(5) { animation-delay: .34s }
+@keyframes lg-bar-rise { from { transform: scaleY(0.12); opacity: .35 } to { transform: scaleY(1); opacity: 1 } }
+#login-gate .lg-word { font-size: 1.5rem; font-weight: 700; line-height: 1; white-space: nowrap; }
+#login-gate .lg-word .lg-a { color: #6e7681; font-weight: 400; }
+#login-gate .lg-word .lg-b { color: #f0f6fc; }
+#login-gate .lg-word .lg-sep { color: #7ee787; margin: 0 0.32rem; }
+#login-gate .lg-word .lg-c { color: #8b949e; font-weight: 500;
+  letter-spacing: 0.18em; text-transform: uppercase; font-size: 0.62em; }
+#login-gate .lg-sub { text-align: center; color: var(--help, #8b949e);
+  font-size: var(--fs-sm); margin: 1.15rem 0 1.5rem; letter-spacing: 0.05em; }
+#login-gate .lg-field { display: flex; align-items: center; gap: 0.55rem;
+  background: #0d1117; border: 1px solid var(--border, #30363d); border-radius: 0.5rem;
+  padding: 0 0.7rem; transition: border-color .15s ease, box-shadow .15s ease; }
+#login-gate .lg-field:focus-within { border-color: var(--cyan, #79c0ff);
+  box-shadow: 0 0 0 0.18rem rgba(121,192,255,0.18); }
+#login-gate .lg-prompt { color: #7ee787; font-size: var(--fs-md); }
+#login-gate #lg-input { flex: 1; min-width: 0; background: transparent; border: 0;
+  outline: none; color: var(--fg, #f0f6fc); font-family: var(--font-mono);
+  font-size: var(--fs-md); padding: 0.62rem 0; letter-spacing: 0.05em; }
+#login-gate #lg-input::placeholder { color: #586069; }
+#login-gate .lg-btn { width: 100%; margin-top: 1rem; padding: 0.7rem 1rem;
+  background: linear-gradient(135deg, rgba(121,192,255,0.16), rgba(126,231,135,0.16));
+  color: #7ee787; border: 1px solid #2ea043; border-radius: 0.5rem;
+  font-family: var(--font-mono); font-size: var(--fs-md); font-weight: 700;
+  letter-spacing: 0.08em; cursor: pointer;
+  transition: transform .1s ease, background .15s ease, box-shadow .15s ease; }
+#login-gate .lg-btn:hover { transform: translateY(-1px);
+  background: linear-gradient(135deg, rgba(121,192,255,0.24), rgba(126,231,135,0.24));
+  box-shadow: 0 0.4rem 1.2rem rgba(46,160,67,0.25); }
+#login-gate .lg-btn:active { transform: translateY(0); }
+#login-gate .lg-btn:disabled { opacity: 0.55; cursor: default; transform: none; box-shadow: none; }
+#login-gate .lg-err { min-height: 1.1rem; margin: 0.7rem 0 0; text-align: center;
+  color: var(--red, #f85149); font-size: var(--fs-sm); }
+#login-gate .lg-hint { margin: 1.35rem 0 0; text-align: center; color: #6e7681;
+  font-size: var(--fs-xs); line-height: 1.5; }
+#login-gate .lg-hint code { color: var(--cyan, #79c0ff); font-family: var(--font-mono); }
+@keyframes lg-shake {
+  10%,90% { transform: translateX(-1px) } 20%,80% { transform: translateX(2px) }
+  30%,50%,70% { transform: translateX(-4px) } 40%,60% { transform: translateX(4px) } }
+#login-gate .lg-card.lg-shake { animation: lg-shake .4s ease both; }
+@media (prefers-reduced-motion: reduce) {
+  #login-gate, #login-gate .lg-card, #login-gate .lg-bar { animation: none !important; }
+}
 """
 
 
@@ -795,6 +876,101 @@ OPEN_MODE_BANNER_JS = r"""
     } catch(_) { done(); }
   };
 
+  // ---- Unified login gate ----
+  // One full-screen auth screen shared by every page (replaces the old
+  // per-page #token-modal / #login-wrap). Lazily injected on first show; its
+  // opaque cover hides the page until the user authenticates. _showLoginGate
+  // is called by _refreshAuthChrome on a whoami-401 and by per-page 401
+  // handlers; on success we reload so the page re-renders authenticated.
+  var LG_HTML =
+    '<div id="login-gate" role="dialog" aria-modal="true" aria-label="Sign in" hidden>'
+  +   '<div class="lg-card">'
+  +     '<div class="lg-brand">'
+  +       '<svg class="lg-mark" viewBox="0 0 120 120" aria-hidden="true">'
+  +         '<defs><linearGradient id="lg-fw" x1="0" y1="0" x2="1" y2="1">'
+  +         '<stop offset="0" stop-color="#79c0ff"/><stop offset="1" stop-color="#7ee787"/>'
+  +         '</linearGradient></defs>'
+  +         '<rect x="6" y="6" width="108" height="108" rx="26" fill="#161b22" stroke="#30363d" stroke-width="2"/>'
+  +         '<g transform="translate(13 2) skewX(-9)" fill="url(#lg-fw)">'
+  +           '<rect class="lg-bar" x="16" y="74" width="11" height="20" rx="5.5"/>'
+  +           '<rect class="lg-bar" x="35" y="52" width="11" height="42" rx="5.5"/>'
+  +           '<rect class="lg-bar" x="54" y="22" width="11" height="72" rx="5.5"/>'
+  +           '<rect class="lg-bar" x="73" y="44" width="11" height="50" rx="5.5"/>'
+  +           '<rect class="lg-bar" x="92" y="66" width="11" height="28" rx="5.5"/>'
+  +         '</g>'
+  +       '</svg>'
+  +       '<div class="lg-word"><span class="lg-a">faster</span><span class="lg-b">whisper</span>'
+  +       '<span class="lg-sep">&rsaquo;</span><span class="lg-c">backend</span></div>'
+  +     '</div>'
+  +     '<p class="lg-sub">Authenticate to continue</p>'
+  +     '<form class="lg-form" autocomplete="off">'
+  +       '<div class="lg-field"><span class="lg-prompt" aria-hidden="true">&#9656;</span>'
+  +       '<input id="lg-input" type="password" placeholder="wk_…" autocomplete="off" '
+  +       'spellcheck="false" aria-label="API key"></div>'
+  +       '<button id="lg-submit" type="submit" class="lg-btn">Authenticate</button>'
+  +       '<p id="lg-err" class="lg-err" role="alert"></p>'
+  +     '</form>'
+  +     '<p class="lg-hint">Keys are issued per user in <code>/settings/api-keys</code>.</p>'
+  +   '</div>'
+  + '</div>';
+
+  function _lgError(card, err, msg) {
+    if (err) err.textContent = msg || '';
+    if (!card) return;
+    card.classList.remove('lg-shake');
+    void card.offsetWidth;           // reflow → restart the shake animation
+    card.classList.add('lg-shake');
+  }
+
+  function _ensureLoginGate() {
+    var g = document.getElementById('login-gate');
+    if (g) return g;
+    var holder = document.createElement('div');
+    holder.innerHTML = LG_HTML;
+    g = holder.firstChild;
+    (document.body || document.documentElement).appendChild(g);
+    var form = g.querySelector('.lg-form');
+    var input = g.querySelector('#lg-input');
+    var err = g.querySelector('#lg-err');
+    var btn = g.querySelector('#lg-submit');
+    var card = g.querySelector('.lg-card');
+    form.addEventListener('submit', function(ev) {
+      ev.preventDefault();
+      var key = (input.value || '').trim();
+      if (!key) { _lgError(card, err, 'Enter your API key.'); input.focus(); return; }
+      btn.disabled = true; btn.textContent = 'Authenticating…'; err.textContent = '';
+      fetch('/auth/login', {
+        method: 'POST', cache: 'no-store',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: key }),
+      })
+        .then(function(r) { if (!r.ok) throw 0; })
+        .then(function() {
+          try { window.dispatchEvent(new Event('whisper:auth-changed')); } catch(_) {}
+          location.reload();
+        })
+        .catch(function() {
+          btn.disabled = false; btn.textContent = 'Authenticate';
+          _lgError(card, err, 'That key was rejected.');
+          input.focus(); input.select();
+        });
+    });
+    return g;
+  }
+
+  window._showLoginGate = function(msg) {
+    var g = _ensureLoginGate();
+    var err = g.querySelector('#lg-err');
+    if (err) err.textContent = msg || '';
+    g.hidden = false;
+    var input = g.querySelector('#lg-input');
+    setTimeout(function() { try { input.focus(); } catch(_) {} }, 30);
+  };
+  window._hideLoginGate = function() {
+    var g = document.getElementById('login-gate');
+    if (g) g.hidden = true;
+  };
+
   // Single source of truth for "what does the current bearer let me see?".
   // Idempotent: clears nav chrome first, then re-applies based on a fresh
   // /auth/whoami. Called once on page load AND on every `whisper:auth-changed`
@@ -819,14 +995,18 @@ OPEN_MODE_BANNER_JS = r"""
       .then(function(j){
         if (!j) {
           // 401 (locked-down + no/invalid session). Leave chrome cleared
-          // and drop the cached whoami so stale permissions don't linger.
+          // and drop the cached whoami so stale permissions don't linger,
+          // then show the shared login gate so the user can authenticate.
           try { delete window.__whoami; } catch(_) {}
           _syncAuthActions();
+          try { window._showLoginGate(); } catch(_) {}
           return;
         }
         // Cache the whoami payload so pages that want to consult
         // permissions later (e.g. for inline scope hints) don't re-fetch.
         try { window.__whoami = j; } catch(_) {}
+        // Authenticated (or open mode): make sure the login gate is gone.
+        try { window._hideLoginGate(); } catch(_) {}
         // Logout-button visibility tracks login state; the HttpOnly cookie
         // isn't JS-readable, so this is driven by whoami, not storage.
         _syncAuthActions();
