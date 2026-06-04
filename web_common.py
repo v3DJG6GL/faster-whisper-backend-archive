@@ -145,6 +145,33 @@ def severity_counts() -> dict[str, int]:
     return {"warn": warn, "err": err, "crit": crit}
 
 
+# --- Server-Sent Events ------------------------------------------------------
+
+# Headers every SSE endpoint must send so a buffering reverse proxy streams the
+# response instead of accumulating it. Without these, nginx (proxy_buffering on
+# by default) holds an infinite text/event-stream body until its buffers/timeout
+# fire, then severs the HTTP/2 stream mid-body — Firefox reports
+# NS_ERROR_NET_PARTIAL_TRANSFER and the page reconnects every few seconds.
+#   X-Accel-Buffering: no  — nginx disables buffering for THIS response even when
+#                            proxy_buffering is on globally (the decisive header).
+#   Cache-Control: no-cache, no-transform — no proxy cache; no gzip rewrite (gzip
+#                            buffers to compress, which also breaks SSE).
+# Connection is intentionally omitted: it's hop-by-hop, managed by uvicorn/nginx;
+# setting it from ASGI is ignored.
+SSE_HEADERS = {
+    "Cache-Control": "no-cache, no-transform",
+    "X-Accel-Buffering": "no",
+}
+
+
+def sse_response(generator):
+    """StreamingResponse preconfigured for proxy-safe Server-Sent Events."""
+    from fastapi.responses import StreamingResponse
+    return StreamingResponse(
+        generator, media_type="text/event-stream", headers=dict(SSE_HEADERS),
+    )
+
+
 # --- Nav row + severity pills ------------------------------------------------
 
 # Inline CSS so each page can drop the nav into its existing <header> without

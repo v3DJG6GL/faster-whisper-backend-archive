@@ -2497,23 +2497,29 @@ _LOG_VIEWER_HTML = """<!doctype html>
       // intermittent 401 where the cookie wasn't attached to the SSE
       // handshake). Mirror /stats: poll a cheap endpoint until it 200s,
       // then reopen the stream.
+      // Back off on repeated failures (3s → ×1.7 → cap 30s).
       if (_logRecoveryTimer) return;
-      _logRecoveryTimer = setInterval(async () => {
+      let delay = 3000;
+      const probe = async () => {
         try {
           const r = await fetch('/v1/models', { cache: 'no-store' });
           if (r.ok) {
-            clearInterval(_logRecoveryTimer);
+            clearTimeout(_logRecoveryTimer);
             _logRecoveryTimer = null;
             openLogStream();
+            return;
           }
         } catch (_) { /* keep polling */ }
-      }, 3000);
+        delay = Math.min(delay * 1.7, 30000);
+        _logRecoveryTimer = setTimeout(probe, delay);
+      };
+      _logRecoveryTimer = setTimeout(probe, delay);
     };
     es.onopen = () => {
       // role-admin used to be added here unconditionally — that leaked
       // admin chrome to non-admins. OPEN_MODE_BANNER_JS is now the single
       // source of truth (sets role-admin iff whoami.is_admin=true).
-      if (_logRecoveryTimer) { clearInterval(_logRecoveryTimer); _logRecoveryTimer = null; }
+      if (_logRecoveryTimer) { clearTimeout(_logRecoveryTimer); _logRecoveryTimer = null; }
       if (!paused) {
         statusEl.textContent = 'live';
         statusEl.className = 'pill live';
@@ -2612,7 +2618,8 @@ async def logs_viewer():
     dependencies=[Depends(require_user_webui_host), Depends(_require_logs_page_sse)],
 )
 async def logs_stream():
-    return StreamingResponse(_stream_log_lines(), media_type="text/event-stream")
+    import web_common
+    return web_common.sse_response(_stream_log_lines())
 
 
 @app.get(

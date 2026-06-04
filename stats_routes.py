@@ -245,7 +245,7 @@ async def stats_stream() -> StreamingResponse:
             yield f"data: {json.dumps(payload)}\n\n"
             await asyncio.sleep(1.0)
 
-    return StreamingResponse(gen(), media_type="text/event-stream")
+    return web_common.sse_response(gen())
 
 
 # --- HTML template -----------------------------------------------------------
@@ -1032,21 +1032,27 @@ function openStream() {
   es.onerror = () => {
     setStatus('reconnecting…', 'paused');
     // Service may have restarted. Mirror /settings: poll a cheap idempotent
-    // endpoint until it 200s, then force-reopen the SSE.
+    // endpoint until it 200s, then force-reopen the SSE. Back off on repeated
+    // failures (1.5s → ×1.7 → cap 30s) so a genuine outage doesn't hammer.
     if (recoveryTimer) return;
-    recoveryTimer = setInterval(async () => {
+    let delay = 1500;
+    const probe = async () => {
       try {
         const r = await fetch('/v1/models', { cache: 'no-store' });
         if (r.ok) {
-          clearInterval(recoveryTimer);
+          clearTimeout(recoveryTimer);
           recoveryTimer = null;
           // Drop history — server uptime jumped, the gap would be misleading.
           histX.length = 0;
           for (const k in hist) hist[k].length = 0;
           openStream();
+          return;
         }
       } catch {}
-    }, 1500);
+      delay = Math.min(delay * 1.7, 30000);
+      recoveryTimer = setTimeout(probe, delay);
+    };
+    recoveryTimer = setTimeout(probe, delay);
   };
 }
 

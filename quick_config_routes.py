@@ -616,7 +616,7 @@ async def stream_recent(
         finally:
             quick_config_state.unsubscribe(q)
 
-    return StreamingResponse(gen(), media_type="text/event-stream")
+    return web_common.sse_response(gen())
 
 
 _QUICK_CONFIG_HTML = r"""<!doctype html>
@@ -1908,7 +1908,7 @@ function startStream() {
   });
   _es.onopen = () => {
     // A successful (re)connect ends any recovery polling and restores the label.
-    if (_recoveryTimer) { clearInterval(_recoveryTimer); _recoveryTimer = null; }
+    if (_recoveryTimer) { clearTimeout(_recoveryTimer); _recoveryTimer = null; }
     _setRecentLabel('persistent · paginated');
   };
   _es.onerror = () => {
@@ -1917,19 +1917,25 @@ function startStream() {
     // the SSE handshake) — it fails the connection permanently. Mirror the
     // /stats recovery: poll a cheap cookie-authed endpoint until it 200s,
     // then catch up via reloadRecent() (deduped) and reopen the stream.
+    // Back off on repeated failures (3s → ×1.7 → cap 30s).
     _setRecentLabel('reconnecting…');
     if (_recoveryTimer) return;
-    _recoveryTimer = setInterval(async () => {
+    let delay = 3000;
+    const probe = async () => {
       try {
         const r = await api('GET', '/quick-config/recent?limit=1');
         if (r.ok) {
-          clearInterval(_recoveryTimer);
+          clearTimeout(_recoveryTimer);
           _recoveryTimer = null;
           await reloadRecent();
           startStream();
+          return;
         }
       } catch (_) { /* keep polling */ }
-    }, 3000);
+      delay = Math.min(delay * 1.7, 30000);
+      _recoveryTimer = setTimeout(probe, delay);
+    };
+    _recoveryTimer = setTimeout(probe, delay);
   };
 }
 
