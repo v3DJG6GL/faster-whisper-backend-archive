@@ -69,6 +69,30 @@ def test_save_load_roundtrip():
             os.unlink(path)
 
 
+def test_save_load_preserves_given_order():
+    """Rule order is persisted EXACTLY as given — not sorted or canonicalised.
+
+    This is the backend invariant the WebUI's "Promote order" action relies on:
+    the array we POST is the array config.json keeps.
+    """
+    path = _tmp_path()
+    try:
+        rules = [_regex_rule("gamma"), _regex_rule("alpha"),
+                 _regex_rule("beta"), _terminal()]
+        saved = cs.save_factory_rules(rules, path=path)
+        loaded = cs.load_factory_rules(path=path)
+        expected = ["gamma", "alpha", "beta", "trim-edges"]
+        assert [r["name"] for r in saved] == expected
+        assert [r["name"] for r in loaded] == expected
+        # sort_keys=False must leave the PIPELINE_RULES array order untouched.
+        with open(path, encoding="utf-8") as f:
+            raw = json.load(f)
+        assert [r["name"] for r in raw["PIPELINE_RULES"]] == expected
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
+
+
 def test_wrapped_object_shape():
     """The on-disk file is {schema_version, PIPELINE_RULES}, not a bare array."""
     path = _tmp_path()

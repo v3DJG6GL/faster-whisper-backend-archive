@@ -948,6 +948,8 @@ _SETTINGS_VIEWER_HTML = r"""<!doctype html>
   .rule-origin-badge.factory { color: var(--dim); }
   .rule-origin-badge.edited { color: var(--yellow); }
   .rule-origin-badge.local-only { color: var(--green); }
+  .rule-moved-badge { font-size: var(--fs-xs); font-family: var(--font-mono);
+    color: var(--cyan); white-space: nowrap; }
   /* Per-row + list-wide "promote to config.json" affordances */
   .promote-btn { background: none; border: 1px solid var(--cyan); color: var(--cyan);
     border-radius: 3px; padding: 0 0.375rem; cursor: pointer; font: inherit;
@@ -2745,12 +2747,32 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
     if (!base) return 'local-only';
     return _ruleContentEqual(rule, base) ? 'factory' : 'edited';
   }
+  // Name sequences (non-terminal) shared by the order-dirty check and the
+  // per-rule "moved" marker. Both compare the RELATIVE order of the rules
+  // common to config.json and the current list — rule order is functional
+  // here, never alphabetical, so these stay positional and are not collated.
+  function _factoryOrderSeq() {
+    return factoryRules.filter(b => b.type !== 'terminal').map(b => b.name);
+  }
+  function _curFactorySeq() {
+    return rules.filter(r => r.type !== 'terminal' && _factoryHas(r.name))
+                .map(r => r.name);
+  }
   function _seededOrderDirty() {
-    const baseOrder = factoryRules.filter(b => b.type !== 'terminal').map(b => b.name);
-    const curOrder = rules.filter(r => r.type !== 'terminal' && _factoryHas(r.name))
-                          .map(r => r.name);
-    return JSON.stringify(curOrder)
-         !== JSON.stringify(baseOrder.filter(n => curOrder.indexOf(n) >= 0));
+    const cur = _curFactorySeq();
+    const seen = new Set(cur);
+    const base = _factoryOrderSeq().filter(n => seen.has(n));   // config.json order, intersected
+    return JSON.stringify(cur) !== JSON.stringify(base);
+  }
+  // A factory-backed rule whose rank in the current list differs from its rank
+  // in config.json — same content, moved position. Local-only rules return
+  // false (they carry the local-only badge and never claim a config.json match).
+  function _ruleMoved(rule) {
+    if (!rule || rule.type === 'terminal' || !_factoryHas(rule.name)) return false;
+    const cur = _curFactorySeq();
+    const seen = new Set(cur);
+    const base = _factoryOrderSeq().filter(n => seen.has(n));
+    return base.indexOf(rule.name) !== cur.indexOf(rule.name);
   }
   function _paintBadge(el, st) {
     el.className = 'rule-origin-badge ' + st;
@@ -2780,6 +2802,8 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
       if (promotable) anyPromotable = true;
       const badge = r.querySelector('.rule-origin-badge');
       if (badge) _paintBadge(badge, st);
+      const mv = r.querySelector('.rule-moved-badge');
+      if (mv) mv.style.display = _ruleMoved(rule) ? '' : 'none';
       const pb = r.querySelector('.promote-btn');
       if (pb) pb.style.display = promotable ? '' : 'none';
       const btn = r.querySelector('.reset-link');
@@ -2789,6 +2813,9 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
     const orderDirty = _seededOrderDirty();
     if (resetOrderBtn) {
       resetOrderBtn.style.display = orderDirty ? '' : 'none';
+    }
+    if (promoteOrderBtn) {
+      promoteOrderBtn.style.display = orderDirty ? '' : 'none';
     }
     if (resetAllBtn) {
       resetAllBtn.style.display = (anyDirty || orderDirty) ? '' : 'none';
@@ -3128,6 +3155,15 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
       originBadge.className = 'rule-origin-badge';
       _paintBadge(originBadge, _ruleStatus(rule));
       headLine1.appendChild(originBadge);
+      // Position-diverged marker — same content as config.json but moved.
+      // Toggled live by refreshControlsVisibility.
+      const movedBadge = document.createElement('span');
+      movedBadge.className = 'rule-moved-badge';
+      movedBadge.textContent = '⇅ moved';
+      movedBadge.title = 'Same content as config.json, but in a different '
+        + 'position — use "⇪ Promote order" to update config.json.';
+      movedBadge.style.display = _ruleMoved(rule) ? '' : 'none';
+      headLine1.appendChild(movedBadge);
     }
 
     const expandBtn = document.createElement('button');
@@ -3445,6 +3481,18 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
   });
   ctrls.appendChild(resetOrderBtn);
 
+  // ⇪ Promote order — write the current pipeline ORDER into config.json
+  // (rule contents unchanged). Sibling of "↺ Reset order"; shown only when
+  // the seeded order diverges from config.json.
+  const promoteOrderBtn = document.createElement('button');
+  promoteOrderBtn.type = 'button';
+  promoteOrderBtn.className = 'promote-all-btn';
+  promoteOrderBtn.textContent = '⇪ Promote order';
+  promoteOrderBtn.title = 'Write the current pipeline ORDER into config.json (rule contents unchanged)';
+  promoteOrderBtn.style.display = 'none';
+  promoteOrderBtn.addEventListener('click', () => _promoteOrder());
+  ctrls.appendChild(promoteOrderBtn);
+
   const resetAllBtn = document.createElement('button');
   resetAllBtn.type = 'button';
   resetAllBtn.className = 'reset-link';
@@ -3649,6 +3697,28 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
       : '0 ' + label;
     return d;
   }
+  // Shared "pipeline order changed" element for the promote dialogs — lists
+  // the moved rules and the resulting order. Positional (pipeline) order,
+  // never collated: rule order is functional, not alphabetical.
+  function _orderChangeEl() {
+    const d = document.createElement('div');
+    d.className = 'promote-change-line';
+    const moved = rules.filter(r => r.type !== 'terminal' && _ruleMoved(r))
+                       .map(r => r.label || r.name);
+    if (!moved.length) {
+      d.textContent = 'Pipeline order unchanged';
+      return d;
+    }
+    const line1 = document.createElement('div');
+    line1.textContent = moved.length + ' rule(s) moved: ' + moved.join(', ');
+    const line2 = document.createElement('div');
+    line2.className = 'help';
+    line2.textContent = 'New order: '
+      + rules.filter(r => r.type !== 'terminal').map(r => r.label || r.name).join(' → ');
+    d.appendChild(line1);
+    d.appendChild(line2);
+    return d;
+  }
   function _unsavedNoteEl() {
     if (!_pipelineDirty()) return null;
     const w = document.createElement('div');
@@ -3657,6 +3727,35 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
       + 'config.json now; also use the page Save to apply them on THIS deployment '
       + '(or clear the local override after a "promote all").';
     return w;
+  }
+  // Build the full config.json array from the CURRENT pipeline order.
+  //   promoteSet : Set<name> whose CURRENT (edited/local) content to write;
+  //                factory-backed names NOT in the set keep their COMMITTED
+  //                content at their new position; local-only names not in the
+  //                set are skipped (config.json has no home for them).
+  //   keepAbsent : true -> re-append (before terminal) any config.json rule the
+  //                user deleted locally, so order/one-row promotes never
+  //                silently drop a committed rule. Promote-all passes false.
+  function _buildFactoryPayload(promoteSet, keepAbsent) {
+    const out = [];
+    let terminal = null;
+    rules.forEach(r => {
+      if (r.type === 'terminal') { terminal = r; return; }
+      if (promoteSet.has(r.name)) {
+        out.push(JSON.parse(JSON.stringify(r)));                    // promote current content
+      } else if (_factoryHas(r.name)) {
+        out.push(JSON.parse(JSON.stringify(_factoryRule(r.name)))); // committed content, new position
+      }                                                             // else local-only & not promoted -> skip
+    });
+    if (keepAbsent) {
+      factoryRules.forEach(b => {
+        if (b.type === 'terminal') return;
+        if (!out.some(o => o.name === b.name)) out.push(JSON.parse(JSON.stringify(b)));
+      });
+    }
+    const term = terminal || factoryRules.find(b => b.type === 'terminal');
+    if (term) out.push(JSON.parse(JSON.stringify(term)));           // terminal-last invariant
+    return out;
   }
   // POST the full intended config.json array; refresh factoryRules + repaint.
   async function _postFactory(arr) {
@@ -3714,18 +3813,11 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
       buttons: [
         { label: 'Cancel' },
         { label: 'Promote to config.json', primary: true, onClick: async (close) => {
-            const next = fresh.slice();
-            const i = next.findIndex(b => b.name === rule.name);
-            const promoted = JSON.parse(JSON.stringify(rule));
-            if (i >= 0) {
-              next[i] = promoted;
-            } else {
-              const tIdx = next.findIndex(b => b.type === 'terminal');
-              if (tIdx >= 0) next.splice(tIdx, 0, promoted);
-              else next.push(promoted);
-            }
             close();
-            const out = await _postFactory(next);
+            // Preserve the CURRENT pipeline order; promote only this rule's
+            // content. _buildFactoryPayload enforces terminal-last and the
+            // before-terminal placement of a newly-promoted local-only rule.
+            const out = await _postFactory(_buildFactoryPayload(new Set([rule.name]), true));
             if (out) _toast('Promoted to config.json — commit & push to ship it.');
           } },
       ],
@@ -3757,6 +3849,7 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
     body.appendChild(_changeListEl('edited', edited));
     body.appendChild(_changeListEl('added', added));
     body.appendChild(_changeListEl('removed from config.json', removed));
+    body.appendChild(_orderChangeEl());
     const note = _unsavedNoteEl();
     if (note) body.appendChild(note);
     _modal({
@@ -3767,6 +3860,34 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
         { label: 'Promote all', primary: true, onClick: async (close) => {
             close();
             const out = await _postFactory(JSON.parse(JSON.stringify(rules)));
+            if (out) _afterPromoteAll(out);
+          } },
+      ],
+    });
+  }
+  async function _promoteOrder() {
+    let fresh;
+    try { fresh = await _fetchFactory(); }
+    catch (e) { alert('Could not load config.json.'); return; }
+    factoryRules = fresh;
+    refreshControlsVisibility();
+    const body = document.createElement('div');
+    const intro = document.createElement('div');
+    intro.className = 'help';
+    intro.textContent = 'This rewrites config.json with your current rule ORDER. '
+      + 'Rule contents stay exactly as committed — only positions change.';
+    body.appendChild(intro);
+    body.appendChild(_orderChangeEl());
+    const note = _unsavedNoteEl();
+    if (note) body.appendChild(note);
+    _modal({
+      title: 'Promote pipeline order to config.json?',
+      bodyEl: body,
+      buttons: [
+        { label: 'Cancel' },
+        { label: 'Promote order', primary: true, onClick: async (close) => {
+            close();
+            const out = await _postFactory(_buildFactoryPayload(new Set(), true));
             if (out) _afterPromoteAll(out);
           } },
       ],

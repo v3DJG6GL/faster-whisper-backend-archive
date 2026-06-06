@@ -45,6 +45,69 @@ def test_post_factory_rules_non_list_400(client):
     assert r.status_code == 400
 
 
+def _seed_factory(monkeypatch, tmp_path, rules):
+    """Repoint config_store's factory file at a per-test temp config.json and
+    seed it with `rules`, so persisting factory-rules tests never clobber the
+    committed repo config.json. Mirrors conftest's OVERRIDES_PATH repoint:
+    FACTORY_PATH is a default ARG bound at def time, so each function's
+    __defaults__ is rewritten in addition to the module constant."""
+    import json
+    import config_store
+
+    tmp_factory = str(tmp_path / "factory_config.json")
+    with open(tmp_factory, "w", encoding="utf-8") as f:
+        json.dump({"schema_version": 1, "PIPELINE_RULES": rules}, f)
+    monkeypatch.setattr(config_store, "FACTORY_PATH", tmp_factory, raising=False)
+    for fn in (config_store.load_factory_rules, config_store.save_factory_rules):
+        defaults = list(fn.__defaults__ or ())
+        if defaults:
+            defaults[-1] = tmp_factory
+            monkeypatch.setattr(fn, "__defaults__", tuple(defaults), raising=False)
+    return tmp_factory
+
+
+def _rules(*names):
+    """A valid rule list: one regex rule per name, terminal rule last."""
+    out = [{"name": n, "label": n.title(), "type": "regex",
+            "pattern": n[0], "replacement": n[0].upper()} for n in names]
+    out.append({"name": "trim-edges", "label": "Trim edges", "type": "terminal"})
+    return out
+
+
+def test_post_factory_rules_preserves_order(client, tmp_path, monkeypatch):
+    """An order-only promote persists the posted order to config.json verbatim —
+    response, GET, and on-disk file all agree. (Backs the JS "Promote order".)"""
+    import json
+
+    tmp_factory = _seed_factory(monkeypatch, tmp_path, _rules("alpha", "beta", "gamma"))
+    reordered = _rules("gamma", "alpha", "beta")   # terminal stays last
+    r = client.post("/settings/factory-rules", json={"PIPELINE_RULES": reordered})
+    assert r.status_code == 200, r.text
+    expected = ["gamma", "alpha", "beta", "trim-edges"]
+    assert [x["name"] for x in r.json()["rules"]] == expected
+    g = client.get("/settings/factory-rules")
+    assert [x["name"] for x in g.json()["PIPELINE_RULES"]] == expected
+    with open(tmp_factory, encoding="utf-8") as f:
+        raw = json.load(f)
+    assert [x["name"] for x in raw["PIPELINE_RULES"]] == expected
+
+
+def test_post_factory_rules_reports_shadowed_by_local(client, tmp_path, monkeypatch):
+    """shadowed_by_local is False with no local PIPELINE_RULES override and True
+    once one exists — the flag the post-promote "clear local override" UX keys on."""
+    import config_store
+
+    _seed_factory(monkeypatch, tmp_path, _rules("alpha", "beta"))
+    r = client.post("/settings/factory-rules", json={"PIPELINE_RULES": _rules("beta", "alpha")})
+    assert r.status_code == 200, r.text
+    assert r.json()["shadowed_by_local"] is False
+
+    config_store.save_overrides({"PIPELINE_RULES": _rules("alpha", "beta")})
+    r2 = client.post("/settings/factory-rules", json={"PIPELINE_RULES": _rules("beta", "alpha")})
+    assert r2.status_code == 200, r2.text
+    assert r2.json()["shadowed_by_local"] is True
+
+
 def test_test_pipeline_dry_run(client):
     r = client.post(
         "/settings/test-pipeline",
