@@ -54,6 +54,19 @@
       "replacement": "\\1/\\2"
     },
     {
+      "name": "trim-trailing-period",
+      "label": "Trim Trailing Period",
+      "enabled": true,
+      "locked": false,
+      "seeded": true,
+      "exposed": false,
+      "tags": [],
+      "note": "",
+      "type": "regex",
+      "pattern": "\\s*\\.+\\s*$",
+      "replacement": ""
+    },
+    {
       "name": "strip-and-lowercase-non-noun",
       "label": "Strip + lowercase next non-noun",
       "enabled": true,
@@ -181,6 +194,32 @@
       "replacement": ""
     },
     {
+      "name": "split-merged-komma-off-preceding-noun",
+      "label": "Split merged 'Komma' off preceding noun",
+      "enabled": true,
+      "locked": false,
+      "seeded": true,
+      "exposed": false,
+      "tags": [],
+      "note": "",
+      "type": "regex",
+      "pattern": "\\b([A-ZÄÖÜ][a-zäöüß]{2,})komm?a\\b",
+      "replacement": "\\1 Komma"
+    },
+    {
+      "name": "1-2-split-dictation-words-from-german-compounds",
+      "label": "[1/2] Split dictation words from German compounds",
+      "enabled": true,
+      "locked": false,
+      "seeded": true,
+      "exposed": false,
+      "tags": [],
+      "note": "Wörter wie \"Eisenbindestrichinfusion\" auftrennen zu \"Eisen Bindestrich infusion\"",
+      "type": "regex",
+      "pattern": "(?i)\\Bbindestrich|bindestrich\\B",
+      "replacement": " Bindestrich "
+    },
+    {
       "name": "dictation-map",
       "label": "Dictation map",
       "enabled": true,
@@ -270,7 +309,59 @@
         "neuer Absätze": "\n\n",
         "neuer Apfel": "\n\n",
         "noch Ihr Absatz": "\n\n"
-      }
+      },
+      "map_meta": {}
+    },
+    {
+      "name": "2-2-capitalize-the-letter-after-a-hyphen",
+      "label": "[2/2] Capitalize the letter after a hyphen",
+      "enabled": true,
+      "locked": false,
+      "seeded": true,
+      "exposed": false,
+      "tags": [],
+      "note": "",
+      "type": "callback:upper",
+      "pattern": "(-)([a-zäöüß])"
+    },
+    {
+      "name": "tighten-digit-separators",
+      "label": "Tighten digit separators (/ - ,)",
+      "enabled": true,
+      "locked": false,
+      "seeded": true,
+      "exposed": false,
+      "tags": [],
+      "note": "",
+      "type": "regex",
+      "pattern": "(\\d)\\s*([/,\\-])\\s*(\\d)",
+      "replacement": "\\1\\2\\3"
+    },
+    {
+      "name": "merge-digit-pair-before",
+      "label": "Merge digit pair before / -",
+      "enabled": true,
+      "locked": false,
+      "seeded": true,
+      "exposed": false,
+      "tags": [],
+      "note": "",
+      "type": "regex",
+      "pattern": "(?<=\\d) +(?=\\d[/\\-])",
+      "replacement": ""
+    },
+    {
+      "name": "merge-digit-pair-after",
+      "label": "Merge digit pair after / -",
+      "enabled": true,
+      "locked": false,
+      "seeded": true,
+      "exposed": false,
+      "tags": [],
+      "note": "",
+      "type": "regex",
+      "pattern": "(?<=[/\\-]\\d) +(?=\\d)",
+      "replacement": ""
     },
     {
       "name": "space-before-closing-punct",
@@ -359,96 +450,6 @@
       "note": "",
       "type": "regex",
       "pattern": "(?:,|\\.)(- |-)",
-      "replacement": ""
-    },
-    {
-      "name": "merge-digit-pair-before",
-      "label": "Merge digit pair before / -",
-      "enabled": true,
-      "locked": false,
-      "seeded": true,
-      "exposed": false,
-      "tags": [],
-      "note": "",
-      "type": "regex",
-      "pattern": "(?<=\\d) +(?=\\d[/\\-])",
-      "replacement": ""
-    },
-    {
-      "name": "merge-digit-pair-after",
-      "label": "Merge digit pair after / -",
-      "enabled": true,
-      "locked": false,
-      "seeded": true,
-      "exposed": false,
-      "tags": [],
-      "note": "",
-      "type": "regex",
-      "pattern": "(?<=[/\\-]\\d) +(?=\\d)",
-      "replacement": ""
-    },
-    {
-      "name": "tighten-digit-separators",
-      "label": "Tighten digit separators (/ - ,)",
-      "enabled": true,
-      "locked": false,
-      "seeded": true,
-      "exposed": false,
-      "tags": [],
-      "note": "",
-      "type": "regex",
-      "pattern": "(\\d)\\s*([/,\\-])\\s*(\\d)",
-      "replacement": "\\1\\2\\3"
-    },
-    {
-      "name": "2-2-capitalize-the-letter-after-a-hyphen",
-      "label": "[2/2] Capitalize the letter after a hyphen",
-      "enabled": true,
-      "locked": false,
-      "seeded": true,
-      "exposed": false,
-      "tags": [],
-      "note": "",
-      "type": "callback:upper",
-      "pattern": "(-)([a-zäöüß])"
-    },
-    {
-      "name": "1-2-split-dictation-words-from-german-compounds",
-      "label": "[1/2] Split dictation words from German compounds",
-      "enabled": true,
-      "locked": false,
-      "seeded": true,
-      "exposed": false,
-      "tags": [],
-      "note": "Wörter wie \"Eisenbindestrichinfusion\" auftrennen zu \"Eisen Bindestrich infusion\"",
-      "type": "regex",
-      "pattern": "(?i)\\Bbindestrich|bindestrich\\B",
-      "replacement": " Bindestrich "
-    },
-    {
-      "name": "split-merged-komma-off-preceding-noun",
-      "label": "Split merged 'Komma' off preceding noun",
-      "enabled": true,
-      "locked": false,
-      "seeded": true,
-      "exposed": false,
-      "tags": [],
-      "note": "",
-      "type": "regex",
-      "pattern": "\\b([A-ZÄÖÜ][a-zäöüß]{2,})komm?a\\b",
-      "replacement": "\\1 Komma"
-    },
-    {
-      "name": "trim-trailing-period",
-      "label": "Trim Trailing Period",
-      "enabled": true,
-      "locked": false,
-      "seeded": true,
-      "exposed": false,
-      "tags": [],
-      "note": "",
-      "type": "regex",
-      "pattern": "\\s*\\.+\\s*$",
       "replacement": ""
     },
     {
