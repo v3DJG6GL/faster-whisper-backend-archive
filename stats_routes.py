@@ -344,10 +344,7 @@ _STATS_VIEWER_HTML = r"""<!doctype html>
      whole tile (height:100%) and the chart flexes to absorb any slack, so the
      tile is never taller than the card (no dead clickable space below) and
      resizing the tile grows/shrinks the chart. */
-  /* scrollbar-gutter: stable reserves the scrollbar's width whether or not the
-     board overflows, so #usage-plot's clientWidth never shifts when the gutter
-     appears/disappears — keeping the date-tick density stable across rebuilds. */
-  .usage-card { height: 100%; scrollbar-gutter: stable; }
+  .usage-card { height: 100%; }
   .usage-toolbar { display: flex; flex-wrap: wrap; align-items: baseline;
     gap: 0.4rem 0.9rem; margin-bottom: 0.5rem; }
   .usage-toolbar h3 { margin: 0; }
@@ -1241,7 +1238,15 @@ function buildChart() {
         splits: (u) => {
           const xs = u.data[0] || [];
           if (xs.length < 2) return xs.slice();
-          const px = u.over.clientWidth || 600;
+          // Width source MUST be u.bbox.width, NOT u.over.clientWidth: on every
+          // rebuild (any selector change) uPlot runs splits before .u-over is laid
+          // out, so over.clientWidth reads 0 and the old `|| 600` fallback forced a
+          // narrow width → every-other-day labels that then stuck. bbox.width is set
+          // synchronously from the passed width and is reliable; it's in DEVICE
+          // pixels, so divide by devicePixelRatio to get CSS px for the gap test.
+          const px = (u.bbox && u.bbox.width)
+            ? u.bbox.width / (window.devicePixelRatio || 1)
+            : (u.over.clientWidth || 600);
           const maxTicks = Math.max(2, Math.floor(px / remPx(4.3)));
           const t0 = xs[0], t1 = xs[xs.length - 1];
           const spanDays = Math.max(1, Math.round((t1 - t0) / 86400));
@@ -1345,14 +1350,9 @@ function loadUsage() {
         renderBoard(j.leaderboard, by);
         return;
       }
-      // renderBoard BEFORE buildChart: the leaderboard rows (and any vertical
-      // scrollbar they trigger) must be present when buildChart measures
-      // chartEl.clientWidth, so the tick-density width is the same on first paint
-      // and on every later rebuild — otherwise the splits compute against a wider
-      // (board-empty) width first, then a narrower (scrollbar) width that sticks.
-      renderBoard(j.leaderboard, by);
       buildChart();
       chart.setData([xs].concat(curLines.map(l => l.values)));
+      renderBoard(j.leaderboard, by);
     })
     .catch(err => {
       console.warn('[stats] usage fetch failed', err);
