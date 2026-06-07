@@ -344,7 +344,10 @@ _STATS_VIEWER_HTML = r"""<!doctype html>
      whole tile (height:100%) and the chart flexes to absorb any slack, so the
      tile is never taller than the card (no dead clickable space below) and
      resizing the tile grows/shrinks the chart. */
-  .usage-card { height: 100%; }
+  /* scrollbar-gutter: stable reserves the scrollbar's width whether or not the
+     board overflows, so #usage-plot's clientWidth never shifts when the gutter
+     appears/disappears — keeping the date-tick density stable across rebuilds. */
+  .usage-card { height: 100%; scrollbar-gutter: stable; }
   .usage-toolbar { display: flex; flex-wrap: wrap; align-items: baseline;
     gap: 0.4rem 0.9rem; margin-bottom: 0.5rem; }
   .usage-toolbar h3 { margin: 0; }
@@ -1176,6 +1179,15 @@ function updateTip(u) {
   tipEl.style.top = Math.max(0, oy + u.cursor.top + 14) + 'px';
 }
 
+// cursor.move hook: snap the vertical guide to the nearest data point's x-pixel
+// so guide + highlight dot + tooltip coincide (uPlot's canonical snap, per the
+// nearest-non-null demo). mLeft < 0 means the cursor is off-plot — leave it.
+function snapToDataX(u, mLeft, mTop) {
+  if (mLeft < 0) return [mLeft, mTop];
+  const idx = u.valToIdx(u.posToVal(mLeft, 'x'));
+  return [Math.round(u.valToPos(u.data[0][idx], 'x')), mTop];
+}
+
 let chart = null;
 function buildChart() {
   if (chart) { chart.destroy(); chart = null; }
@@ -1195,27 +1207,49 @@ function buildChart() {
     padding: [remPx(0.5), remPx(0.6), remPx(0.2), remPx(0.4)],
     legend: { show: false },
     // drag:{x:false,y:false} removes uPlot's default drag-to-zoom.
-    // points.show:true draws a per-series highlight dot on the hovered bucket
-    // (series stroke colour, via uPlot's .u-cursor-pt), so the tooltip has a
-    // concrete on-chart target instead of floating beside a bare guide line.
-    cursor: { y: false, drag: { x: false, y: false }, points: { show: true } },
+    // points: a per-series highlight dot on the hovered bucket via uPlot's
+    // .u-cursor-pt — leave `show` at its default (an element-FACTORY); passing
+    // the boolean `show:true` makes initCursorPt's `instanceof HTMLElement`
+    // check fail, so NO dot is ever created. We only style it (rem-sized disc,
+    // --bg ring, fill = each line's colour) so every line gets a clear marker.
+    // move: snapToDataX locks the vertical guide onto the nearest data point's
+    // x-pixel, so the guide line, the dot, cursor.idx and the tooltip all land
+    // on the SAME bucket (without it the guide trails the raw mouse and the
+    // tooltip flips to the next day at the column's midpoint).
+    cursor: {
+      y: false, drag: { x: false, y: false }, move: snapToDataX,
+      points: {
+        size: remPx(0.6), width: remPx(0.13), stroke: '#0d1117',
+        fill: (u, si) => (curLines[si - 1] && curLines[si - 1].color) || '#79c0ff',
+      },
+    },
     scales: { x: { time: true }, y: { range: { min: { pad: 0.05, mode: 1 }, max: { pad: 0.1, mode: 1 } } } },
     hooks: { setCursor: [updateTip] },
     axes: [
       { stroke: '#6e7681', grid: { stroke: '#21262d', width: 1 },
         ticks: { stroke: '#30363d', width: 1, size: 3 },
         font: remPx(0.733) + 'px ' + MONO,
-        // Buckets are whole days (or weeks): put a tick ON each bucket, subsampled
-        // to ~one label / 64px, so uPlot never auto-picks a sub-day increment and
-        // falls back to time-of-day labels (the old foundIncr<86400 branch).
+        // Ticks on a clean whole-day calendar grid, NOT on array indices. The
+        // data omits empty buckets, so the old "every Nth point" subsample (a) put
+        // labels on uneven dates and (b) HALVED the label set at 64px-width
+        // boundaries (ceil(n/floor(px/64))) — a stray scrollbar flipped 12 daily
+        // labels to every-other-day. Instead pick a day-step from a curated ladder
+        // (smallest whose pixel spacing ≥ ~65px) and emit ticks at t0 + k·step·day.
+        // t0 is a UTC midnight, so every tick is a UTC midnight → the getUTC
+        // `values` formatter below stays calendar-correct on any operator timezone.
+        // Thins gracefully (1→2→3→7…) and is deterministic across rebuilds.
         splits: (u) => {
           const xs = u.data[0] || [];
-          if (xs.length < 2) return xs;
+          if (xs.length < 2) return xs.slice();
           const px = u.over.clientWidth || 600;
-          const maxTicks = Math.max(2, Math.floor(px / 64));
-          const step = Math.max(1, Math.ceil(xs.length / maxTicks));
+          const maxTicks = Math.max(2, Math.floor(px / remPx(4.3)));
+          const t0 = xs[0], t1 = xs[xs.length - 1];
+          const spanDays = Math.max(1, Math.round((t1 - t0) / 86400));
+          const LADDER = [1, 2, 3, 7, 14, 30, 60, 90, 180, 365];
+          let step = LADDER[LADDER.length - 1];
+          for (const s of LADDER) { if (spanDays / s <= maxTicks) { step = s; break; } }
           const out = [];
-          for (let i = 0; i < xs.length; i += step) out.push(xs[i]);
+          for (let t = t0; t <= t1 + 1; t += step * 86400) out.push(t);
           return out;
         },
         // Fixed MM.DD, locale-independent (matches the project's YYYY.MM.DD norm).
@@ -1311,9 +1345,14 @@ function loadUsage() {
         renderBoard(j.leaderboard, by);
         return;
       }
+      // renderBoard BEFORE buildChart: the leaderboard rows (and any vertical
+      // scrollbar they trigger) must be present when buildChart measures
+      // chartEl.clientWidth, so the tick-density width is the same on first paint
+      // and on every later rebuild — otherwise the splits compute against a wider
+      // (board-empty) width first, then a narrower (scrollbar) width that sticks.
+      renderBoard(j.leaderboard, by);
       buildChart();
       chart.setData([xs].concat(curLines.map(l => l.values)));
-      renderBoard(j.leaderboard, by);
     })
     .catch(err => {
       console.warn('[stats] usage fetch failed', err);
