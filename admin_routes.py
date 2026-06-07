@@ -798,6 +798,27 @@ _SETTINGS_VIEWER_HTML = r"""<!doctype html>
     padding: 0.625rem 0.875rem 0.75rem; margin-bottom: 0.875rem; }
   h2 { color: var(--bold); font-size: 0.933rem; margin: 0 0 0.5rem; padding-bottom: 0.375rem;
     border-bottom: 1px solid var(--border); }
+  /* Collapsible top-level section. The <h2> is promoted into a <summary> so
+     the whole section folds away (native <details>, same as the "Advanced —"
+     subgroups below). scroll-margin-top clears the sticky header on anchored
+     jumps from the section-nav — --header-h is measured in JS; the rem
+     fallback honors the no-hardcoded-px rule. */
+  section { scroll-margin-top: var(--header-h, 7rem); }
+  details.section-details > summary.section-summary {
+    cursor: pointer; user-select: none; list-style: none;
+    display: flex; align-items: center; gap: 0.4rem;
+    margin-bottom: 0.5rem; padding-bottom: 0.375rem;
+    border-bottom: 1px solid var(--border); }
+  details.section-details > summary.section-summary::-webkit-details-marker { display: none; }
+  details.section-details > summary.section-summary::before {
+    content: '▸'; color: var(--dim); font-size: 0.8em;
+    transition: transform 120ms ease; display: inline-block; }
+  details.section-details[open] > summary.section-summary::before {
+    transform: rotate(90deg); }
+  /* The divider/margin now lives on the summary, so neutralize the <h2>'s own. */
+  details.section-details summary.section-summary h2 {
+    margin: 0; padding: 0; border-bottom: none; flex: 1 1 auto; }
+  details.section-details > summary.section-summary:hover h2 { color: var(--cyan); }
   /* Subgrid: each subgroup wraps its fields in .group-fields so all rows
      share one column track. The label column auto-sizes to whatever the
      longest label in THAT section needs; the value column gets the rest.
@@ -925,6 +946,23 @@ _SETTINGS_VIEWER_HTML = r"""<!doctype html>
     transform: rotate(90deg); }
   details.subgroup-details > summary.subgroup-summary:hover { color: var(--fg); }
   details.subgroup-details > .group-fields { margin-top: 0.375rem; }
+  /* Section-nav: the 3rd sticky header row. A horizontally-scrollable strip of
+     chips that jump to (and expand) each top-level section; the chip for the
+     section currently in view is highlighted by the scrollspy observer. Hidden
+     until populated so there's no empty strip before the first load. Overrides
+     the shared `.subbar` wrap with nowrap + horizontal scroll. */
+  header .subbar.section-nav { gap: 0.3rem; flex-wrap: nowrap; overflow-x: auto;
+    scrollbar-width: thin; }
+  header .subbar.section-nav:empty { display: none; }
+  header .sec-chip { padding: 0.2rem 0.55rem; border-radius: 6px; color: var(--dim);
+    text-decoration: none; font-size: var(--fs-xs); line-height: 1.2;
+    border: 1px solid transparent; white-space: nowrap; flex-shrink: 0;
+    cursor: pointer; transition: background .12s ease, color .12s ease; }
+  header .sec-chip:hover { background: #21262d; color: var(--fg); }
+  header .sec-chip.active { color: var(--cyan); background: #1f2630;
+    border-color: var(--border); font-weight: 600; }
+  header .sec-allbtn { flex-shrink: 0; font-size: var(--fs-xs);
+    padding: 0.2rem 0.55rem; }
   /* Reset-to-default link button — small, italic, only visible when the
      current value differs from the in-repo default. Sits below the help
      text, so it doesn't crowd the editor itself. */
@@ -1089,7 +1127,10 @@ _SETTINGS_VIEWER_HTML = r"""<!doctype html>
   .rule-row .delete-btn { color: var(--red); }
   .rule-row .row-body { padding-left: 2rem; padding-top: 0.375rem; display: none; }
   .rule-row.expanded .row-body { display: block; }
-  .rule-row.terminal .row-body { display: block; padding-top: 0.25rem; }
+  /* Terminal row body obeys the same .expanded gate as every other rule —
+     no display override here, otherwise its expand/collapse toggle (and the
+     note textarea inside) would be permanently pinned open. */
+  .rule-row.terminal .row-body { padding-top: 0.25rem; }
   /* Destructive-actions footer inside the expanded body. Holds reset /
      delete — keeps them out of the scannable head row (PatternFly
      "destructive actions outside scannable rows" guidance). */
@@ -1346,6 +1387,7 @@ _SETTINGS_VIEWER_HTML = r"""<!doctype html>
         <span id="status" class="pill">loading…</span>
       </div>
     </div>
+    <div class="subbar section-nav" id="section-nav"></div>
   </header>
   <main id="main"></main>
 </div>
@@ -1659,6 +1701,9 @@ function makeEditor(name) {
           : Array.from(new Set([...cur, slug]));
         setDirty(name, next);
       },
+      // "↑ view" jumps to the matching rule in the global PIPELINE_RULES
+      // editor (top-level helper — reachable from this top-level makeEditor).
+      onJumpToGlobal: (slug) => jumpToGlobalRule(slug),
     });
   }
   // MODEL_OVERRIDES is a dict[model_id, dict[field, value]] — too freeform
@@ -2339,31 +2384,14 @@ function modelOverridesEditor(name, v) {
         persist();
         refreshMarkers();  // sidebar count + dot, in place (parity with field rows)
       },
-      onJumpToGlobal: (slug) => jumpToRule(slug),
+      // "↑ view" delegates to the shared top-level helper (which also expands
+      // a collapsed Pipeline section and uses the correct expand-btn selector).
+      onJumpToGlobal: (slug) => jumpToGlobalRule(slug),
     };
     secEl.appendChild(makeRuleListEditor('PIPELINE_RULES', rules, 'checklist', ruleOpts));
     return secEl;
   }
 
-  // -------- jump-link helpers --------------------------------------------
-  // The global field row uses `data-field="X"`; per-model rows here use
-  // `data-mo-field="X"` to avoid clashing.
-  function jumpToRule(slug) {
-    const fieldRow = document.querySelector('main .field[data-field="PIPELINE_RULES"]');
-    if (!fieldRow) return;
-    const ruleRow = fieldRow.querySelector('.rule-row[data-slug="' + slug + '"]');
-    if (ruleRow) {
-      ruleRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      // Auto-expand the rule body if collapsed, so the admin lands directly
-      // in its editor rather than just at the row header.
-      if (!ruleRow.classList.contains('expanded')) {
-        const btn = ruleRow.querySelector(':scope > .row-header > .expand-btn');
-        if (btn) btn.click();
-      }
-    } else {
-      fieldRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    }
-  }
   // Initial selection: the alphabetically-first model with overrides;
   // otherwise null (renders the empty-state hint in the detail pane). The
   // Global ref view is gone — when no model has an override yet the user
@@ -2639,7 +2667,21 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
   const placeholder = document.createElement('div');
   placeholder.className = 'rule-placeholder';
   // Expanded-row state, keyed by rule.name (slug). Survives full repaints.
+  // In full mode (the global PIPELINE_RULES editor) it ALSO persists across
+  // page reloads via localStorage['pipeline.expanded'] — matching the
+  // subgroup/section collapse persistence. Checklist mode has no expandable
+  // bodies, so it never reads or writes that key.
   const expandedNames = new Set();
+  if (!isChecklist) {
+    try {
+      const _saved = JSON.parse(localStorage.getItem('pipeline.expanded') || '[]');
+      if (Array.isArray(_saved)) _saved.forEach(s => expandedNames.add(s));
+    } catch (_) {}
+  }
+  const _saveExpanded = () => {
+    if (isChecklist) return;
+    try { localStorage.setItem('pipeline.expanded', JSON.stringify([...expandedNames])); } catch (_) {}
+  };
 
   // List-level (delegated) drag handlers. dragenter moves the placeholder
   // around as the cursor crosses rows; drop fires once at the placeholder's
@@ -3166,6 +3208,13 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
       headLine1.appendChild(movedBadge);
     }
 
+    // `refresh` (the per-row test-panel re-runner) is defined inside the
+    // non-terminal block further down. Under 'use strict' a block-level
+    // function declaration is NOT visible out here, so hoist a row-scoped
+    // handle the block assigns into — otherwise this expand handler (which
+    // fires it on first reveal) throws "refresh is not defined", aborting the
+    // rest of the handler (_saveExpanded / label update).
+    let refresh = null;
     const expandBtn = document.createElement('button');
     expandBtn.type = 'button';
     expandBtn.className = 'expand-btn';
@@ -3177,10 +3226,11 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
       row.classList.toggle('expanded');
       if (row.classList.contains('expanded')) {
         expandedNames.add(rule.name);
-        if (rule.type !== 'terminal') refresh();
+        if (rule.type !== 'terminal' && refresh) refresh();
       } else {
         expandedNames.delete(rule.name);
       }
+      _saveExpanded();
       _setExpandLabel();
     });
     headLine1.appendChild(expandBtn);
@@ -3287,6 +3337,7 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
       del.title = 'Remove this local-only rule';
       del.addEventListener('click', () => {
         expandedNames.delete(rule.name);
+        _saveExpanded();
         rules.splice(idx, 1);
         commitFull();
       });
@@ -3331,6 +3382,7 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
             if (expandedNames.has(rule.name)) {
               expandedNames.delete(rule.name);
               expandedNames.add(newSlug);
+              _saveExpanded();
             }
             rule.name = newSlug;
             slug.textContent = '(' + newSlug + ')';
@@ -3352,7 +3404,7 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
       body.appendChild(status);
 
       let timer = null;
-      async function refresh() {
+      refresh = async function () {
         if (timer) clearTimeout(timer);
         timer = setTimeout(async () => {
           const step = await _testOneRule(rule);
@@ -3378,7 +3430,7 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
             status.textContent = '✓ valid · ' + n + ' match' + (n === 1 ? '' : 'es') + ' in sample';
           }
         }, 250);
-      }
+      };
       // Refresh on any input change inside the body.
       body.addEventListener('input', refresh);
       body.addEventListener('change', refresh);
@@ -3592,6 +3644,7 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
       // Auto-expand the newly added rule so the user lands directly in
       // its editor body and can fill in pattern/map/etc.
       expandedNames.add(slug);
+      _saveExpanded();
       commitFull();
     });
   }
@@ -4191,14 +4244,173 @@ function linesEditor(name, v) {
   wrap.appendChild(t); wrap.appendChild(help);
   return wrap;
 }
+// --- section nav / collapse helpers --------------------------------------
+// Slugify a section title into a stable element id / nav target. Section
+// titles are fixed, unique English strings, so lowercase + non-alnum->'-'
+// is collision-free. e.g. "Server (uvicorn)" -> "server-uvicorn".
+function slug(s) {
+  return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
+// Open the collapsible <details> wrapping the section that contains `el`, so a
+// scroll/jump target inside a collapsed section is actually visible. Persists
+// the new open state exactly like a manual toggle.
+function expandSectionContaining(el) {
+  const sec = el && el.closest('section');
+  if (!sec) return;
+  const det = sec.querySelector(':scope > details.section-details');
+  if (det && !det.open) {
+    det.open = true;
+    try { if (det.dataset.lsKey) localStorage.setItem(det.dataset.lsKey, '1'); } catch (_) {}
+    refreshSectionToggleAllLabel();
+  }
+}
+
+// Scroll the global PIPELINE_RULES editor to the rule named `ruleName` and
+// expand its body. Shared by the per-model AND captures "↑ view" buttons —
+// top-level (not trapped in the modelOverridesEditor closure) so every caller
+// can reach it.
+function jumpToGlobalRule(ruleName) {
+  const fieldRow = document.querySelector('main .field[data-field="PIPELINE_RULES"]');
+  if (!fieldRow) return;
+  expandSectionContaining(fieldRow);   // the Pipeline section may be collapsed
+  const ruleRow = fieldRow.querySelector('.rule-row[data-slug="' + ruleName + '"]');
+  const target = ruleRow || fieldRow;
+  target.scrollIntoView({ behavior: 'smooth', block: ruleRow ? 'center' : 'start' });
+  if (ruleRow && !ruleRow.classList.contains('expanded')) {
+    // The expand button is a GRANDCHILD of .row-header (via .row-header-line1),
+    // so a descendant combinator is required — a direct-child selector misses.
+    const btn = ruleRow.querySelector(':scope > .row-header .expand-btn');
+    if (btn) btn.click();
+  }
+}
+
+function _anySectionOpen() {
+  return Array.prototype.some.call(
+    document.querySelectorAll('main details.section-details'), d => d.open);
+}
+
+// Expand or collapse every top-level section at once, persisting each.
+function setAllSections(open) {
+  document.querySelectorAll('main details.section-details').forEach(d => {
+    d.open = open;
+    try { if (d.dataset.lsKey) localStorage.setItem(d.dataset.lsKey, open ? '1' : '0'); } catch (_) {}
+  });
+  refreshSectionToggleAllLabel();
+}
+
+// Flip the expand/collapse-all button label to the action it WOULD perform.
+function refreshSectionToggleAllLabel() {
+  const btn = $('sec-toggle-all');
+  if (!btn) return;
+  const anyOpen = _anySectionOpen();
+  btn.textContent = anyOpen ? 'collapse all' : 'expand all';
+  btn.title = anyOpen ? 'Collapse every section' : 'Expand every section';
+}
+
+// (Re)build the sticky section-nav chip row from the current section list.
+// Called at the end of render() (sections are rebuilt on every load/save/
+// discard, so the chips must be rebuilt to match).
+function buildSectionNav() {
+  const navRow = $('section-nav');
+  if (!navRow || !state) return;
+  navRow.innerHTML = '';
+  const allBtn = document.createElement('button');
+  allBtn.type = 'button';
+  allBtn.id = 'sec-toggle-all';
+  allBtn.className = 'sec-allbtn';
+  allBtn.addEventListener('click', () => setAllSections(!_anySectionOpen()));
+  navRow.appendChild(allBtn);
+  for (const g of state.groups) {
+    const id = 'sec-' + slug(g.title);
+    const chip = document.createElement('a');
+    chip.className = 'sec-chip';
+    chip.href = '#' + id;
+    chip.dataset.target = id;
+    chip.textContent = g.title;
+    chip.addEventListener('click', (e) => {
+      e.preventDefault();
+      const sec = document.getElementById(id);
+      if (!sec) return;
+      expandSectionContaining(sec);
+      sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+    navRow.appendChild(chip);
+  }
+  refreshSectionToggleAllLabel();
+}
+
+// Scrollspy: highlight the nav chip for whichever section currently sits just
+// below the sticky header. Recreated after each render (sections are new DOM)
+// and on header resize (the rootMargin band tracks the live header height).
+let _scrollSpy = null;
+const _visibleSecs = new Set();
+function setupScrollspy() {
+  if (_scrollSpy) { _scrollSpy.disconnect(); _scrollSpy = null; }
+  _visibleSecs.clear();
+  const hdr = document.querySelector('header');
+  const top = hdr ? hdr.offsetHeight : 0;
+  const sections = Array.prototype.slice.call(document.querySelectorAll('main > section'));
+  if (!sections.length) return;
+  _scrollSpy = new IntersectionObserver((entries) => {
+    for (const en of entries) {
+      if (en.isIntersecting) _visibleSecs.add(en.target.id);
+      else _visibleSecs.delete(en.target.id);
+    }
+    let activeId = null;
+    for (const s of sections) { if (_visibleSecs.has(s.id)) { activeId = s.id; break; } }
+    highlightNavChip(activeId);
+  }, { rootMargin: '-' + top + 'px 0px -60% 0px', threshold: 0 });
+  sections.forEach(s => _scrollSpy.observe(s));
+}
+
+function highlightNavChip(id) {
+  const navRow = $('section-nav');
+  if (!navRow) return;
+  navRow.querySelectorAll('.sec-chip').forEach(c => {
+    const on = c.dataset.target === id;
+    c.classList.toggle('active', on);
+    if (on) {
+      c.setAttribute('aria-current', 'true');
+      // Centre the active chip in the horizontal scroller WITHOUT touching
+      // page scroll (scrollIntoView could feed back into the scrollspy).
+      const cr = c.getBoundingClientRect(), nr = navRow.getBoundingClientRect();
+      navRow.scrollLeft += (cr.left + cr.width / 2) - (nr.left + nr.width / 2);
+    } else {
+      c.removeAttribute('aria-current');
+    }
+  });
+}
+
 function render() {
   const main = $('main');
   main.innerHTML = '';
   for (const g of state.groups) {
     const sec = document.createElement('section');
+    sec.id = 'sec-' + slug(g.title);
+    // Collapsible section: the <h2> is promoted into a <summary> inside a
+    // native <details> so the whole section folds away. Open/closed persists
+    // in localStorage['sec.global.<title>'] (default OPEN — absence !== '0').
+    // dataset.lsKey lets expand/collapse-all persist without re-deriving the
+    // title. Same mechanism as the "Advanced —" subgroups below.
+    const secDet = document.createElement('details');
+    secDet.className = 'section-details';
+    const secKey = 'sec.global.' + g.title;
+    secDet.dataset.lsKey = secKey;
+    secDet.open = localStorage.getItem(secKey) !== '0';
+    secDet.addEventListener('toggle', () => {
+      try { localStorage.setItem(secKey, secDet.open ? '1' : '0'); } catch (_) {}
+      refreshSectionToggleAllLabel();
+    });
+    const secSum = document.createElement('summary');
+    secSum.className = 'section-summary';
     const h = document.createElement('h2');
     h.textContent = g.title;
-    sec.appendChild(h);
+    secSum.appendChild(h);
+    secDet.appendChild(secSum);
+    const body = document.createElement('div');
+    body.className = 'section-body';
+    secDet.appendChild(body);
     // Each group has subgroups; iterate them. A subgroup with title===null
     // emits no subheader. A subgroup WITH a title is wrapped in
     // <details>/<summary> so the admin can collapse long-tail "Advanced —"
@@ -4233,19 +4445,22 @@ function render() {
         det.addEventListener('toggle', () => {
           try { localStorage.setItem(lsKey, det.open ? '1' : '0'); } catch (_) {}
         });
-        sec.appendChild(det);
+        body.appendChild(det);
       } else {
-        sec.appendChild(fieldsWrap);
+        body.appendChild(fieldsWrap);
       }
     }
     // The Pipeline section gets the full-pipeline test panel appended at the
     // bottom (after PIPELINE_RULES renders). Single panel — runs the whole
     // ordered list against the editable sample.
     if (g.title === 'Pipeline') {
-      sec.appendChild(pipelineTestPanel());
+      body.appendChild(pipelineTestPanel());
     }
+    sec.appendChild(secDet);
     main.appendChild(sec);
   }
+  buildSectionNav();
+  setupScrollspy();
 }
 
 async function save() {
@@ -4371,6 +4586,19 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.addEventListener('admin:dirty', (e) => {
     if (e && e.detail && e.detail.name) refreshFieldReset(e.detail.name);
   });
+  // The sticky header is variable-height (now 3 rows; wraps on narrow widths),
+  // so measure it into --header-h. Section anchors use it via scroll-margin-top
+  // (CSS) so section-nav jumps land just below the header instead of under it;
+  // the scrollspy band is re-tuned to the live height on resize.
+  const _hdr = document.querySelector('header');
+  if (_hdr && typeof ResizeObserver !== 'undefined') {
+    const _setHH = () => {
+      document.documentElement.style.setProperty('--header-h', _hdr.offsetHeight + 'px');
+      if (state) setupScrollspy();
+    };
+    new ResizeObserver(_setHH).observe(_hdr);
+    _setHH();
+  }
   // Sign-in is handled by the shared full-screen login gate (web_common):
   // a 401 from loadState()/api() shows it; it prompts + reloads on success.
   // #logout-btn + #reload-btn are wired globally in OPEN_MODE_BANNER_JS;
