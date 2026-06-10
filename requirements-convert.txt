@@ -4,7 +4,7 @@
 # auto HF→CT2 conversion at runtime.
 
 # CT2's TransformersConverter loads the HF checkpoint via transformers.
-transformers>=5.10.2
+transformers>=5.11.0
 
 # transformers' from_pretrained() needs torch for tensor materialisation.
 # CPU-only is fine — conversion never touches CUDA.
@@ -19,4 +19,4 @@ huggingface_hub>=1.18.0
 
 # filelock is also already a transitive (via huggingface_hub); listed for
 # the same reason — we use it directly for cross-worker conversion locking.
-filelock>=3.29.1
+filelock>=3.29.3
