@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS recent_transcriptions (
   username      TEXT,
   model         TEXT NOT NULL,
   language      TEXT,
+  source        TEXT NOT NULL DEFAULT 'file',
   status        TEXT NOT NULL DEFAULT 'ok',
   audio_dur_s   REAL,
   proc_dur_s    REAL,
@@ -92,6 +93,12 @@ def init_db(path: str) -> None:
     _conn.execute("PRAGMA synchronous=NORMAL;")
     _conn.execute("PRAGMA temp_store=MEMORY;")
     _conn.executescript(_SCHEMA)
+    # Migrate pre-existing DBs (created before the `source` column): add it with
+    # the 'file' default so old rows read as batch/file-upload transcriptions.
+    cols = {r["name"] for r in _conn.execute("PRAGMA table_info(recent_transcriptions)")}
+    if "source" not in cols:
+        _conn.execute(
+            "ALTER TABLE recent_transcriptions ADD COLUMN source TEXT NOT NULL DEFAULT 'file'")
 
 
 def _require_conn() -> sqlite3.Connection:
@@ -153,6 +160,7 @@ def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     d["final"] = d.get("final_text") or ""
     d["username"] = d.get("username") or ""
     d["language"] = d.get("language") or ""
+    d["source"] = d.get("source") or "file"
     return d
 
 
@@ -180,6 +188,7 @@ def record_trace(
     tokens: list | None = None,
     bigrams: list | None = None,
     language: str | None = None,
+    source: str = "file",
     user_id: str | None = None,
     username: str | None = None,
     created_ts: float | None = None,
@@ -208,13 +217,14 @@ def record_trace(
     with _lock:
         conn.execute(
             "INSERT INTO recent_transcriptions ("
-            "  request_id, created_ts, user_id, username, model, language,"
+            "  request_id, created_ts, user_id, username, model, language, source,"
             "  status, raw_text, final_text,"
             "  steps_json, tokens_json, bigrams_json"
-            ") VALUES (?, ?, ?, ?, ?, ?, 'ok', ?, ?, ?, ?, ?)"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, 'ok', ?, ?, ?, ?, ?)"
             " ON CONFLICT(request_id) DO UPDATE SET"
             "  model        = excluded.model,"
             "  language     = COALESCE(excluded.language, recent_transcriptions.language),"
+            "  source       = excluded.source,"
             "  user_id      = COALESCE(excluded.user_id, recent_transcriptions.user_id),"
             "  username     = COALESCE(excluded.username, recent_transcriptions.username),"
             "  raw_text     = excluded.raw_text,"
@@ -222,7 +232,7 @@ def record_trace(
             "  steps_json   = excluded.steps_json,"
             "  tokens_json  = excluded.tokens_json,"
             "  bigrams_json = excluded.bigrams_json",
-            (request_id, ts, user_id, username, model, language,
+            (request_id, ts, user_id, username, model, language, source or "file",
              raw_s, final_s, steps_blob, tokens_blob, bigrams_blob),
         )
         _lazy_prune_if_due(prune_every, max_rows, ttl_days)

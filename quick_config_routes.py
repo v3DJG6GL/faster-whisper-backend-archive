@@ -764,6 +764,12 @@ _QUICK_CONFIG_HTML = r"""<!doctype html>
     border: 1px solid var(--border); border-radius: 999rem;
     padding: 0.05rem 0.5rem; color: var(--fg); font-family: var(--font-sans);
     font-size: var(--fs-xs); }
+  /* source chip: live (streaming) vs file (batch upload) */
+  .trace-meta .src-chip { text-transform: uppercase; letter-spacing: 0.04em; }
+  .trace-meta .src-chip.src-stream { background: rgba(79,140,255,0.18);
+    border-color: rgba(79,140,255,0.55); }
+  .trace-meta .src-chip.src-file { background: rgba(255,255,255,0.03);
+    color: var(--dim); }
   .trace-text { font-family: var(--font-mono); font-size: var(--fs-sm);
     word-wrap: break-word; }
   .trace-raw { color: var(--dim); margin-bottom: 0.25rem; }
@@ -1157,6 +1163,16 @@ function renderTrace(entry) {
     const mdl = document.createElement('span');
     mdl.textContent = entry.model;
     meta.appendChild(mdl);
+  }
+  // Source chip: live streaming dictation vs file-upload (batch) transcription.
+  {
+    const isStream = entry.source === 'stream';
+    const src = document.createElement('span');
+    src.className = 'pill src-chip ' + (isStream ? 'src-stream' : 'src-file');
+    src.title = isStream ? 'live streaming dictation (WebSocket)'
+                         : 'file upload (batch /v1/audio/transcriptions)';
+    src.textContent = isStream ? 'live' : 'file';
+    meta.appendChild(src);
   }
   if (entry.username) {
     const spk = document.createElement('span');

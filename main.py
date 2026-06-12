@@ -652,6 +652,8 @@ def _format_request_block(
     steps: "list | None" = None,
     request_id: str | None = None,
     captured_id: str | None = None,
+    endpoint: str = "/v1/audio/transcriptions",
+    audio_source: str | None = None,
 ) -> str:
     """Full per-request log block. `steps` is the per-pipeline trace; passed
     in only when cfg.TRACE_ENABLED so the block stays a single message.
@@ -663,7 +665,13 @@ def _format_request_block(
 
     `captured_id` is the capture row id when the capture pipeline fired
     for this request — admins can grep for `captured=<id[:8]>` to find
-    the audio+timestamps row on /captures."""
+    the audio+timestamps row on /captures.
+
+    `endpoint` is the route that produced the block — `/v1/audio/transcriptions`
+    for the batch (file-upload) route, `…/stream` for live dictation — so the two
+    sources are distinguishable in the log. `audio_source` (when given) describes
+    the input transport/codec + rate, shown as an `input` line in the Audio
+    section (the model itself always decodes at 16 kHz mono)."""
     title_rule = "═" * _LOG_WIDTH
     rule = "─" * _LOG_WIDTH
 
@@ -672,7 +680,7 @@ def _format_request_block(
         status = f"req={request_id[:8]}  {status}"
     if captured_id:
         status = f"captured={captured_id[:8]}  {status}"
-    title = "  /v1/audio/transcriptions"
+    title = "  " + endpoint
     pad = max(1, _LOG_WIDTH - len(title) - len(status))
     title_line = f"{title}{' ' * pad}{status}"
 
@@ -691,6 +699,8 @@ def _format_request_block(
     lines.append(model_line)
 
     lines.append(_section_rule("Audio"))
+    if audio_source:
+        lines.append(f"    {'input':<{_NAME_COL - 4}}{audio_source}")
     lang = getattr(info, "language", "?")
     lang_prob = getattr(info, "language_probability", None)
     lang_str = f"{lang}  (prob={lang_prob:.2f})" if lang_prob is not None else str(lang)
@@ -1994,6 +2004,9 @@ async def transcribe(
             # Always emit the rich diagnostic block — it's how empty-output
             # failures are debugged. The per-pipeline transformation trace
             # is only included when cfg.TRACE_ENABLED is on.
+            _src_fmt = (file.content_type
+                        or os.path.splitext(file.filename or "")[1].lstrip(".")
+                        or "audio")
             logger.info(_format_request_block(
                 file_label=f"{file.filename}  ({len(audio_content)/1024:.1f} KB, {response_format})",
                 model_name=resolved_model,
@@ -2005,6 +2018,8 @@ async def transcribe(
                 steps=trace,
                 request_id=request_id,
                 captured_id=captured_id,
+                endpoint="/v1/audio/transcriptions",
+                audio_source=f"{_src_fmt} → 16 kHz mono (file upload)",
             ))
 
             # Persist the trace to the durable recent-transcriptions store

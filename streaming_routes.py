@@ -208,6 +208,11 @@ async def transcribe_stream(ws: WebSocket) -> None:
                                            f"encoded via ffmpeg: {sorted(ENCODED_FORMATS)})"})
             await ws.close()
             return
+        # Human-readable transport label for the per-utterance log block.
+        audio_source_label = (
+            f"{audio_fmt} @ {SAMPLE_RATE} Hz mono (raw PCM, WebSocket)"
+            if audio_fmt in RAW_FORMATS
+            else f"{audio_fmt} → {SAMPLE_RATE} Hz mono (ffmpeg decode, WebSocket)")
 
         final_model = main._resolve_model_name(model_req)
         partial_cfg = getattr(cfg, "STREAMING_PARTIAL_MODEL", "") or ""
@@ -385,18 +390,22 @@ async def transcribe_stream(ws: WebSocket) -> None:
                                f"({info['audio_dur']:.2f}s, {response_format})",
                     model_name=final_model, info=fw_info, kwargs=kwargs,
                     seg_diag=seg_diag, raw=raw_text, final=final_text,
-                    steps=steps, request_id=rid, captured_id=captured_id))
+                    steps=steps, request_id=rid, captured_id=captured_id,
+                    endpoint="/v1/audio/transcriptions/stream",
+                    audio_source=audio_source_label))
             except Exception as _le:  # noqa: BLE001
                 logger.warning("[stream %s] log block failed: %s", session_id[:8], _le)
 
             # Durable trace → /quick-config recent-transcriptions + autocomplete + SSE.
+            # source='stream' tags the row so /quick-config can chip it as live
+            # dictation vs a file-upload (batch) transcription.
             try:
                 import quick_config_state
                 quick_config_state.record_trace(
                     request_id=rid, model=final_model, raw=raw_text,
                     steps=steps if steps is not None else [], final=final_text,
                     language=(getattr(fw_info, "language", None) or req_language or None),
-                    user_id=user.get("user_id"))
+                    source="stream", user_id=user.get("user_id"))
             except Exception as _qe:  # noqa: BLE001
                 logger.error("[stream %s] record_trace failed: %s", session_id[:8], _qe)
 

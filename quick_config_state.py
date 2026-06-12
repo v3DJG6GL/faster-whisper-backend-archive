@@ -128,6 +128,7 @@ def record_trace(
     steps: list,
     final: str,
     language: str | None = None,
+    source: str = "file",
     user_id: str | None = None,
 ) -> None:
     """Persist a finished trace to the durable store and broadcast it to
@@ -164,6 +165,7 @@ def record_trace(
         "request_id": request_id,
         "model": model,
         "language": language,
+        "source": source or "file",
         "raw": raw or "",
         "raw_text": raw or "",
         "steps": [list(s) if isinstance(s, (tuple, list)) else s
@@ -189,6 +191,7 @@ def record_trace(
                 tokens=tokens,
                 bigrams=bigrams,
                 language=language,
+                source=source,
                 user_id=user_id,
                 username=username,
                 created_ts=created_ts,

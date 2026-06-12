@@ -110,6 +110,9 @@ def test_stream_records_trace_text_per_utterance(app_module, monkeypatch):
     assert after > before, "no recent-transcription row recorded for the utterance"
     assert any((r.get("raw") or "").strip() and (r.get("final") or "").strip() for r in rows), \
         "recorded trace rows have empty raw/final (the /quick-config bug)"
+    # streamed utterances are tagged source='stream' so /quick-config can chip them.
+    assert any(r.get("source") == "stream" for r in rows), \
+        "streamed trace not tagged source='stream'"
 
 
 def test_safe_ws_send_swallows_dead_socket():
