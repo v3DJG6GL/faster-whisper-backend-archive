@@ -25,7 +25,7 @@
   header h1 { font-size: 1rem; margin:0; font-weight:600; }
   .controls { display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap; }
   label { font-size: 0.8rem; color: var(--muted); display:flex; gap:0.3rem; align-items:center; }
-  input[type=text] {
+  input[type=text], input[type=password], select {
     font-family: Consolas, Menlo, monospace; font-size:0.85rem;
     background:#161922; color:var(--fg); border:1px solid #2a2f3a; border-radius:0.35rem; padding:0.3rem 0.45rem;
   }
@@ -54,9 +54,17 @@
 <header>
   <h1>Live Dictation</h1>
   <div class="controls">
-    <label>Model <input type="text" id="model" value="whisper-1" size="18"></label>
+    <label>Server <input type="text" id="server" placeholder="(this page's host)" size="24"
+                         title="Backend base URL or host:port, e.g. https://whisper.example.com or 192.168.1.50:8000. Empty = same host that served this page."></label>
+    <label>Model <input type="text" id="model" value="whisper-1" size="13"></label>
     <label>Lang <input type="text" id="lang" value="de" size="3"></label>
-    <label>Key <input type="text" id="key" placeholder="(open mode)" size="10"></label>
+    <label>Format
+      <select id="format">
+        <option value="json">json</option>
+        <option value="verbose_json">verbose_json</option>
+      </select>
+    </label>
+    <label>API&nbsp;key <input type="password" id="key" placeholder="(open mode)" size="12"></label>
     <button id="toggle">Start dictation</button>
   </div>
   <span id="status">idle</span>
@@ -67,6 +75,7 @@
 <footer>
   Speak commands: <code>Punkt</code> → . &nbsp; <code>Komma</code> → , &nbsp;
   <code>neue Zeile</code> → newline &nbsp; <code>Klammer auf/zu</code> → ( )
+  <div id="note"></div>
 </footer>
 
 <script>
@@ -81,6 +90,32 @@
   let resampleCarry = 0.0, resamplePos = 0.0, pcmBuf = new Int16Array(FRAME_SAMPLES), pcmLen = 0;
 
   function setStatus(text, cls) { statusEl.textContent = text; statusEl.className = cls || ""; }
+
+  // --- connection target + persisted settings ---------------------------------
+  const PREF_FIELDS = ["server", "model", "lang", "format", "key"];
+
+  // Resolve the "Server" field to a ws[s]:// base URL. Accepts a full
+  // ws(s)/http(s) URL or a bare host[:port]; empty falls back to this page's host.
+  function wsBase() {
+    let s = ($("server").value || "").trim().replace(/\/+$/, "");
+    const pageScheme = location.protocol === "https:" ? "wss" : "ws";
+    if (!s) return pageScheme + "://" + location.host;
+    if (/^wss?:\/\//i.test(s)) return s;
+    if (/^https:\/\//i.test(s)) return "wss://" + s.slice(8);
+    if (/^http:\/\//i.test(s)) return "ws://" + s.slice(7);
+    return pageScheme + "://" + s;            // bare host[:port]
+  }
+
+  function loadPrefs() {
+    let saved = {};
+    try { saved = JSON.parse(localStorage.getItem("dictatePrefs") || "{}"); } catch {}
+    for (const f of PREF_FIELDS) if (saved[f] != null && $(f)) $(f).value = saved[f];
+  }
+  function savePrefs() {
+    const o = {};
+    for (const f of PREF_FIELDS) if ($(f)) o[f] = $(f).value;
+    try { localStorage.setItem("dictatePrefs", JSON.stringify(o)); } catch {}
+  }
 
   // AudioWorklet processor: forward raw Float32 mic frames to the main thread.
   const workletSrc = `
@@ -133,17 +168,18 @@
   }
 
   async function start() {
-    const proto = location.protocol === "https:" ? "wss" : "ws";
+    const base = wsBase();
     const key = $("key").value.trim();
     const qs = key ? ("?key=" + encodeURIComponent(key)) : "";
-    ws = new WebSocket(proto + "://" + location.host + "/v1/audio/transcriptions/stream" + qs);
+    ws = new WebSocket(base + "/v1/audio/transcriptions/stream" + qs);
     ws.binaryType = "arraybuffer";
-    setStatus("connecting…");
+    setStatus("connecting to " + base + " …");
 
     ws.onopen = () => {
       ws.send(JSON.stringify({
         type: "config", model: $("model").value.trim() || "whisper-1",
-        language: $("lang").value.trim() || null, response_format: "json",
+        language: $("lang").value.trim() || null,
+        response_format: $("format").value || "json",
         audio: { format: "pcm_s16le", sample_rate: TARGET_SR },
       }));
     };
@@ -186,6 +222,18 @@
       toggleBtn.textContent = "Start dictation"; toggleBtn.classList.remove("stop");
     }
   });
+
+  // --- init: restore saved settings, persist on change, warn on insecure context ---
+  loadPrefs();
+  PREF_FIELDS.forEach((f) => { const el = $(f); if (el) el.addEventListener("change", savePrefs); });
+  if (!window.isSecureContext) {
+    const n = $("note");
+    n.textContent = "⚠ Microphone needs a secure context (https or localhost). Open this page "
+      + "from localhost (or over https) and set Server to your remote backend.";
+    n.style.color = "var(--err)";
+  } else {
+    $("note").textContent = "Settings (incl. API key) are saved in this browser's localStorage.";
+  }
 })();
 </script>
 </body>
