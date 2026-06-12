@@ -101,6 +101,87 @@ if (-not (Test-Path $Python)) {
     Write-Host "venv ready." -ForegroundColor Green
 }
 
+# --- pre-flight: stop + remove any existing WhisperAPI service -------------
+# Done BEFORE the dependency install below so pip can replace compiled files
+# (.pyd/.dll, e.g. pydantic_core / httptools) that the still-running service
+# would otherwise hold open — which on Windows leaves orphaned "~pkg" dirs and
+# "Failed to remove contents" warnings. Handles BOTH the legacy NSSM-installed
+# service AND a previous WinSW install (re-running this script). WinSW's
+# `install` is not idempotent, so we always drop here and re-register at the end.
+function Wait-ServiceGone($name, $timeoutSec) {
+    $deadline = (Get-Date).AddSeconds($timeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        if (-not (Get-Service -Name $name -ErrorAction SilentlyContinue)) { return $true }
+        Start-Sleep -Milliseconds 500
+    }
+    return $false
+}
+
+$svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+if ($svc) {
+    if ($svc.Status -ne "Stopped") {
+        Write-Host "Stopping existing $ServiceName service..."
+        try {
+            Stop-Service -Name $ServiceName -Force -ErrorAction Stop
+        } catch {
+            # Stop-Service can throw if the service is in a transient state;
+            # the polling loop below catches up regardless.
+            Write-Host "  (stop signal sent; waiting for service to settle)" -ForegroundColor DarkGray
+        }
+        $deadline = (Get-Date).AddSeconds(30)
+        while ((Get-Date) -lt $deadline) {
+            $cur = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+            if (-not $cur -or $cur.Status -eq "Stopped") { break }
+            Start-Sleep -Milliseconds 500
+        }
+    }
+
+    Write-Host "Removing existing $ServiceName service..."
+    # Prefer the right tool for whichever supervisor is currently in place.
+    if (Test-Path $WinSWExe) {
+        & $WinSWExe uninstall 2>&1 | Out-Null
+    } elseif (Test-Path $LegacyNssm) {
+        & $LegacyNssm remove $ServiceName confirm 2>&1 | Out-Null
+    } else {
+        # Bare SCM delete works regardless of which supervisor registered it.
+        & sc.exe delete $ServiceName | Out-Null
+    }
+
+    if (-not (Wait-ServiceGone $ServiceName 15)) {
+        Write-Host "WARNING: '$ServiceName' is still registered after removal." -ForegroundColor Yellow
+        Write-Host "  Close any open services.msc / Event Viewer windows and retry,"
+        Write-Host "  or reboot to clear the SCM 'marked for deletion' state."
+        throw "service removal did not complete in 15 s"
+    }
+}
+
+# Kill orphan python.exe processes rooted in this repo. WinSW's 30 s stop
+# timeout often elapses during the ~minute-long model preload, then
+# sc.exe delete removes the service entry without actually terminating
+# python.exe. The orphan keeps port 8000 + the log file open (and locks the
+# venv .pyd files the pip install below needs to replace), so it must die
+# before we touch dependencies. Without this cleanup the deploy is silently
+# broken: code on disk says version N, behavior says N-1.
+$orphans = Get-Process -ErrorAction SilentlyContinue |
+    Where-Object {
+        try { $_.Path -and $_.Path.StartsWith($RepoDir, [StringComparison]::OrdinalIgnoreCase) }
+        catch { $false }
+    }
+if ($orphans) {
+    Write-Host "Killing $($orphans.Count) orphan python.exe process(es) from $RepoDir..." -ForegroundColor Yellow
+    $orphans | Stop-Process -Force -ErrorAction SilentlyContinue
+    # Brief settle so the OS releases the port + log-file + .pyd handles before
+    # the dependency install. 2 s is overkill on a normal machine but cheap
+    # insurance against a slow handle-close.
+    Start-Sleep -Seconds 2
+}
+
+# One-time cleanup: drop the legacy NSSM binary if it's still in the repo dir.
+if (Test-Path $LegacyNssm) {
+    Write-Host "Removing legacy nssm.exe (no longer used)..."
+    Remove-Item -Force $LegacyNssm
+}
+
 # --- install / refresh Python dependencies (EVERY run) ----------------------
 # Run on every invocation, not just first venv creation, so dependencies added
 # or bumped in a later commit are picked up by simply re-running this script.
@@ -193,83 +274,10 @@ if ($WithConvert) {
     }
 }
 
-# --- pre-flight: stop + remove any existing WhisperAPI service -------------
-# Handles BOTH the legacy NSSM-installed service AND a previous WinSW install
-# (re-running this script). WinSW's `install` is not idempotent, so we always
-# drop and re-register.
-function Wait-ServiceGone($name, $timeoutSec) {
-    $deadline = (Get-Date).AddSeconds($timeoutSec)
-    while ((Get-Date) -lt $deadline) {
-        if (-not (Get-Service -Name $name -ErrorAction SilentlyContinue)) { return $true }
-        Start-Sleep -Milliseconds 500
-    }
-    return $false
-}
-
-$svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-if ($svc) {
-    if ($svc.Status -ne "Stopped") {
-        Write-Host "Stopping existing $ServiceName service..."
-        try {
-            Stop-Service -Name $ServiceName -Force -ErrorAction Stop
-        } catch {
-            # Stop-Service can throw if the service is in a transient state;
-            # the polling loop below catches up regardless.
-            Write-Host "  (stop signal sent; waiting for service to settle)" -ForegroundColor DarkGray
-        }
-        $deadline = (Get-Date).AddSeconds(30)
-        while ((Get-Date) -lt $deadline) {
-            $cur = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-            if (-not $cur -or $cur.Status -eq "Stopped") { break }
-            Start-Sleep -Milliseconds 500
-        }
-    }
-
-    Write-Host "Removing existing $ServiceName service..."
-    # Prefer the right tool for whichever supervisor is currently in place.
-    if (Test-Path $WinSWExe) {
-        & $WinSWExe uninstall 2>&1 | Out-Null
-    } elseif (Test-Path $LegacyNssm) {
-        & $LegacyNssm remove $ServiceName confirm 2>&1 | Out-Null
-    } else {
-        # Bare SCM delete works regardless of which supervisor registered it.
-        & sc.exe delete $ServiceName | Out-Null
-    }
-
-    if (-not (Wait-ServiceGone $ServiceName 15)) {
-        Write-Host "WARNING: '$ServiceName' is still registered after removal." -ForegroundColor Yellow
-        Write-Host "  Close any open services.msc / Event Viewer windows and retry,"
-        Write-Host "  or reboot to clear the SCM 'marked for deletion' state."
-        throw "service removal did not complete in 15 s"
-    }
-}
-
-# Kill orphan python.exe processes rooted in this repo. WinSW's 30 s stop
-# timeout often elapses during the ~minute-long model preload, then
-# sc.exe delete removes the service entry without actually terminating
-# python.exe. The orphan keeps port 8000 + the log file open, so the
-# fresh install runs alongside it — old code keeps serving while the new
-# process never wins the port. Without this cleanup the deploy is
-# silently broken: code on disk says version N, behavior says N-1.
-$orphans = Get-Process -ErrorAction SilentlyContinue |
-    Where-Object {
-        try { $_.Path -and $_.Path.StartsWith($RepoDir, [StringComparison]::OrdinalIgnoreCase) }
-        catch { $false }
-    }
-if ($orphans) {
-    Write-Host "Killing $($orphans.Count) orphan python.exe process(es) from $RepoDir..." -ForegroundColor Yellow
-    $orphans | Stop-Process -Force -ErrorAction SilentlyContinue
-    # Brief settle so the OS releases the port + log-file handle before
-    # the new service starts. 2 s is overkill on a normal machine but
-    # cheap insurance against a slow handle-close.
-    Start-Sleep -Seconds 2
-}
-
-# One-time cleanup: drop the legacy NSSM binary if it's still in the repo dir.
-if (Test-Path $LegacyNssm) {
-    Write-Host "Removing legacy nssm.exe (no longer used)..."
-    Remove-Item -Force $LegacyNssm
-}
+# NOTE: the service stop + orphan-kill + legacy-nssm cleanup runs EARLIER now —
+# moved up to before the dependency install so pip can replace compiled files
+# (.pyd/.dll) the running service would otherwise hold open. See the "pre-flight"
+# block above. The WinSW (re)install happens below.
 
 # --- pick the right WinSW binary -------------------------------------------
 # WinSW v2.12.0 ships several executables:
