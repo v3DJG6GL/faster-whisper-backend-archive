@@ -66,7 +66,10 @@ def test_ffmpeg_transport_decodes_webm_to_pcm():
     assert len(got) > 16000
 
 
-def test_stream_route_accepts_webm_via_ffmpeg(app_module):
+def test_stream_route_accepts_webm_via_ffmpeg(app_module, monkeypatch):
+    # Force the energy gate — the synthetic sine tone is not real speech, so the
+    # Silero VAD would reject it; this test only checks the ffmpeg decode path.
+    monkeypatch.setattr(app_module.cfg, "STREAMING_VAD_BACKEND", "energy", raising=False)
     webm = _gen_webm(2.0)
     with TestClient(app_module.app, client=("127.0.0.1", 12345)) as client:
         with client.websocket_connect("/v1/audio/transcriptions/stream") as ws:

@@ -7,16 +7,17 @@ not here — this module only classifies frames.
 
 Two backends behind one interface:
 
-  * :class:`SileroEndpointer` — Silero VAD (robust to room noise; the research's
-    recommended production gate). Lazy-imported from the standalone ``silero_vad``
-    package; constructing it raises if unavailable so the factory falls back.
-  * :class:`EnergyEndpointer` — pure-numpy RMS gate with hysteresis. No extra
-    dependencies; the default on hosts without Silero and in tests. Adequate for
-    close-mic dictation in a quiet room; see the note in ``make_endpointer``.
+  * :class:`SileroEndpointer` — Silero VAD via faster-whisper's BUNDLED ONNX model
+    (``silero_vad_v6.onnx``). No torch, no extra install — it ships with
+    faster-whisper on every platform. Construction probes the model API and raises
+    on an incompatible faster-whisper version so the factory falls back.
+  * :class:`EnergyEndpointer` — pure-numpy RMS gate with hysteresis. No
+    dependencies at all; the fallback when the bundled VAD can't be loaded (e.g.
+    faster-whisper not importable, as on a deps-free CI/dev box) and in tests.
 
-Silero is not installed on every host (and is not importable on the Linux dev box
-at all), so Energy is the safe default and Silero is an opt-in upgrade validated on
-the production host.
+``"auto"`` (the default) uses bundled Silero when faster-whisper is present and
+silently falls back to the energy gate otherwise — so it works on every deployment
+without an extra package.
 """
 
 import logging
@@ -64,31 +65,60 @@ class EnergyEndpointer:
 
 
 class SileroEndpointer:
-    """Silero VAD run frame-by-frame via the standalone ``silero_vad`` package.
+    """Frame-by-frame Silero VAD using faster-whisper's BUNDLED ONNX model
+    (``silero_vad_v6.onnx``) via ``faster_whisper.vad.get_vad_model``.
 
-    Raises ImportError/Exception on construction if the package (and its torch
-    backend) isn't available; :func:`make_endpointer` catches that and falls back.
+    No torch and no extra install — the model ships inside faster-whisper on every
+    platform (Linux / Docker / Windows), and onnxruntime is already a faster-whisper
+    dependency. The bundled model takes a 1-D float32 array whose length is a
+    multiple of 512 and returns one speech probability per 512-sample window
+    (LSTM/context state handled internally per call).
+
+    Each 512-sample (32 ms) frame is scored together with a few frames of rolling
+    lookback so the decision window has real left-context. Construction probes the
+    call signature (it differs on older faster-whisper), so an incompatible version
+    raises and :func:`make_endpointer` falls back to the energy gate instead of
+    crashing mid-stream.
     """
 
-    def __init__(self, threshold: float = 0.5):
-        from silero_vad import load_silero_vad  # noqa: PLC0415  (optional dep)
-        import torch  # noqa: PLC0415
+    _CTX_FRAMES = 3  # frames of lookback prepended to the decision window
 
-        self._torch = torch
-        self._model = load_silero_vad()
-        self.threshold = threshold
-        # Silero ends speech with built-in hysteresis at (threshold - 0.15).
-        self._off = threshold - 0.15
+    def __init__(self, threshold: float = 0.5):
+        from faster_whisper.vad import get_vad_model  # noqa: PLC0415
+
+        self._model = get_vad_model()
+        self.threshold = float(threshold)
+        self._off = self.threshold - 0.15          # Silero's built-in hysteresis
         self._speaking = False
+        self._win = FRAME_SAMPLES * (self._CTX_FRAMES + 1)  # multiple of 512
+        self._buf = np.zeros(self._win, dtype=np.float32)
+        self._degraded = False
+        self._probe()
+
+    def _probe(self) -> None:
+        out = self._model(np.zeros(self._win, dtype=np.float32))
+        float(np.asarray(out).reshape(-1)[-1])     # must yield a scalar probability
+
+    def _prob(self, frame: np.ndarray) -> float:
+        self._buf = np.concatenate([self._buf[FRAME_SAMPLES:], frame])
+        out = self._model(self._buf)               # (_CTX_FRAMES + 1) window probs
+        return float(np.asarray(out).reshape(-1)[-1])
 
     def is_speech(self, frame: np.ndarray) -> bool:
-        if frame.shape[0] != FRAME_SAMPLES:
-            # Pad/truncate to the strict window — Silero v5 crashes otherwise.
+        if frame.shape[0] != FRAME_SAMPLES:        # strict 512-sample window
             buf = np.zeros(FRAME_SAMPLES, dtype=np.float32)
             n = min(FRAME_SAMPLES, frame.shape[0])
             buf[:n] = frame[:n]
             frame = buf
-        prob = float(self._model(self._torch.from_numpy(frame), SAMPLE_RATE).item())
+        frame = frame.astype(np.float32, copy=False)
+        try:
+            prob = self._prob(frame)
+        except Exception:  # noqa: BLE001 — never break the stream on a VAD hiccup
+            if not self._degraded:
+                self._degraded = True
+                logger.warning("[streaming-vad] Silero call failed mid-stream; "
+                               "degrading to the energy gate for this session.")
+            prob = 1.0 if rms_dbfs(frame) > -42.0 else 0.0
         if self._speaking:
             if prob < self._off:
                 self._speaking = False
@@ -98,8 +128,7 @@ class SileroEndpointer:
 
     def reset(self) -> None:
         self._speaking = False
-        if hasattr(self._model, "reset_states"):
-            self._model.reset_states()
+        self._buf = np.zeros(self._win, dtype=np.float32)
 
 
 def make_endpointer(backend: str = "auto", *, threshold: float = 0.5,
@@ -113,9 +142,8 @@ def make_endpointer(backend: str = "auto", *, threshold: float = 0.5,
             if backend == "silero":
                 raise
             logger.warning(
-                "[streaming-vad] Silero unavailable (%s); using energy gate "
-                "(threshold %.0f dBFS). Install 'silero-vad' for noise-robust "
-                "endpointing.", exc, energy_dbfs,
+                "[streaming-vad] bundled Silero VAD unavailable (%s); using the "
+                "energy gate (threshold %.0f dBFS).", exc, energy_dbfs,
             )
     return EnergyEndpointer(threshold_dbfs=energy_dbfs)
 

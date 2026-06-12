@@ -25,7 +25,11 @@ def _drain(ws, limit=200):
     return msgs
 
 
-def test_stream_happy_path_partials_then_final(app_module):
+def test_stream_happy_path_partials_then_final(app_module, monkeypatch):
+    # Force the energy gate: the synthetic constant-amplitude PCM below is "loud"
+    # but not speech, so the real Silero VAD would (correctly) reject it. This test
+    # exercises the routing/protocol/session flow, not the VAD model.
+    monkeypatch.setattr(app_module.cfg, "STREAMING_VAD_BACKEND", "energy", raising=False)
     with TestClient(app_module.app, client=("127.0.0.1", 12345)) as client:
         with client.websocket_connect("/v1/audio/transcriptions/stream") as ws:
             ws.send_json({

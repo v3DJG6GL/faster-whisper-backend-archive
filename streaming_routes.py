@@ -89,11 +89,17 @@ def _stream_config(cfg) -> StreamConfig:
 
 
 def _build_transcribe_kwargs(main, model_name: str, *, final: bool,
-                             prompt: str, want_words: bool) -> dict:
-    """Assemble model.transcribe kwargs from per-model config + streaming overrides."""
+                             prompt: str, want_words: bool,
+                             language: str = "") -> dict:
+    """Assemble model.transcribe kwargs from per-model config + streaming overrides.
+
+    ``language`` is the per-connection language from the config handshake; it wins
+    over the model's DEFAULT_LANGUAGE. Pinning it avoids faster-whisper auto-
+    detecting per (short, growing) partial buffer, which is unstable — a brief
+    German chunk can be mis-detected as e.g. Swedish."""
     cfg_for = main.cfg_for
     cfg = main.cfg
-    lang = cfg_for(model_name, "DEFAULT_LANGUAGE")
+    lang = (language or cfg_for(model_name, "DEFAULT_LANGUAGE") or "").strip()
     kwargs = dict(
         language=lang or None,
         temperature=0.0,
@@ -156,6 +162,7 @@ async def transcribe_stream(ws: WebSocket) -> None:
             pending_audio = first["bytes"]
 
         model_req = conf.get("model") or "whisper-1"
+        req_language = (conf.get("language") or "").strip()
         response_format = conf.get("response_format", "json")
         include_words = response_format == "verbose_json"
         audio_fmt = (conf.get("audio") or {}).get("format", "pcm_s16le")
@@ -200,7 +207,7 @@ async def transcribe_stream(ws: WebSocket) -> None:
         async def decode_partial(audio, prompt):
             kwargs = _build_transcribe_kwargs(
                 main, partial_model_name, final=False, prompt=prompt,
-                want_words=gate_partial_words)
+                want_words=gate_partial_words, language=req_language)
             segs, _info = await _transcribe(partial_model_obj, audio, kwargs)
             if gate_partial_words:
                 words = [(w.start, w.end, w.word)
@@ -214,7 +221,7 @@ async def transcribe_stream(ws: WebSocket) -> None:
             want_words = gate_final_words and include_words
             kwargs = _build_transcribe_kwargs(
                 main, final_model, final=True, prompt=prompt,
-                want_words=gate_final_words)
+                want_words=gate_final_words, language=req_language)
             segs, _info = await _transcribe(final_model_obj, audio, kwargs)
             raw = "".join(seg.text for seg in segs)
             words_out: list[dict] = []
