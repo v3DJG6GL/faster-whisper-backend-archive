@@ -4,7 +4,7 @@
 # auto HF→CT2 conversion at runtime.
 
 # CT2's TransformersConverter loads the HF checkpoint via transformers.
-transformers>=5.11.0
+transformers>=5.12.0
 
 # transformers' from_pretrained() needs torch for tensor materialisation.
 # CPU-only is fine — conversion never touches CUDA.
