@@ -341,6 +341,19 @@ Other layers:
 
 Edits land in **`config.local.json`** at the repo root (gitignored). See `config.local.example.json` for the schema. The one exception is the Pipeline section's **promote** action, which writes the committed **`config.json`** instead (see [Post-processing pipeline](#post-processing-pipeline)).
 
+### Per-identity config overrides
+
+Beyond the global and per-model layers, decode / streaming / output / pipeline-rule settings can be overridden **per user, per API key, and per reusable profile** — so 20 clinicians can share one config without re-flashing every device. Managed on the dedicated **`/settings/overrides`** page; bound to users & keys in-context on **`/settings/api-keys`** (a `⚙ overrides` / `⚙ config` drawer per user / key). Load-time model fields (device, compute type, workers…) are **never** per-identity — a model is loaded once for everyone.
+
+- **Profiles** — named, reusable override bundles (e.g. `clinic-de`). Assign an *ordered* list to a user or key; **earlier wins** on a conflicting field.
+- **Direct overrides** — a per-user or per-key blob layered on top of its profiles for one-offs.
+- **Precedence** (most → least specific): `per-key direct → per-key profiles → per-user direct → per-user profiles → per-model → global → library`. The first identity layer that sets a field owns its value **and** its lock.
+- **Per-field locking** — mark a field 🔒 to forbid the client's per-request `decode_overrides` (and `language`/`prompt`) from changing it; the dropped keys are surfaced in `verbose_json.overrides_ignored` (batch) / the `ready` frame (streaming), never silently ignored. A useful compute cap on a shared server (e.g. lock `BEAM_SIZE`).
+- **Effective-config Explorer** — the `/settings/overrides` *Explorer* tab is a what-if simulator: pick a user (+ key, + model, + a simulated client override) and see the full resolution **waterfall** per field — which layer won, what was overridden, what is locked.
+- **Pipeline rules** resolve analogously (first layer that force-on/off a rule decides; otherwise per-model, then the global `enabled`). Capture **reprocess** re-runs the pipeline under the capture **owner's** rules.
+
+The same `OVERRIDE_PROFILES` JSON can be pinned via `WHISPER_OVERRIDE_PROFILES` (see `.env.example`). Per-user bindings live in the user's permissions JSON; per-key bindings in the `api_keys.config` column (added by an idempotent migration on first start).
+
 ## Brand
 
 The mark is an **audio waveform skewed forward** — *whisper* (the equalizer bars) meets *faster* (the rightward lean reads as motion / fast-forward) — on a rounded terminal-dark tile. The wordmark is a monospace lockup, `faster` (dim) + `whisper` (bold), with a green `>` prompt marking this as the **backend** service, distinct from the upstream [faster-whisper](https://github.com/SYSTRAN/faster-whisper) library it wraps. The palette mirrors the WebUI's GitHub-dark theme — cyan `#79c0ff` → green `#7ee787` on `#0d1117`.

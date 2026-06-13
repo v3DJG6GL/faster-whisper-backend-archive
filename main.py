@@ -662,6 +662,8 @@ def _format_request_block(
     captured_id: str | None = None,
     endpoint: str = "/v1/audio/transcriptions",
     audio_source: str | None = None,
+    ident=None,
+    overrides_ignored: "list | None" = None,
 ) -> str:
     """Full per-request log block. `steps` is the per-pipeline trace; passed
     in only when cfg.TRACE_ENABLED so the block stays a single message.
@@ -727,6 +729,20 @@ def _format_request_block(
     lines.extend(_format_decode_params(kwargs))
 
     lines.extend(_format_segments_section(seg_diag, info, kwargs))
+
+    # Identity section — only when a per-identity layer contributed or a client
+    # override was locked out, so the common no-config request stays terse.
+    if ident is not None and (getattr(ident, "layers", None)
+                              or getattr(ident, "locked", None) or overrides_ignored):
+        lines.append(_section_rule("Identity"))
+        if ident.profiles_applied:
+            lines.append(f"    {'profiles':<{_NAME_COL - 4}}{' → '.join(ident.profiles_applied)}")
+        if ident.layers:
+            lines.append(f"    {'layers':<{_NAME_COL - 4}}{', '.join(ident.layers)}")
+        if ident.locked:
+            lines.append(f"    {'locked':<{_NAME_COL - 4}}{', '.join(sorted(ident.locked))}")
+        if overrides_ignored:
+            lines.append(f"    {'overrides_ignored':<{_NAME_COL - 4}}{', '.join(overrides_ignored)}")
 
     lines.append(rule)
     lines.append(f"  RAW WHISPER  {raw!r}")
@@ -2244,6 +2260,8 @@ async def transcribe(
                 captured_id=captured_id,
                 endpoint="/v1/audio/transcriptions",
                 audio_source=f"{_src_fmt} → 16 kHz mono (file upload)",
+                ident=ident,
+                overrides_ignored=ignored,
             ))
 
             # Persist the trace to the durable recent-transcriptions store

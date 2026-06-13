@@ -463,7 +463,8 @@ async def transcribe_stream(ws: WebSocket) -> None:
                     seg_diag=seg_diag, raw=raw_text, final=final_text,
                     steps=steps, request_id=rid, captured_id=captured_id,
                     endpoint="/v1/audio/transcriptions/stream",
-                    audio_source=audio_source_label))
+                    audio_source=audio_source_label,
+                    ident=ident, overrides_ignored=overrides_ignored))
             except Exception as _le:  # noqa: BLE001
                 logger.warning("[stream %s] log block failed: %s", session_id[:8], _le)
 

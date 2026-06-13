@@ -72,6 +72,30 @@ def test_no_identity_config_is_unchanged(client, make_user_key, fake_model):
     assert "overrides_ignored" not in r.json()
 
 
+def test_request_block_identity_section():
+    from types import SimpleNamespace
+    import main
+    ident = SimpleNamespace(layers=["user.profile:clinic-de"], locked={"BEAM_SIZE"},
+                            profiles_applied=["clinic-de"])
+    info = SimpleNamespace(language="de", language_probability=0.99,
+                           duration=1.0, duration_after_vad=1.0)
+    seg = [{"id": 0, "start": 0.0, "end": 1.0, "alp": -0.1, "nsp": 0.01,
+            "cr": 1.2, "temp": 0.0, "text": "hi"}]
+    block = main._format_request_block(
+        file_label="x", model_name="whisper-1", info=info,
+        kwargs={"beam_size": 8}, seg_diag=seg, raw="hi", final="hi",
+        ident=ident, overrides_ignored=["beam_size"])
+    assert "Identity" in block
+    assert "clinic-de" in block and "BEAM_SIZE" in block
+    assert "overrides_ignored" in block and "beam_size" in block
+    # no identity + nothing ignored → no Identity section (logs stay terse)
+    empty = SimpleNamespace(layers=[], locked=set(), profiles_applied=[])
+    block2 = main._format_request_block(
+        file_label="x", model_name="whisper-1", info=info, kwargs={},
+        seg_diag=seg, raw="hi", final="hi", ident=empty)
+    assert "Identity" not in block2
+
+
 def test_per_key_override_beats_user(client, make_user_key, fake_model):
     _, raw_admin = make_user_key("admin", is_admin=True)
     admin_h = bearer(raw_admin)
