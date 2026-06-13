@@ -157,6 +157,8 @@ ENV_VAR_MAPPING: dict[str, str] = {
     "INFERENCE_CONCURRENCY": "WHISPER_INFERENCE_CONCURRENCY",
     "STREAMING_PARTIAL_MODEL": "WHISPER_STREAMING_PARTIAL_MODEL",
     "STREAMING_PARTIAL_BEAM": "WHISPER_STREAMING_PARTIAL_BEAM",
+    "STREAMING_PARTIAL_TEMPERATURE": "WHISPER_STREAMING_PARTIAL_TEMPERATURE",
+    "STREAMING_PARTIAL_CONDITION_ON_PREVIOUS_TEXT": "WHISPER_STREAMING_PARTIAL_CONDITION_ON_PREVIOUS_TEXT",
     "STREAMING_VAD_BACKEND": "WHISPER_STREAMING_VAD_BACKEND",
     "STREAMING_VAD_THRESHOLD": "WHISPER_STREAMING_VAD_THRESHOLD",
     "STREAMING_RMS_GATE_DBFS": "WHISPER_STREAMING_RMS_GATE_DBFS",
@@ -686,6 +688,14 @@ FIELD_DESCRIPTIONS: dict[str, str] = {
     "STREAMING_PARTIAL_BEAM":
         "Beam width for partial decodes. 5 is ~as fast as greedy (encoder-bound) "
         "but more stable run-to-run. Finals use BEAM_SIZE.",
+    "STREAMING_PARTIAL_TEMPERATURE":
+        "Sampling temperature for partial decodes (single value, 0–1). Kept at 0.0 "
+        "so partials never trigger a fallback re-decode mid-stream; finals use the "
+        "per-model TEMPERATURE ladder.",
+    "STREAMING_PARTIAL_CONDITION_ON_PREVIOUS_TEXT":
+        "Condition partial decodes on previously committed text. Off by default — "
+        "many German finetunes loop into repeated punctuation on short, growing "
+        "partial buffers. Finals use the per-model CONDITION_ON_PREVIOUS_TEXT.",
     "STREAMING_VAD_BACKEND":
         "Endpointing backend: 'auto' (Silero if installed, else energy), 'silero' "
         "(noise-robust, needs the silero-vad package), or 'energy' (pure RMS).",
@@ -1062,6 +1072,8 @@ class AdminConfig(BaseModel):
     INFERENCE_CONCURRENCY: Annotated[int, Field(ge=1, le=64)] | None = _F("INFERENCE_CONCURRENCY")
     STREAMING_PARTIAL_MODEL: Annotated[str, Field(max_length=96)] | None = _F("STREAMING_PARTIAL_MODEL")
     STREAMING_PARTIAL_BEAM: Annotated[int, Field(ge=1, le=20)] | None = _F("STREAMING_PARTIAL_BEAM")
+    STREAMING_PARTIAL_TEMPERATURE: Annotated[float, Field(ge=0.0, le=1.0)] | None = _F("STREAMING_PARTIAL_TEMPERATURE")
+    STREAMING_PARTIAL_CONDITION_ON_PREVIOUS_TEXT: bool | None = _F("STREAMING_PARTIAL_CONDITION_ON_PREVIOUS_TEXT")
     STREAMING_VAD_BACKEND: Literal["auto", "silero", "energy"] | None = _F("STREAMING_VAD_BACKEND")
     STREAMING_VAD_THRESHOLD: Annotated[float, Field(ge=0.0, le=1.0)] | None = _F("STREAMING_VAD_THRESHOLD")
     STREAMING_RMS_GATE_DBFS: Annotated[float, Field(ge=-90.0, le=0.0)] | None = _F("STREAMING_RMS_GATE_DBFS")

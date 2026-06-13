@@ -760,6 +760,12 @@ STREAMING_PARTIAL_MODEL: str = ""
 # Beam width for partial decodes. Encoder-bound, so 5 is ~as fast as greedy but
 # more stable run-to-run (helps LocalAgreement commit). Finals use BEAM_SIZE.
 STREAMING_PARTIAL_BEAM: int = 5
+# Partial-decode tuning. Finals/batch read the per-model TEMPERATURE ladder and
+# CONDITION_ON_PREVIOUS_TEXT; partials stay lean for latency — a single temperature
+# (no fallback re-decode mid-stream) and conditioning off (it makes German
+# finetunes loop on short, growing partial buffers; see CONDITION_ON_PREVIOUS_TEXT).
+STREAMING_PARTIAL_TEMPERATURE: float = 0.0
+STREAMING_PARTIAL_CONDITION_ON_PREVIOUS_TEXT: bool = False
 
 # Endpointing. Backend: "auto" (Silero if installed, else energy) | "silero" |
 # "energy". Two-tier silence gate: inner gate triggers a boundary partial, outer
