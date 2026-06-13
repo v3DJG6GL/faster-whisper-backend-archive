@@ -605,8 +605,12 @@ async def reprocess_capture_api(
     import main
     raw = row.get("raw") or ""
     captures_excludes = getattr(cfg, "CAPTURES_PIPELINE_RULES_EXCLUDE", None)
+    # Resolve the CAPTURE OWNER's effective pipeline (not the caller's — an admin
+    # may reprocess another user's row; the result must reflect that user's
+    # rules). Pipeline-only: no key / no per-request layer on reprocess.
+    ident = main.build_ident({"user_id": row.get("user_id")}, row.get("model"))
     try:
-        new_final = main._postprocess_text(raw, model_name=row.get("model"))
+        new_final = main._postprocess_text(raw, model_name=row.get("model"), ident=ident)
     except Exception as e:
         raise HTTPException(
             status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -621,6 +625,7 @@ async def reprocess_capture_api(
                 raw,
                 model_name=row.get("model"),
                 extra_excludes=captures_excludes,
+                ident=ident,
             )
         except Exception as e:
             raise HTTPException(

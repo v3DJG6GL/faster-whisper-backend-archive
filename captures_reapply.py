@@ -94,16 +94,30 @@ def _run() -> None:
         # short text columns (no words_json / segments_json), so memory
         # stays bounded even at tens of thousands of rows.
         rows = conn.execute(
-            "SELECT id, raw, final, text_for_training, model, sample_id"
+            "SELECT id, raw, final, text_for_training, model, sample_id, user_id"
             " FROM captures ORDER BY created_ts DESC"
         ).fetchall()
+        # Reprocess re-runs ONLY the pipeline (no model re-decode), so it
+        # resolves the owning USER's effective pipeline rules (no key — captures
+        # store no key_id — and no per-request layer). Memoised per
+        # (user_id, model) so a bulk reapply does one resolve per distinct pair,
+        # not one per row. Config is snapshotted for the run's duration.
+        ident_cache: dict = {}
+
+        def _ident_for(uid, model_id):
+            key = (uid, model_id)
+            if key not in ident_cache:
+                ident_cache[key] = main.build_ident({"user_id": uid}, model_id)
+            return ident_cache[key]
+
         for r in rows:
             cid = r["id"]
             raw_text = r["raw"] or ""
             patch: dict[str, str] = {}
+            ident = _ident_for(r["user_id"], r["model"])
             try:
                 new_final = main._postprocess_text(
-                    raw_text, model_name=r["model"],
+                    raw_text, model_name=r["model"], ident=ident,
                 )
             except Exception as e:
                 logger.warning(
@@ -123,7 +137,7 @@ def _run() -> None:
                 try:
                     new_training = main._postprocess_text(
                         raw_text, model_name=r["model"],
-                        extra_excludes=captures_excludes,
+                        extra_excludes=captures_excludes, ident=ident,
                     )
                 except Exception as e:
                     logger.warning(
