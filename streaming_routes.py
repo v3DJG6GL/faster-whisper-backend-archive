@@ -227,6 +227,9 @@ async def transcribe_stream(ws: WebSocket) -> None:
         model_req = conf.get("model") or "whisper-1"
         req_language = (conf.get("language") or "").strip()
         response_format = conf.get("response_format", "json")
+        # Per-connection initial prompt (the client's "Vocabulary / prompt"). Empty
+        # → fall back to the model's DEFAULT_PROMPT, then to None — same as batch.
+        req_prompt = (conf.get("prompt") or "").strip()
         include_words = response_format == "verbose_json"
         audio_fmt = (conf.get("audio") or {}).get("format", "pcm_s16le")
         if audio_fmt not in RAW_FORMATS and audio_fmt not in ENCODED_FORMATS:
@@ -457,7 +460,7 @@ async def transcribe_stream(ws: WebSocket) -> None:
             decode_final=decode_final,
             postprocess=postprocess,
             emit=emit,
-            base_prompt=main.cfg_for(final_model, "DEFAULT_PROMPT") or "",
+            base_prompt=(req_prompt or main.cfg_for(final_model, "DEFAULT_PROMPT") or ""),
             on_final=on_final,
         )
 
