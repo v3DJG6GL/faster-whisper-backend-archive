@@ -157,6 +157,39 @@ def test_pcm_loop_emits_partials_then_a_final_after_silence():
     assert finals[0]["committed"] + finals[0]["tail"] == "hallo welt."
 
 
+def test_hard_break_resets_document_after_long_silence():
+    """A silence longer than hard_break_silence_sec ends the whole grouping: emit a
+    `boundary` marker (carrying the separator) and reset the accumulated document,
+    without closing the connection. Fires once per quiet gap."""
+    cfg = StreamConfig(
+        min_chunk_ms=96, vad_min_silence_ms=96, commit_silence_ms=192,
+        min_speech_ms=64, forced_commit_sec=100, buffer_trim_sec=100,
+        rms_gate_dbfs=-60, preroll_keep_ms=100,
+        hard_break_silence_sec=0.5, hard_break_separator="\n",
+    )
+
+    async def decode_final(audio, prompt):
+        return ("hallo welt.", [])
+
+    s, msgs = _make_session(
+        postprocess=lambda raw: raw, decode_final=decode_final, cfg=cfg,
+    )
+
+    async def run():
+        await s.feed_pcm(_pcm(8000, 300))   # speech → one utterance
+        await s.feed_pcm(_pcm(0, 700))      # silence: finalize (192 ms) then hard break (500 ms)
+
+    asyncio.run(run())
+    finals = [m for m in msgs if m["type"] == "final"]
+    boundaries = [m for m in msgs if m["type"] == "boundary"]
+    assert len(finals) == 1                       # one finalize before the break
+    assert len(boundaries) == 1                   # exactly one break (raw_confirmed guard)
+    assert boundaries[0]["separator"] == "\n"
+    assert s.raw_confirmed == ""                  # document reset → fresh grouping next
+    assert s._committed_len == 0
+    assert s._prev_processed == ""
+
+
 def test_no_partial_decode_storm_during_trailing_silence():
     """Regression: trailing silence must NOT trigger a partial decode per frame.
     The old inner-pause trigger fired one (synchronous) decode per 32 ms silent

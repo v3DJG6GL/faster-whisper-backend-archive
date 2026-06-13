@@ -164,6 +164,8 @@ ENV_VAR_MAPPING: dict[str, str] = {
     "STREAMING_MIN_SPEECH_MS": "WHISPER_STREAMING_MIN_SPEECH_MS",
     "STREAMING_VAD_MIN_SILENCE_MS": "WHISPER_STREAMING_VAD_MIN_SILENCE_MS",
     "STREAMING_COMMIT_SILENCE_MS": "WHISPER_STREAMING_COMMIT_SILENCE_MS",
+    "STREAMING_HARD_BREAK_SILENCE_SEC": "WHISPER_STREAMING_HARD_BREAK_SILENCE_SEC",
+    "STREAMING_HARD_BREAK_SEPARATOR": "WHISPER_STREAMING_HARD_BREAK_SEPARATOR",
     "STREAMING_FORCED_COMMIT_SEC": "WHISPER_STREAMING_FORCED_COMMIT_SEC",
     "STREAMING_BUFFER_TRIM_SEC": "WHISPER_STREAMING_BUFFER_TRIM_SEC",
     "STREAMING_BUFFER_TRIM_KEEP_SEC": "WHISPER_STREAMING_BUFFER_TRIM_KEEP_SEC",
@@ -705,6 +707,13 @@ FIELD_DESCRIPTIONS: dict[str, str] = {
     "STREAMING_COMMIT_SILENCE_MS":
         "Outer silence gate (ms): end-of-speech silence that finalizes the "
         "utterance and runs post-processing. Tune per dictation habit (~1200).",
+    "STREAMING_HARD_BREAK_SILENCE_SEC":
+        "Silence (s) that ends the whole grouping and starts a fresh document "
+        "mid-connection — bounds long latch sessions and makes pauses act as "
+        "paragraph breaks (resets prompt + committed context). 0 = off.",
+    "STREAMING_HARD_BREAK_SEPARATOR":
+        "Text the client types between documents at a hard break: '' = nothing, "
+        "' ' = space, '\\n' = newline.",
     "STREAMING_FORCED_COMMIT_SEC":
         "Hard cap (s) on continuous speech before a forced finalize — keeps the "
         "buffer inside Whisper's 30 s receptive field. Must be < 30.",
@@ -1060,6 +1069,8 @@ class AdminConfig(BaseModel):
     STREAMING_MIN_SPEECH_MS: Annotated[int, Field(ge=0, le=5000)] | None = _F("STREAMING_MIN_SPEECH_MS")
     STREAMING_VAD_MIN_SILENCE_MS: Annotated[int, Field(ge=0, le=5000)] | None = _F("STREAMING_VAD_MIN_SILENCE_MS")
     STREAMING_COMMIT_SILENCE_MS: Annotated[int, Field(ge=100, le=10000)] | None = _F("STREAMING_COMMIT_SILENCE_MS")
+    STREAMING_HARD_BREAK_SILENCE_SEC: Annotated[float, Field(ge=0.0, le=120.0)] | None = _F("STREAMING_HARD_BREAK_SILENCE_SEC")
+    STREAMING_HARD_BREAK_SEPARATOR: Annotated[str, Field(max_length=8)] | None = _F("STREAMING_HARD_BREAK_SEPARATOR")
     STREAMING_FORCED_COMMIT_SEC: Annotated[float, Field(ge=5.0, le=29.0)] | None = _F("STREAMING_FORCED_COMMIT_SEC")
     STREAMING_BUFFER_TRIM_SEC: Annotated[float, Field(ge=5.0, le=29.0)] | None = _F("STREAMING_BUFFER_TRIM_SEC")
     STREAMING_BUFFER_TRIM_KEEP_SEC: Annotated[float, Field(ge=2.0, le=29.0)] | None = _F("STREAMING_BUFFER_TRIM_KEEP_SEC")

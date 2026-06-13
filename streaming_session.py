@@ -66,6 +66,8 @@ class StreamConfig:
     min_speech_ms: int = 500          # skip inference below this much speech (anti-hallucination)
     vad_min_silence_ms: int = 700     # inner gate: silence that triggers a boundary partial
     commit_silence_ms: int = 1200     # outer gate: silence that finalizes the utterance
+    hard_break_silence_sec: float = 5.0  # silence that ends the whole grouping → fresh document (0 = off)
+    hard_break_separator: str = ""    # client-typed separator between documents ("\n" = newline, " " = space)
     forced_commit_sec: float = 25.0   # hard cap on speech before a forced finalize (< 30 s mel field)
     buffer_trim_sec: float = 15.0     # trim the audio buffer when it grows past this
     buffer_trim_keep_sec: float = 10.0  # audio kept (anchored at a committed word) after a trim
@@ -109,6 +111,7 @@ class StreamSession:
         self._in_utterance = False
         self._speech_ms = 0
         self._silence_ms = 0
+        self._idle_silence_ms = 0          # continuous silence since speech stopped (survives finalize)
         self._new_since_partial = 0
 
         self.raw_confirmed = ""            # cross-utterance verbatim accumulator
@@ -160,8 +163,22 @@ class StreamSession:
             self._in_utterance = True
             self._speech_ms += FRAME_MS
             self._silence_ms = 0
-        elif self._in_utterance:
-            self._silence_ms += FRAME_MS
+            self._idle_silence_ms = 0
+        else:
+            self._idle_silence_ms += FRAME_MS
+            if self._in_utterance:
+                self._silence_ms += FRAME_MS
+
+        # Hard break: once the current utterance has been finalized (we're idle again)
+        # and the accumulated document has been silent long enough, reset to a fresh
+        # document — pauses become paragraph boundaries and a multi-minute latch
+        # session can't grow without bound. Fires once per quiet gap (the
+        # raw_confirmed guard) and never closes the socket.
+        if (self.cfg.hard_break_silence_sec > 0
+                and not self._in_utterance
+                and self.raw_confirmed
+                and self._idle_silence_ms >= self.cfg.hard_break_silence_sec * 1000):
+            await self._hard_break()
 
         if not self._in_utterance:
             self._trim_preroll()
@@ -257,6 +274,27 @@ class StreamSession:
             })
         self._utterance_index += 1
         self._reset_utterance()
+
+    async def _hard_break(self) -> None:
+        """End the whole grouping after a long silence and start a fresh document,
+        without closing the WebSocket.
+
+        Emits a ``boundary`` marker so the client resets its injection baseline (and
+        optionally types ``hard_break_separator`` between documents), then clears the
+        cross-utterance accumulators. The rolling prompt is reset too — a long pause
+        is treated as a new context; to instead keep terminology across breaks, drop
+        the ``self._prompt`` reset below."""
+        await self.emit({
+            "type": "boundary",
+            "utterance": self._utterance_index,
+            "separator": self.cfg.hard_break_separator,
+        })
+        self.raw_confirmed = ""
+        self._committed_len = 0
+        self._committed_text = ""
+        self._prev_processed = ""
+        self._prompt = self.base_prompt.strip()
+        self._idle_silence_ms = 0
 
     # ---- emission ---------------------------------------------------------
 

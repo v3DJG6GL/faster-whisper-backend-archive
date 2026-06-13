@@ -771,6 +771,10 @@ STREAMING_MIN_CHUNK_MS: int = 1000
 STREAMING_MIN_SPEECH_MS: int = 500
 STREAMING_VAD_MIN_SILENCE_MS: int = 700
 STREAMING_COMMIT_SILENCE_MS: int = 1200
+# Long-silence "hard break": ends the whole grouping and starts a fresh document
+# mid-connection (paragraph boundary). 0 = off (one document per connection).
+STREAMING_HARD_BREAK_SILENCE_SEC: float = 5.0
+STREAMING_HARD_BREAK_SEPARATOR: str = ""
 
 # Buffer management (kept well inside Whisper's 30 s receptive field).
 STREAMING_FORCED_COMMIT_SEC: float = 25.0
