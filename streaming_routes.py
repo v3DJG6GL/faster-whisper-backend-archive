@@ -107,8 +107,14 @@ def authenticate_ws(ws: WebSocket) -> "dict | None":
     return auth._resolve_user(ws, _ws_credentials(ws))
 
 
-def _stream_config(cfg) -> StreamConfig:
-    g = lambda name, default: getattr(cfg, "STREAMING_" + name, default)  # noqa: E731
+def _stream_config(cfg, ident=None) -> StreamConfig:
+    # Per-identity override (ident) > global. STREAMING_* are not per-model, so
+    # ident-or-global is the full resolution — no cfg_for / model_id needed.
+    def g(name, default):
+        key = "STREAMING_" + name
+        if ident is not None and key in ident.values:
+            return ident.values[key]
+        return getattr(cfg, key, default)
     return StreamConfig(
         sample_rate=SAMPLE_RATE,
         # Public config keys (the g("…") suffix, after STREAMING_) may differ from
@@ -130,7 +136,7 @@ def _stream_config(cfg) -> StreamConfig:
 def _build_transcribe_kwargs(main, model_name: str, *, final: bool,
                              prompt: str, want_words: bool,
                              language: str = "", model_obj=None,
-                             overrides=None) -> dict:
+                             overrides=None, ident=None) -> dict:
     """Assemble model.transcribe kwargs for a streaming decode.
 
     Both partial and final decodes pull the SAME per-model config as the batch
@@ -147,20 +153,20 @@ def _build_transcribe_kwargs(main, model_name: str, *, final: bool,
     German chunk can be mis-detected as e.g. Swedish."""
     cfg_for = main.cfg_for
     cfg = main.cfg
-    lang = (language or cfg_for(model_name, "DEFAULT_LANGUAGE") or "").strip()
-    _vad_filter = cfg_for(model_name, "VAD_FILTER")
+    lang = (language or cfg_for(model_name, "DEFAULT_LANGUAGE", ident) or "").strip()
+    _vad_filter = cfg_for(model_name, "VAD_FILTER", ident)
     vad_parameters = dict(
-        min_silence_duration_ms=cfg_for(model_name, "VAD_MIN_SILENCE_MS"),
-        speech_pad_ms=cfg_for(model_name, "VAD_SPEECH_PAD_MS"),
-        threshold=cfg_for(model_name, "VAD_THRESHOLD"),
+        min_silence_duration_ms=cfg_for(model_name, "VAD_MIN_SILENCE_MS", ident),
+        speech_pad_ms=cfg_for(model_name, "VAD_SPEECH_PAD_MS", ident),
+        threshold=cfg_for(model_name, "VAD_THRESHOLD", ident),
     ) if _vad_filter else None
-    _prompt = prompt or cfg_for(model_name, "DEFAULT_PROMPT")
+    _prompt = prompt or cfg_for(model_name, "DEFAULT_PROMPT", ident)
     kwargs = main.assemble_transcribe_kwargs(
         model_name, model_obj,
         language=lang, temperature=0.0,
         vad_filter=_vad_filter, vad_parameters=vad_parameters,
         want_word_ts=want_words, initial_prompt=(_prompt or None),
-        overrides=overrides,
+        overrides=overrides, ident=ident,
     )
     if final:
         # Full-utterance decode — identical to the batch route. Nothing to change.
@@ -180,10 +186,10 @@ def _build_transcribe_kwargs(main, model_name: str, *, final: bool,
     #     (default False): documented to loop on German finetunes, worst on short/
     #     growing buffers; the final uses the per-model CONDITION_ON_PREVIOUS_TEXT.
     #   • vad_filter off: the stream is already gated by our own VAD.
-    kwargs["beam_size"] = int(getattr(cfg, "STREAMING_PARTIAL_BEAM", 5))
-    kwargs["temperature"] = float(getattr(cfg, "STREAMING_PARTIAL_TEMPERATURE", 0.0))
+    kwargs["beam_size"] = int(cfg_for(model_name, "STREAMING_PARTIAL_BEAM", ident))
+    kwargs["temperature"] = float(cfg_for(model_name, "STREAMING_PARTIAL_TEMPERATURE", ident))
     kwargs["condition_on_previous_text"] = bool(
-        getattr(cfg, "STREAMING_PARTIAL_CONDITION_ON_PREVIOUS_TEXT", False))
+        cfg_for(model_name, "STREAMING_PARTIAL_CONDITION_ON_PREVIOUS_TEXT", ident))
     kwargs["vad_filter"] = False
     kwargs["vad_parameters"] = None
     kwargs.setdefault("no_repeat_ngram_size", 3)  # greedy-safe loop guard
@@ -271,8 +277,30 @@ async def transcribe_stream(ws: WebSocket) -> None:
             await ws.close()
             return
 
-        gate_final_words = bool(main.cfg_for(final_model, "WORD_TIMESTAMPS_ENABLED"))
-        gate_partial_words = bool(main.cfg_for(partial_model_name, "WORD_TIMESTAMPS_ENABLED"))
+        # Resolve the caller's effective per-identity config ONCE for this
+        # connection. ident is built with final_model (per-model rule folding +
+        # output wrappers + postprocess use final_model); identity scalar
+        # overrides are model-independent, so they apply to the partial decode
+        # too via cfg_for's ident layer.
+        ident = main.build_ident(user, final_model)
+        gate_final_words = bool(main.cfg_for(final_model, "WORD_TIMESTAMPS_ENABLED", ident))
+        gate_partial_words = bool(main.cfg_for(partial_model_name, "WORD_TIMESTAMPS_ENABLED", ident))
+
+        # Locked language / prompt: the admin value stands; the client's
+        # handshake value is ignored (and surfaced in the ready frame). Locked
+        # decode_overrides keys are dropped in the assembler; record them here.
+        overrides_ignored = sorted(k for k in req_overrides
+                                   if k in ident.locked_client_keys)
+        if "DEFAULT_LANGUAGE" in ident.locked:
+            _locked_lang = main.cfg_for(final_model, "DEFAULT_LANGUAGE", ident) or ""
+            if req_language and req_language != _locked_lang:
+                overrides_ignored.append("language")
+            req_language = _locked_lang
+        if "DEFAULT_PROMPT" in ident.locked:
+            _locked_prompt = main.cfg_for(final_model, "DEFAULT_PROMPT", ident) or ""
+            if req_prompt and req_prompt != _locked_prompt:
+                overrides_ignored.append("prompt")
+            req_prompt = _locked_prompt
 
         async def _transcribe(model_obj, audio, kwargs):
             loop = asyncio.get_running_loop()
@@ -289,7 +317,7 @@ async def transcribe_stream(ws: WebSocket) -> None:
             kwargs = _build_transcribe_kwargs(
                 main, partial_model_name, final=False, prompt=prompt,
                 want_words=gate_partial_words, language=req_language,
-                model_obj=partial_model_obj, overrides=req_overrides)
+                model_obj=partial_model_obj, overrides=req_overrides, ident=ident)
             segs, _info = await _transcribe(partial_model_obj, audio, kwargs)
             if gate_partial_words:
                 words = [(w.start, w.end, w.word)
@@ -311,7 +339,7 @@ async def transcribe_stream(ws: WebSocket) -> None:
             kwargs = _build_transcribe_kwargs(
                 main, final_model, final=True, prompt=prompt,
                 want_words=gate_final_words, language=req_language,
-                model_obj=final_model_obj, overrides=req_overrides)
+                model_obj=final_model_obj, overrides=req_overrides, ident=ident)
             segs, info = await _transcribe(final_model_obj, audio, kwargs)
             raw = "".join(seg.text for seg in segs)
             words_out: list[dict] = []
@@ -332,14 +360,14 @@ async def transcribe_stream(ws: WebSocket) -> None:
             return raw, words_out
 
         def postprocess(raw_text):
-            return main._postprocess_text(raw_text, model_name=final_model)
+            return main._postprocess_text(raw_text, model_name=final_model, ident=ident)
 
         # Output wrappers: the prefix sits at the very start of the document, the
         # suffix only on the final flush. committed/tail are full authoritative
         # strings (the client replaces each region), so re-applying the prefix on
         # every final is correct — it never accumulates.
-        out_prefix = main.cfg_for(final_model, "OUTPUT_PREFIX") or ""
-        out_suffix = main.cfg_for(final_model, "OUTPUT_SUFFIX") or ""
+        out_prefix = main.cfg_for(final_model, "OUTPUT_PREFIX", ident) or ""
+        out_suffix = main.cfg_for(final_model, "OUTPUT_SUFFIX", ident) or ""
 
         async def emit(message):
             if message.get("type") == "final":
@@ -460,17 +488,17 @@ async def transcribe_stream(ws: WebSocket) -> None:
                 request_id=rid, user_id=user.get("user_id"), key_id=user.get("key_id"))
 
         session = StreamSession(
-            config=_stream_config(cfg),
+            config=_stream_config(cfg, ident),
             endpointer=make_endpointer(
-                getattr(cfg, "STREAMING_VAD_BACKEND", "auto"),
-                threshold=float(getattr(cfg, "STREAMING_VAD_THRESHOLD", 0.5)),
-                energy_dbfs=float(getattr(cfg, "STREAMING_GATE_RMS_DBFS", -42.0)),
+                main.cfg_for(final_model, "STREAMING_VAD_BACKEND", ident),
+                threshold=float(main.cfg_for(final_model, "STREAMING_VAD_THRESHOLD", ident)),
+                energy_dbfs=float(main.cfg_for(final_model, "STREAMING_GATE_RMS_DBFS", ident)),
             ),
             decode_partial=decode_partial,
             decode_final=decode_final,
             postprocess=postprocess,
             emit=emit,
-            base_prompt=(req_prompt or main.cfg_for(final_model, "DEFAULT_PROMPT") or ""),
+            base_prompt=(req_prompt or main.cfg_for(final_model, "DEFAULT_PROMPT", ident) or ""),
             on_final=on_final,
         )
 
@@ -485,11 +513,16 @@ async def transcribe_stream(ws: WebSocket) -> None:
         transport = make_transport(audio_fmt, sink, sample_rate=SAMPLE_RATE)
         await transport.start()
 
-        await ws.send_json({
+        ready_msg = {
             "type": "ready", "session": session_id, "model": final_model,
             "partial_model": partial_model_name, "sample_rate": SAMPLE_RATE,
             "response_format": response_format, "audio_format": audio_fmt,
-        })
+        }
+        # Surface (never silently drop) any handshake override the admin config
+        # locked out, so the client can see why it had no effect.
+        if overrides_ignored:
+            ready_msg["overrides_ignored"] = overrides_ignored
+        await ws.send_json(ready_msg)
         if pending_audio:
             await transport.feed(pending_audio)
 
