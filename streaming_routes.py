@@ -115,7 +115,7 @@ def _stream_config(cfg) -> StreamConfig:
         min_speech_ms=int(g("MIN_SPEECH_MS", 500)),
         vad_min_silence_ms=int(g("VAD_MIN_SILENCE_MS", 700)),
         commit_silence_ms=int(g("COMMIT_SILENCE_MS", 1200)),
-        hard_break_silence_sec=float(g("HARD_BREAK_SILENCE_SEC", 5.0)),
+        hard_break_silence_ms=int(g("HARD_BREAK_SILENCE_MS", 5000)),
         hard_break_separator=str(g("HARD_BREAK_SEPARATOR", "")),
         forced_commit_sec=float(g("FORCED_COMMIT_SEC", 25.0)),
         buffer_trim_sec=float(g("BUFFER_TRIM_SEC", 15.0)),

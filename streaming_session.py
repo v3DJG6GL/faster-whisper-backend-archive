@@ -66,7 +66,7 @@ class StreamConfig:
     min_speech_ms: int = 500          # skip inference below this much speech (anti-hallucination)
     vad_min_silence_ms: int = 700     # inner gate: silence that triggers a boundary partial
     commit_silence_ms: int = 1200     # outer gate: silence that finalizes the utterance
-    hard_break_silence_sec: float = 5.0  # silence that ends the whole grouping → fresh document (0 = off)
+    hard_break_silence_ms: int = 5000  # silence that ends the whole grouping → fresh document (0 = off)
     hard_break_separator: str = ""    # client-typed separator between documents ("\n" = newline, " " = space)
     forced_commit_sec: float = 25.0   # hard cap on speech before a forced finalize (< 30 s mel field)
     buffer_trim_sec: float = 15.0     # trim the audio buffer when it grows past this
@@ -174,10 +174,10 @@ class StreamSession:
         # document — pauses become paragraph boundaries and a multi-minute latch
         # session can't grow without bound. Fires once per quiet gap (the
         # raw_confirmed guard) and never closes the socket.
-        if (self.cfg.hard_break_silence_sec > 0
+        if (self.cfg.hard_break_silence_ms > 0
                 and not self._in_utterance
                 and self.raw_confirmed
-                and self._idle_silence_ms >= self.cfg.hard_break_silence_sec * 1000):
+                and self._idle_silence_ms >= self.cfg.hard_break_silence_ms):
             await self._hard_break()
 
         if not self._in_utterance:

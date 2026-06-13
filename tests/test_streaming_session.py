@@ -158,14 +158,14 @@ def test_pcm_loop_emits_partials_then_a_final_after_silence():
 
 
 def test_hard_break_resets_document_after_long_silence():
-    """A silence longer than hard_break_silence_sec ends the whole grouping: emit a
+    """A silence longer than hard_break_silence_ms ends the whole grouping: emit a
     `boundary` marker (carrying the separator) and reset the accumulated document,
     without closing the connection. Fires once per quiet gap."""
     cfg = StreamConfig(
         min_chunk_ms=96, vad_min_silence_ms=96, commit_silence_ms=192,
         min_speech_ms=64, forced_commit_sec=100, buffer_trim_sec=100,
         rms_gate_dbfs=-60, preroll_keep_ms=100,
-        hard_break_silence_sec=0.5, hard_break_separator="\n",
+        hard_break_silence_ms=500, hard_break_separator="\n",
     )
 
     async def decode_final(audio, prompt):
