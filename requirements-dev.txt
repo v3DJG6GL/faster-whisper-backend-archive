@@ -4,7 +4,7 @@
 #
 # numpy / av (PyAV) — needed by test_group_trim.py — come in transitively via
 # faster-whisper in the base file, so only pytest is listed here.
-pytest>=9.0.3
+pytest>=9.1.0
 pytest-cov>=7.1.0
 # Starlette's TestClient (used by the route integration tests) prefers httpx2;
 # without it, TestClient falls back to httpx with a deprecation warning. Pinned
