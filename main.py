@@ -1953,6 +1953,10 @@ async def transcribe(
     user: dict = Depends(_get_current_user_dep),
 ):
     resolved_model = _resolve_model_name(model_name)
+    # Normalise the optional override-profile name the same way the streaming
+    # handshake does (trim; blank → None) so both endpoints honor an identical
+    # set of names instead of batch silently rejecting whitespace-padded ones.
+    override_profile = (override_profile or "").strip() or None
 
     # Bracket the entire request with metrics.in_flight + record_transcription
     # so failed loads / failed transcriptions still surface in the dashboard.

@@ -267,8 +267,11 @@ async def transcribe_stream(ws: WebSocket) -> None:
             req_overrides = {}
         # Optional per-request server override-profile name (the client's "Server
         # override profile"). Applied as the least-specific identity layer; honored
-        # only when ALLOW_REQUEST_OVERRIDE_PROFILE is on, ignored if unknown.
-        req_override_profile = (conf.get("override_profile") or "").strip() or None
+        # only when ALLOW_REQUEST_OVERRIDE_PROFILE is on, ignored if unknown. A
+        # non-string handshake value is ignored rather than crashing the handshake.
+        _req_profile = conf.get("override_profile")
+        req_override_profile = (_req_profile.strip() or None
+                                if isinstance(_req_profile, str) else None)
         include_words = response_format == "verbose_json"
         audio_fmt = (conf.get("audio") or {}).get("format", "pcm_s16le")
         if audio_fmt not in RAW_FORMATS and audio_fmt not in ENCODED_FORMATS:
