@@ -1372,7 +1372,7 @@ _API_KEYS_HTML = r"""<!doctype html>
             eff.innerHTML = ''; var any = false;
             Object.keys(j.fields || {}).sort().forEach(function (f) {
               var fr = j.fields[f];
-              if (!fr.winner_layer || fr.winner_layer === 'global' || fr.winner_layer === 'library') return;
+              if (!fr.winner_layer || fr.winner_layer === 'global' || fr.winner_layer === 'per-model') return;
               any = true;
               var row = document.createElement('div'); row.className = 'ef';
               row.innerHTML = '<span class="nm">' + escapeHtml(f) + '</span>'
