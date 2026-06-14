@@ -42,6 +42,17 @@ def test_make_endpointer_energy_backend():
     assert isinstance(ep, EnergyEndpointer)
 
 
+def test_silero_off_threshold_floored_at_low_threshold():
+    # The off-threshold (which releases the speech latch) must stay positive even
+    # for a configured threshold < 0.15 — otherwise it goes negative and the
+    # latch can never release (prob is always >= 0), so silence never ends the
+    # utterance. Needs the bundled Silero model; skip where unavailable.
+    pytest.importorskip("faster_whisper")
+    assert streaming_vad.SileroEndpointer(threshold=0.1)._off >= 0.01
+    # default keeps the standard Silero hysteresis (threshold - 0.15)
+    assert streaming_vad.SileroEndpointer(threshold=0.5)._off == pytest.approx(0.35)
+
+
 def test_make_endpointer_auto_falls_back_when_silero_unavailable(monkeypatch):
     class _Boom:
         def __init__(self, *a, **k):

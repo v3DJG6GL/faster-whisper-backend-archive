@@ -88,7 +88,11 @@ class SileroEndpointer:
 
         self._model = get_vad_model()
         self.threshold = float(threshold)
-        self._off = self.threshold - 0.15          # Silero's built-in hysteresis
+        # Silero's built-in hysteresis (off-threshold below the on-threshold),
+        # floored at a small positive value: a configured threshold < 0.15 would
+        # otherwise make _off negative, so the latch could never release (prob is
+        # always >= 0) and silence would never end the utterance.
+        self._off = max(0.01, self.threshold - 0.15)
         self._speaking = False
         self._win = FRAME_SAMPLES * (self._CTX_FRAMES + 1)  # multiple of 512
         self._buf = np.zeros(self._win, dtype=np.float32)
