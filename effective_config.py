@@ -94,8 +94,13 @@ class Resolved:
     # Ordered profile names applied (most → least specific), for observability.
     profiles_applied: list[str] = field(default_factory=list)
     # The request-named override profile actually applied (gate on + valid +
-    # exists), else None. Echoed to the client as `profile_applied`.
+    # exists + identity-allowed), else None. Echoed to the client as
+    # `profile_applied`.
     request_profile_applied: str | None = None
+    # Effective per-identity gate: may this caller send per-request
+    # decode_overrides at all? When False, every client override is treated as
+    # locked (locked_client_keys covers all client keys) and reported ignored.
+    allow_request_decode_overrides: bool = True
     # Ordered identity layer ids that contributed (most → least specific).
     layers: list[str] = field(default_factory=list)
     # Per-field provenance (verbose path only) — drives the /resolve waterfall.
@@ -135,14 +140,71 @@ def _blob_to_layer(layer_id: str, label: str, profile_name: str | None,
     }
 
 
-def _gather_identity_layers(user_id: str | None,
-                            key_id: str | None,
-                            request_profile: str | None = None) -> list[dict[str, Any]]:
-    """Build the ordered (most → least specific) identity layer list:
-    key.direct, key.profiles…, user.direct, user.profiles…, then the
-    request-named profile (least specific) if any."""
-    import api_keys_store  # local import keeps module import order flexible
+def _safe_binding(getter: Any, ident_id: str | None) -> dict[str, Any]:
+    """Fetch a per-identity binding, tolerating sentinel ids and any store
+    error — a bad binding must never crash a decode."""
+    if not ident_id or ident_id in _SENTINEL_IDS:
+        return {}
+    try:
+        return getter(ident_id) or {}
+    except Exception:
+        return {}
 
+
+def _binding_flag(key_binding: dict[str, Any], user_binding: dict[str, Any],
+                  field_name: str) -> bool | None:
+    """Most-specific per-identity opinion on a boolean gate: key wins over user;
+    None = no opinion (inherit the global floor)."""
+    for b in (key_binding, user_binding):
+        v = b.get(field_name) if isinstance(b, dict) else None
+        if isinstance(v, bool):
+            return v
+    return None
+
+
+def _effective_flag(key_binding: dict[str, Any], user_binding: dict[str, Any],
+                    field_name: str, global_value: Any) -> bool:
+    """Effective gate = the global floor AND the most-specific identity opinion
+    (default allow when no identity sets it). A per-identity binding can only
+    NARROW the global gate, never widen it: if global is off, no binding can
+    re-enable the feature."""
+    identity = _binding_flag(key_binding, user_binding, field_name)
+    if identity is None:
+        return bool(global_value)
+    return bool(global_value) and identity
+
+
+def _effective_allowlist(key_binding: dict[str, Any],
+                         user_binding: dict[str, Any]) -> list[str] | None:
+    """The most-specific override-profile allowlist (key over user), or None when
+    neither sets one (= no restriction, all requestable profiles allowed)."""
+    for b in (key_binding, user_binding):
+        v = b.get("allowed_override_profiles") if isinstance(b, dict) else None
+        if v is not None:
+            return v
+    return None
+
+
+def _allowlist_permits(allowlist: list[str] | None, name: str) -> bool:
+    """True if `name` is permitted by an allowlist. None = no restriction; the
+    wildcard "*" = all; an explicit (possibly empty) list must contain the name."""
+    if allowlist is None:
+        return True
+    if config_store.ALLOWED_PROFILES_WILDCARD in allowlist:
+        return True
+    return name in allowlist
+
+
+def _gather_identity_layers(key_binding: dict[str, Any],
+                            user_binding: dict[str, Any],
+                            request_profile: str | None = None,
+                            *,
+                            request_allowed: bool = True,
+                            allowlist: list[str] | None = None) -> list[dict[str, Any]]:
+    """Build the ordered (most → least specific) identity layer list from the
+    already-fetched bindings: key.direct, key.profiles…, user.direct,
+    user.profiles…, then the request-named profile (least specific) if any and
+    permitted."""
     profiles = getattr(cfg, "OVERRIDE_PROFILES", None) or {}
     layers: list[dict[str, Any]] = []
 
@@ -164,41 +226,47 @@ def _gather_identity_layers(user_id: str | None,
             # or hand-edited file must never crash a decode).
 
     # Key scope is more specific than user scope.
-    if key_id and key_id not in _SENTINEL_IDS:
-        try:
-            _append_binding("key", api_keys_store.get_key_config(key_id))
-        except Exception:
-            pass
-    if user_id and user_id not in _SENTINEL_IDS:
-        try:
-            _append_binding("user", api_keys_store.get_user_config(user_id))
-        except Exception:
-            pass
+    _append_binding("key", key_binding)
+    _append_binding("user", user_binding)
     # The request-named profile is the LEAST-specific identity layer: appended
     # last, so it fills only fields no key/user layer set and can never override
     # or unlock an admin-pinned value (first layer with an opinion wins).
-    req_layer = _request_profile_layer(request_profile)
+    req_layer = _request_profile_layer(request_profile, allowed=request_allowed,
+                                       allowlist=allowlist)
     if req_layer is not None:
         layers.append(req_layer)
     return layers
 
 
-def _request_profile_layer(request_profile: str | None) -> dict[str, Any] | None:
+def _request_profile_layer(request_profile: str | None, *,
+                           allowed: bool = True,
+                           allowlist: list[str] | None = None) -> dict[str, Any] | None:
     """The request-supplied profile name as a (least-specific) identity layer, or
-    None when the feature is gated off, the name is malformed, or no such profile
-    exists. Tolerant — an unusable name contributes nothing and never raises."""
+    None when refused. Refused if: the global gate is off; the per-identity gate
+    (`allowed`) is off; the name is malformed / unknown; the profile is flagged
+    `requestable: false`; or the per-identity allowlist excludes it. Tolerant —
+    an unusable name contributes nothing and never raises."""
     if not request_profile:
         return None
     if not getattr(cfg, "ALLOW_REQUEST_OVERRIDE_PROFILE", True):
         return None
+    if not allowed:
+        return None
     if not config_store.TAG_RE.match(request_profile):
         return None
+    if not _allowlist_permits(allowlist, request_profile):
+        return None
     profiles = getattr(cfg, "OVERRIDE_PROFILES", None) or {}
+    blob = profiles.get(request_profile)
+    # Per-profile opt-out: a profile flagged not-requestable is never selectable
+    # by a client, even if the identity's allowlist would otherwise permit it.
+    if isinstance(blob, dict) and blob.get("requestable") is False:
+        return None
     return _blob_to_layer(
         f"request.profile:{request_profile}",
         f"request · profile {request_profile}",
         request_profile,
-        profiles.get(request_profile),
+        blob,
     )
 
 
@@ -381,13 +449,120 @@ def resolve(model_id: str | None, *, user_id: str | None = None,
 
     ``request_profile`` (optional) names an OVERRIDE_PROFILES entry to apply as
     the least-specific identity layer; gated by ALLOW_REQUEST_OVERRIDE_PROFILE
-    and ignored if malformed/unknown. ``request_profile_applied`` echoes what
-    actually took effect.
+    (global) AND the per-identity gate + allowlist, and ignored if
+    malformed/unknown/not-requestable. ``request_profile_applied`` echoes what
+    actually took effect. The per-identity ALLOW_REQUEST_DECODE_OVERRIDES gate is
+    resolved the same way; when off, every client decode override is treated as
+    locked (``locked_client_keys`` covers all client keys) and reported ignored.
     """
-    layers = _gather_identity_layers(user_id, key_id, request_profile)
-    resolved = _resolve_from_layers(model_id, layers, request_overrides or {},
-                                    with_provenance)
+    import api_keys_store  # local import keeps module import order flexible
+    key_binding = _safe_binding(api_keys_store.get_key_config, key_id)
+    user_binding = _safe_binding(api_keys_store.get_user_config, user_id)
+
+    op_allowed = _effective_flag(key_binding, user_binding,
+                                 "allow_request_override_profile",
+                                 getattr(cfg, "ALLOW_REQUEST_OVERRIDE_PROFILE", True))
+    do_allowed = _effective_flag(key_binding, user_binding,
+                                 "allow_request_decode_overrides",
+                                 getattr(cfg, "ALLOW_REQUEST_DECODE_OVERRIDES", True))
+    allowlist = _effective_allowlist(key_binding, user_binding)
+
+    layers = _gather_identity_layers(key_binding, user_binding, request_profile,
+                                     request_allowed=op_allowed, allowlist=allowlist)
+    req_overrides = request_overrides or {}
+    resolved = _resolve_from_layers(model_id, layers, req_overrides, with_provenance)
+
+    # The request profile "applied" iff its layer actually contributed.
+    req_id = f"request.profile:{request_profile}" if request_profile else None
     resolved.request_profile_applied = (
-        request_profile if _request_profile_layer(request_profile) is not None else None
+        request_profile if (req_id is not None and req_id in resolved.layers) else None
     )
+
+    # Per-identity decode-override master gate. When off, lock EVERY client key so
+    # _apply_decode_overrides drops them all and every site that reports
+    # `overrides_ignored` (batch + streaming) reports them — one enforcement point.
+    resolved.allow_request_decode_overrides = do_allowed
+    if not do_allowed:
+        all_client_keys = frozenset(_CONFIG_TO_CLIENT_KEY.values())
+        resolved.locked_client_keys = all_client_keys
+        resolved.dropped = sorted(k for k in req_overrides if k in all_client_keys)
     return resolved
+
+
+# ---------------------------------------------------------------------------
+# Capabilities — what a caller may do (drives the client UI; the server still
+# enforces everything in resolve(), the client UI is convenience only).
+# ---------------------------------------------------------------------------
+
+def _caller_gates(user_id: str | None,
+                  key_id: str | None) -> tuple[bool, bool, list[str] | None]:
+    """The caller's effective (override-profile gate, decode-override gate,
+    override-profile allowlist). Shared by the capabilities + names endpoints."""
+    import api_keys_store
+    kb = _safe_binding(api_keys_store.get_key_config, key_id)
+    ub = _safe_binding(api_keys_store.get_user_config, user_id)
+    op = _effective_flag(kb, ub, "allow_request_override_profile",
+                         getattr(cfg, "ALLOW_REQUEST_OVERRIDE_PROFILE", True))
+    do = _effective_flag(kb, ub, "allow_request_decode_overrides",
+                         getattr(cfg, "ALLOW_REQUEST_DECODE_OVERRIDES", True))
+    allowlist = _effective_allowlist(kb, ub)
+    return op, do, allowlist
+
+
+def _filter_profile_names(gate_on: bool, allowlist: list[str] | None) -> list[str]:
+    """The concrete OVERRIDE_PROFILES names a caller with this gate + allowlist may
+    request: requestable profiles intersected with the allowlist. [] when off."""
+    if not gate_on:
+        return []
+    profiles = getattr(cfg, "OVERRIDE_PROFILES", None) or {}
+    return sorted(
+        name for name, blob in profiles.items()
+        if not (isinstance(blob, dict) and blob.get("requestable") is False)
+        and _allowlist_permits(allowlist, name)
+    )
+
+
+def allowed_profile_names(user_id: str | None = None,
+                          key_id: str | None = None) -> list[str]:
+    """The concrete override-profile names this caller may NAME per request."""
+    op, _do, allowlist = _caller_gates(user_id, key_id)
+    return _filter_profile_names(op, allowlist)
+
+
+def resolve_capabilities(user_id: str | None = None,
+                         key_id: str | None = None) -> dict[str, Any]:
+    """The caller's request-override capabilities, for GET /v1/me. `allowed_
+    override_profiles` is ["*"] when unrestricted (free choice from the names
+    endpoint), an explicit concrete list when the admin restricted it, or []
+    when the gate is off."""
+    op, do, allowlist = _caller_gates(user_id, key_id)
+    if not op:
+        allowed: list[str] = []
+    elif allowlist is None or config_store.ALLOWED_PROFILES_WILDCARD in allowlist:
+        allowed = [config_store.ALLOWED_PROFILES_WILDCARD]
+    else:
+        allowed = _filter_profile_names(op, allowlist)
+    return {
+        "can_request_override_profile": op,
+        "can_request_decode_overrides": do,
+        "allowed_override_profiles": allowed,
+    }
+
+
+def project_profile_to_client(blob: Any) -> tuple[dict[str, Any], list[str]]:
+    """Project an OVERRIDE_PROFILES blob to the lowercase client decode_override
+    keys it sets, plus the client keys it locks. Server-managed-only fields
+    (streaming, output wrappers, language detection) have no client key and are
+    omitted — they are reachable only by naming the profile, never per field."""
+    if not isinstance(blob, dict):
+        return {}, []
+    values: dict[str, Any] = {}
+    for cfg_field, client_key in _CONFIG_TO_CLIENT_KEY.items():
+        v = blob.get(cfg_field)
+        if v is not None:
+            values[client_key] = v
+    locked = sorted(
+        _CONFIG_TO_CLIENT_KEY[f] for f in (blob.get("locks") or [])
+        if f in _CONFIG_TO_CLIENT_KEY
+    )
+    return values, locked

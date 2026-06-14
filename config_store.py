@@ -180,6 +180,7 @@ ENV_VAR_MAPPING: dict[str, str] = {
     "MODEL_OVERRIDES": "WHISPER_MODEL_OVERRIDES",
     "OVERRIDE_PROFILES": "WHISPER_OVERRIDE_PROFILES",
     "ALLOW_REQUEST_OVERRIDE_PROFILE": "WHISPER_ALLOW_REQUEST_OVERRIDE_PROFILE",
+    "ALLOW_REQUEST_DECODE_OVERRIDES": "WHISPER_ALLOW_REQUEST_DECODE_OVERRIDES",
 }
 
 # Cold settings — editing these requires a service restart for the new value
@@ -466,7 +467,15 @@ FIELD_DESCRIPTIONS: dict[str, str] = {
         "streaming endpoints. On = a request may name an OVERRIDE_PROFILES entry; "
         "it applies as the least-specific identity layer (fills only fields no "
         "per-key/per-user binding set, and can never override or unlock an "
-        "admin-pinned value). Off = the request field is ignored.",
+        "admin-pinned value). Off = the request field is ignored. A per-user / "
+        "per-API-key binding can narrow this (gate + allowlist) but never widen it.",
+    "ALLOW_REQUEST_DECODE_OVERRIDES":
+        "Honor per-request `decode_overrides` (the client's inline decode/VAD "
+        "parameter tweaks). On = requests may customise decode parameters, subject "
+        "to per-field admin locks. Off = every request override is ignored and "
+        "reported back as `overrides_ignored`. A per-user / per-API-key binding can "
+        "set this to False to disable customisation for that identity; it can only "
+        "restrict, never widen, this global floor.",
     "REVISION":
         "(Per-model only) HuggingFace git revision (branch, tag, commit) "
         "to pin the model snapshot to. Empty = HEAD of default branch.",
@@ -1085,6 +1094,16 @@ class OverrideProfile(_CallTimeOverrideMixin, _StreamingOverrideMixin):
 
     locks: Annotated[list[str], Field(max_length=200)] | None = None
 
+    # Whether a client may NAME this profile in a per-request `override_profile`.
+    # None / True = requestable (clients can select it); False = internal-only —
+    # the profile may still be admin-applied via a per-key/per-user binding, but
+    # is never offered to clients and a request naming it is silently refused.
+    # This is profile-library metadata, NOT a per-field override or a lockable
+    # field, so it is excluded from the per-identity `direct` blob (validate_
+    # binding strips it) and rendered as a profile-level control, not in the
+    # decode-field grid.
+    requestable: bool | None = None
+
     @field_validator("locks")
     @classmethod
     def _validate_locks(cls, v: list[str] | None) -> list[str] | None:
@@ -1204,6 +1223,7 @@ class AdminConfig(BaseModel):
     # --- Per-identity config profiles (reusable, name → override bundle) ---
     OVERRIDE_PROFILES: dict[ProfileName, OverrideProfile] | None = _F("OVERRIDE_PROFILES")
     ALLOW_REQUEST_OVERRIDE_PROFILE: bool | None = _F("ALLOW_REQUEST_OVERRIDE_PROFILE")
+    ALLOW_REQUEST_DECODE_OVERRIDES: bool | None = _F("ALLOW_REQUEST_DECODE_OVERRIDES")
 
     # --- Pipeline ---
     PIPELINE_RULES: Annotated[list[PipelineRule], Field(max_length=200)] | None = _F("PIPELINE_RULES")
@@ -1939,12 +1959,40 @@ def validate_profile_refs(names: Any) -> list[str]:
     return out
 
 
+# Wildcard sentinel for an override-profile allowlist meaning "all profiles".
+# Distinct from any real profile name (ProfileName forbids "*").
+ALLOWED_PROFILES_WILDCARD = "*"
+
+
+def validate_allowed_profiles(raw: Any) -> list[str] | None:
+    """Validate a per-identity ALLOWLIST of override-profile names a client may
+    REQUEST. This is distinct from `profiles` (which are forced-applied layers);
+    the allowlist only restricts which names a per-request `override_profile`
+    may select. None = inherit / no restriction (every requestable profile is
+    allowed). The wildcard "*" (alone) = explicitly all. An explicit list
+    restricts to those names — each must match the profile-name shape AND exist;
+    [] = allow none. Raises ValueError on a bad / unknown name."""
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        raise ValueError("allowed_override_profiles must be a list of strings")
+    if any(p == ALLOWED_PROFILES_WILDCARD for p in raw):
+        return [ALLOWED_PROFILES_WILDCARD]
+    return validate_profile_refs(raw)
+
+
 def validate_binding(raw: Any) -> dict[str, Any]:
     """Validate a per-identity config binding sent by the WebUI and return the
-    stored shape {"direct": {...}, "profiles": [...]}.
+    stored shape {"direct": {...}, "profiles": [...], + optional request gates}.
 
     Input: {"overrides": {field: value, …, PIPELINE_RULES_*: [...]},
-            "locks": [field, …], "profiles": [name, …]}.
+            "locks": [field, …], "profiles": [name, …],
+            "allow_request_override_profile": bool|None,
+            "allow_request_decode_overrides": bool|None,
+            "allowed_override_profiles": [name…]|["*"]|[]|None}.
+    The three request-gate fields are stored only when explicitly set (a bool, or
+    a non-None allowlist) — absent = inherit the next scope down → global. They
+    can only NARROW the global gates, never widen them (enforced at resolve time).
     Raises ValueError on any invalid field / bound / lock target / unknown
     profile reference / unknown pipeline slug."""
     if not isinstance(raw, dict):
@@ -1963,6 +2011,9 @@ def validate_binding(raw: Any) -> dict[str, Any]:
         raise ValueError("; ".join(
             f"{x['loc']}: {x['msg']}" for x in format_validation_errors(e)
         )) from e
+    # `requestable` is profile-library metadata, meaningless on an inline direct
+    # override blob — never persist it inside a binding.
+    direct.pop("requestable", None)
     canonical = _canonical_rule_slugs()
     if canonical:
         for list_name in ("PIPELINE_RULES_EXCLUDE", "PIPELINE_RULES_INCLUDE"):
@@ -1970,12 +2021,33 @@ def validate_binding(raw: Any) -> dict[str, Any]:
             if unknown:
                 raise ValueError(
                     f"{list_name} references unknown rule slugs: {unknown}")
-    return {"direct": direct, "profiles": validate_profile_refs(raw.get("profiles"))}
+    out: dict[str, Any] = {
+        "direct": direct,
+        "profiles": validate_profile_refs(raw.get("profiles")),
+    }
+    for fld in ("allow_request_override_profile", "allow_request_decode_overrides"):
+        v = raw.get(fld)
+        if isinstance(v, bool):
+            out[fld] = v
+        elif v is not None:
+            raise ValueError(f"{fld} must be a boolean or null")
+    allow = raw.get("allowed_override_profiles")
+    if allow is not None:
+        out["allowed_override_profiles"] = validate_allowed_profiles(allow)
+    return out
 
 
 def binding_is_empty(binding: Any) -> bool:
-    """True if a stored binding carries no direct override and no profiles —
-    i.e. contributes nothing and need not be persisted."""
+    """True if a stored binding carries no direct override, no profiles, and no
+    request-gate setting — i.e. contributes nothing and need not be persisted.
+    A request gate set to False or an explicit (even empty) allowlist counts as
+    a meaningful setting and keeps the binding alive."""
     if not isinstance(binding, dict):
         return True
-    return not (binding.get("direct") or binding.get("profiles"))
+    return not (
+        binding.get("direct")
+        or binding.get("profiles")
+        or binding.get("allow_request_override_profile") is not None
+        or binding.get("allow_request_decode_overrides") is not None
+        or binding.get("allowed_override_profiles") is not None
+    )

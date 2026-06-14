@@ -238,25 +238,36 @@ def _row_to_key_dict(row: sqlite3.Row) -> dict[str, Any]:
 
 def _parse_binding(raw: "str | dict | None") -> dict[str, Any]:
     """Decode a per-identity config binding (JSON string or already-decoded
-    dict) into the canonical {"direct": {...}, "profiles": [...]} shape. Returns
-    the empty binding on null / blank / invalid input — a malformed binding
-    must never crash a decode (the resolver simply treats it as no config)."""
+    dict) into the canonical shape {"direct": {...}, "profiles": [...]}, plus any
+    of the three request-gate keys (allow_request_override_profile,
+    allow_request_decode_overrides, allowed_override_profiles) that are actually
+    set. Unset gate keys are OMITTED — the resolver reads them via .get() so an
+    absent key means "inherit the next scope → global", and the empty binding
+    stays {"direct": {}, "profiles": []}. Returns the empty binding on null /
+    blank / invalid input — a malformed binding must never crash a decode."""
     empty = {"direct": {}, "profiles": []}
     if not raw:
-        return empty
+        return dict(empty)
     try:
         v = json.loads(raw) if isinstance(raw, str) else raw
     except (json.JSONDecodeError, TypeError):
-        return empty
+        return dict(empty)
     if not isinstance(v, dict):
-        return empty
+        return dict(empty)
     direct = v.get("direct")
     profiles = v.get("profiles")
-    return {
+    out: dict[str, Any] = {
         "direct": direct if isinstance(direct, dict) else {},
         "profiles": [p for p in profiles if isinstance(p, str)]
         if isinstance(profiles, list) else [],
     }
+    for fld in ("allow_request_override_profile", "allow_request_decode_overrides"):
+        if isinstance(v.get(fld), bool):
+            out[fld] = v[fld]
+    allow = v.get("allowed_override_profiles")
+    if isinstance(allow, list):
+        out["allowed_override_profiles"] = [p for p in allow if isinstance(p, str)]
+    return out
 
 
 # ---------------------------------------------------------------------

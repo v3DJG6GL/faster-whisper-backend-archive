@@ -2418,17 +2418,53 @@ async def list_models():
     }
 
 
+@app.get("/v1/me")
+async def whoami_capabilities(user: dict = Depends(_get_current_user_dep)):
+    """The caller's effective request-override capabilities — drives the client
+    UI (hide the decode editor / override-profile picker it isn't permitted to
+    use). The client UI is convenience only; the server enforces everything in
+    effective_config.resolve regardless. User-tier auth: any valid key; 401
+    without one when the server is locked down.
+
+    Returns: {can_request_override_profile, can_request_decode_overrides,
+    allowed_override_profiles: ["*"] | [names…] | []}."""
+    import effective_config
+    return effective_config.resolve_capabilities(
+        user_id=user.get("user_id"), key_id=user.get("key_id"))
+
+
 @app.get("/v1/override-profiles")
 async def list_override_profiles(user: dict = Depends(_get_current_user_dep)):
-    """Names of the server-side OVERRIDE_PROFILES a client may reference via the
-    per-request `override_profile` field (gated by ALLOW_REQUEST_OVERRIDE_PROFILE).
-    Names only — never the profile contents; empty list when the feature is off.
-    User-tier auth: any valid key (admin not required); 401 without one when the
-    server is locked down."""
-    if not getattr(cfg, "ALLOW_REQUEST_OVERRIDE_PROFILE", True):
-        return {"profiles": []}
+    """Names of the server-side OVERRIDE_PROFILES THIS caller may reference via the
+    per-request `override_profile` field — filtered by the global gate, the
+    caller's per-identity gate + allowlist, and each profile's `requestable` flag.
+    Names only — never the profile contents; empty list when the caller may not
+    request any. User-tier auth: any valid key (admin not required); 401 without
+    one when the server is locked down."""
+    import effective_config
+    names = effective_config.allowed_profile_names(
+        user_id=user.get("user_id"), key_id=user.get("key_id"))
+    return {"profiles": names}
+
+
+@app.get("/v1/override-profiles/{name}")
+async def get_override_profile(name: str,
+                               user: dict = Depends(_get_current_user_dep)):
+    """The decode-relevant values + locked client keys of a single override-
+    profile THIS caller may request — for the client to preview as inherited
+    defaults. 404 when the profile doesn't exist OR the caller may not request it
+    (don't leak internal / disallowed profiles). The returned `values` are the
+    profile's OWN contribution projected to the client decode keys; admin locks
+    elsewhere can still win at request time (reported then via overrides_ignored).
+    User-tier auth."""
+    import effective_config
+    allowed = effective_config.allowed_profile_names(
+        user_id=user.get("user_id"), key_id=user.get("key_id"))
+    if name not in allowed:
+        raise HTTPException(status_code=404, detail="override-profile not found")
     profiles = getattr(cfg, "OVERRIDE_PROFILES", None) or {}
-    return {"profiles": sorted(profiles.keys())}
+    values, locked = effective_config.project_profile_to_client(profiles.get(name))
+    return {"name": name, "values": values, "locked": locked}
 
 
 # =============================================================================

@@ -424,8 +424,18 @@ OVERRIDE_PROFILES: "dict[str, dict[str, object]]" = {}
 # the transcription / streaming endpoints) that selects an OVERRIDE_PROFILES
 # entry to apply. It is applied as the LEAST-specific identity layer, so it only
 # fills fields no per-key/per-user binding set and can never override or unlock
-# an admin-pinned value. False = ignore the request field entirely.
+# an admin-pinned value. False = ignore the request field entirely. A per-user /
+# per-API-key binding may narrow this further (gate + allowlist); it can only
+# restrict, never widen, this global floor.
 ALLOW_REQUEST_OVERRIDE_PROFILE = True
+
+# Master switch: honor per-request `decode_overrides` (the client's inline
+# decode/VAD parameter tweaks) at all. On = a request may customise decode
+# parameters (subject to per-field admin locks). Off = every request override is
+# ignored and reported back via `overrides_ignored`. A per-user / per-API-key
+# binding may set this to False to disable customisation for that identity; it
+# can only restrict, never widen, this global floor.
+ALLOW_REQUEST_DECODE_OVERRIDES = True
 
 
 # =============================================================================
