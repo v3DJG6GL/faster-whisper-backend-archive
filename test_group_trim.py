@@ -238,7 +238,7 @@ def test_build_merged_words_per_member(monkeypatch):
     cr = _routes()
     monkeypatch.setattr(
         cr, "_align_words_to_final",
-        lambda words, final, model_name=None: [dict(w) for w in words],
+        lambda words, final, model_name=None, ident=None: [dict(w) for w in words],
     )
     members = [
         {"id": "a", "words": [{"word": "hi", "start": 0.2, "end": 0.5}],
@@ -269,7 +269,7 @@ def test_build_merged_words_uniform_offset(monkeypatch):
     cr = _routes()
     monkeypatch.setattr(
         cr, "_align_words_to_final",
-        lambda words, final, model_name=None: [dict(w) for w in words],
+        lambda words, final, model_name=None, ident=None: [dict(w) for w in words],
     )
     members = [
         {"id": "a", "words": [{"word": "hi", "start": 0.25, "end": 0.45}],
@@ -299,7 +299,7 @@ def test_align_member_words_attaches_training_tokens(monkeypatch):
     cr = _routes()
 
     # Fake aligner: one item per raw word, display token = target token by index.
-    def fake_align(words, final, model_name=None):
+    def fake_align(words, final, model_name=None, ident=None):
         toks = (final or "").split()
         return [
             {"word": toks[i] if i < len(toks) else "",
@@ -331,7 +331,7 @@ def test_build_merged_words_legacy(monkeypatch):
     cr = _routes()
     monkeypatch.setattr(
         cr, "_align_words_to_final",
-        lambda words, final, model_name=None: [dict(w) for w in words],
+        lambda words, final, model_name=None, ident=None: [dict(w) for w in words],
     )
     members = [
         {"id": "a", "words": [{"word": "hi", "start": 0.2, "end": 0.5}],
