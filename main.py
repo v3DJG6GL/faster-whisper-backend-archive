@@ -5,6 +5,7 @@ import sys
 import ctypes
 import logging
 import logging.handlers
+import math
 import re
 import shutil
 import tempfile
@@ -900,9 +901,15 @@ def _clamp_int(v, lo, hi):
 
 def _clamp_float(v, lo, hi):
     try:
-        return max(lo, min(hi, float(v)))
+        r = float(v)
     except (TypeError, ValueError, OverflowError):
         return None
+    if not math.isfinite(r):
+        # JSON permits NaN/Infinity literals; reject them so a non-finite value
+        # is ignored (override dropped) like the int path, not silently clamped
+        # to a bound (NaN/+inf → hi, -inf → lo).
+        return None
+    return max(lo, min(hi, r))
 
 
 def _apply_decode_overrides(kwargs, resolved_model, overrides, ident=None):
