@@ -191,6 +191,18 @@ def test_provenance_falls_to_per_model_then_global(monkeypatch):
     assert len(winners) == 1 and winners[0]["layer_id"] == "per-model"
 
 
+def test_provenance_value_less_lock_owned_by_first_layer():
+    # Two layers value-less-lock the same field and nobody sets a value. The
+    # resolver owns the lock at the first (most-specific) layer only, so the
+    # waterfall must show the lock badge there alone — not on every layer that
+    # declares the lock.
+    r = _resolve([_layer("key", locks=["TEMPERATURE"]),
+                  _layer("user", locks=["TEMPERATURE"])], prov=True)
+    assert "TEMPERATURE" in r.locked
+    stack = r.provenance["TEMPERATURE"]
+    assert [h["layer_id"] for h in stack if h["locked"]] == ["key.direct"]
+
+
 # --- public resolve() open-mode shortcut ----------------------------------
 
 def test_resolve_open_mode_no_identity():

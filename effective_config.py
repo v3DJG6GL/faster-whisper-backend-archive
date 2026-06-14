@@ -293,6 +293,14 @@ def _scalar_provenance(fname: str, layers: list[dict[str, Any]],
     """Ordered layer stack for one scalar field, for the /resolve waterfall:
     identity layers, then per-model, then global. Exactly one row is the
     winner (matching cfg_for precedence: identity > per-model > global)."""
+    # Exactly one layer's lock takes effect, mirroring _resolve_from_layers:
+    # the value-winning layer (if it also locks), else the first layer that
+    # declares a value-less lock-to-inherited. Other locking layers are
+    # shadowed, so only the owner shows a lock in the waterfall.
+    if identity_winner is not None:
+        lock_owner = identity_winner
+    else:
+        lock_owner = next((l for l in layers if fname in l["locks"]), None)
     hits: list[dict[str, Any]] = []
     for layer in layers:
         has = fname in layer["fields"]
@@ -302,11 +310,7 @@ def _scalar_provenance(fname: str, layers: list[dict[str, Any]],
             "value": layer["fields"].get(fname) if has else None,
             "is_set": has,
             "is_winner": layer is identity_winner,
-            # A lock shows when this layer declares it AND that lock is the one
-            # that takes effect: it owns the value (winner) or no layer set a
-            # value (value-less lock-to-inherited).
-            "locked": fname in layer["locks"] and (
-                layer is identity_winner or identity_winner is None),
+            "locked": fname in layer["locks"] and layer is lock_owner,
         })
     pm = _per_model_value(model_id, fname)
     pm_set = pm is not UNSET
