@@ -297,17 +297,28 @@
     ws.onerror = () => setStatus("socket error", "error");
     ws.onclose = () => { if (running) stop(); setStatus("closed"); };
 
-    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    const blobUrl = URL.createObjectURL(new Blob([workletSrc], { type: "application/javascript" }));
-    await audioCtx.audioWorklet.addModule(blobUrl);
-    const src = audioCtx.createMediaStreamSource(mediaStream);
-    workletNode = new AudioWorkletNode(audioCtx, "cap");
-    const sr = audioCtx.sampleRate;
-    workletNode.port.onmessage = (e) => { if (running) pushSamples(e.data, sr); };
-    src.connect(workletNode);
-    // Keep the node pulling without routing mic to speakers (avoids feedback).
-    const sink = audioCtx.createGain(); sink.gain.value = 0; workletNode.connect(sink); sink.connect(audioCtx.destination);
+    try {
+      mediaStream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const blobUrl = URL.createObjectURL(new Blob([workletSrc], { type: "application/javascript" }));
+      await audioCtx.audioWorklet.addModule(blobUrl);
+      const src = audioCtx.createMediaStreamSource(mediaStream);
+      workletNode = new AudioWorkletNode(audioCtx, "cap");
+      const sr = audioCtx.sampleRate;
+      workletNode.port.onmessage = (e) => { if (running) pushSamples(e.data, sr); };
+      src.connect(workletNode);
+      // Keep the node pulling without routing mic to speakers (avoids feedback).
+      const sink = audioCtx.createGain(); sink.gain.value = 0; workletNode.connect(sink); sink.connect(audioCtx.destination);
+    } catch (err) {
+      // Mic denied / worklet load failed after the socket already opened: tear
+      // down the socket + audio graph so we don't leak a live server-side
+      // session (ws.onclose's `if (running)` guard is already false here).
+      try { if (ws) ws.close(); } catch {}
+      try { if (mediaStream) mediaStream.getTracks().forEach((t) => t.stop()); } catch {}
+      try { if (audioCtx) audioCtx.close(); } catch {}
+      ws = null; audioCtx = null; workletNode = null; mediaStream = null;
+      throw err;
+    }
   }
 
   function stop() {
@@ -316,7 +327,7 @@
     if (mediaStream) mediaStream.getTracks().forEach((t) => t.stop());
     if (audioCtx) audioCtx.close();
     ws = null; audioCtx = null; workletNode = null; mediaStream = null;
-    pcmLen = 0; resamplePos = 0;
+    pcmLen = 0; resamplePos = 0; resampleCarry = 0.0;
     resetToggleButton();
     setStatus("idle");
   }
