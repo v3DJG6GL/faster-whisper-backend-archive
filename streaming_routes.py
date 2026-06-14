@@ -427,7 +427,8 @@ async def transcribe_stream(ws: WebSocket) -> None:
                     return None
                 training_text = main._postprocess_text(
                     raw_text, model_name=final_model, trace=None,
-                    extra_excludes=getattr(cfg, "CAPTURES_PIPELINE_RULES_EXCLUDE", None))
+                    extra_excludes=getattr(cfg, "CAPTURES_PIPELINE_RULES_EXCLUDE", None),
+                    ident=ident)
                 wav_path = _write_pcm16_wav(audio)
                 try:
                     return _cap_store.create_capture(
@@ -458,7 +459,7 @@ async def transcribe_stream(ws: WebSocket) -> None:
             kwargs = dec.get("kwargs", {})
 
             steps: "list | None" = [] if getattr(cfg, "TRACE_ENABLED", False) else None
-            final_text = main._postprocess_text(raw_text, model_name=final_model, trace=steps)
+            final_text = main._postprocess_text(raw_text, model_name=final_model, trace=steps, ident=ident)
 
             captured_id = None
             if cap_enabled and raw_text.strip():
