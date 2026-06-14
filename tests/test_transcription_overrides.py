@@ -72,6 +72,21 @@ def test_no_identity_config_is_unchanged(client, make_user_key, fake_model):
     assert "overrides_ignored" not in r.json()
 
 
+def test_decode_overrides_drop_non_finite_floats():
+    """JSON permits NaN/Infinity literals; a non-finite float override is dropped
+    (ignored) rather than clamped to the field's bound, matching the integer path.
+    Shared by the batch route and the streaming FINAL decode via
+    _apply_decode_overrides."""
+    import main
+    # a valid float still applies
+    assert main._apply_decode_overrides({}, "whisper-1", {"temperature": 0.7})["temperature"] == 0.7
+    # NaN / +inf / -inf each dropped, never clamped to the field's max/min
+    for literal in ("NaN", "Infinity", "-Infinity"):
+        ov = json.loads('{"temperature": %s, "no_speech_threshold": %s}' % (literal, literal))
+        kw = main._apply_decode_overrides({}, "whisper-1", ov)
+        assert "temperature" not in kw and "no_speech_threshold" not in kw, (literal, kw)
+
+
 def test_request_block_identity_section():
     from types import SimpleNamespace
     import main
