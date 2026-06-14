@@ -34,7 +34,7 @@ def _join(out):
 
 def _install_word_map(monkeypatch, mapping):
     """Fake main._postprocess_text: per-word lookup, identity by default."""
-    def fake(text, model_name=None):
+    def fake(text, model_name=None, ident=None):
         return mapping.get(text.strip(), text)
     monkeypatch.setattr(main, "_postprocess_text", fake)
 
