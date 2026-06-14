@@ -1156,7 +1156,8 @@ def cfg_for(model_id: "str | None", field: str, ident=None):
 
 
 def build_ident(user: "dict | None", model_id: "str | None",
-                request_overrides: "dict | None" = None):
+                request_overrides: "dict | None" = None,
+                request_profile: "str | None" = None):
     """Resolve the per-identity effective config ONCE for a request / streaming
     handshake / capture row, to thread through cfg_for / assemble_transcribe_
     kwargs / _postprocess_text. Open mode and callers with no per-identity
@@ -1169,6 +1170,7 @@ def build_ident(user: "dict | None", model_id: "str | None",
         user_id=user.get("user_id"),
         key_id=user.get("key_id"),
         request_overrides=request_overrides or {},
+        request_profile=request_profile,
     )
 
 
@@ -1947,6 +1949,7 @@ async def transcribe(
     temperature: float = Form(0.0),
     prompt: str = Form(""),
     decode_overrides: str = Form(None),
+    override_profile: str = Form(None),
     user: dict = Depends(_get_current_user_dep),
 ):
     resolved_model = _resolve_model_name(model_name)
@@ -1972,7 +1975,8 @@ async def transcribe(
         # request: layered decode params, pipeline include/exclude, output
         # wrappers, and which fields are locked against client overrides.
         # Open mode / no per-identity config → no identity layers (≡ today).
-        ident = build_ident(user, resolved_model)
+        # `override_profile` (if sent + allowed) joins as the least-specific layer.
+        ident = build_ident(user, resolved_model, request_profile=override_profile)
 
         form_data = await request.form()
         timestamp_granularities = form_data.getlist("timestamp_granularities[]")
@@ -2341,6 +2345,10 @@ async def transcribe(
                 # config locked out, so the caller can see why it had no effect.
                 if ignored:
                     response["overrides_ignored"] = ignored
+                # Echo which server profile actually applied (None if the name
+                # was unknown or the feature is gated off) — only when asked.
+                if override_profile:
+                    response["profile_applied"] = ident.request_profile_applied
                 return response
 
             return {"text": full_text_str}
@@ -2404,6 +2412,19 @@ async def list_models():
             for n in names
         ],
     }
+
+
+@app.get("/v1/override-profiles")
+async def list_override_profiles(user: dict = Depends(_get_current_user_dep)):
+    """Names of the server-side OVERRIDE_PROFILES a client may reference via the
+    per-request `override_profile` field (gated by ALLOW_REQUEST_OVERRIDE_PROFILE).
+    Names only — never the profile contents; empty list when the feature is off.
+    User-tier auth: any valid key (admin not required); 401 without one when the
+    server is locked down."""
+    if not getattr(cfg, "ALLOW_REQUEST_OVERRIDE_PROFILE", True):
+        return {"profiles": []}
+    profiles = getattr(cfg, "OVERRIDE_PROFILES", None) or {}
+    return {"profiles": sorted(profiles.keys())}
 
 
 # =============================================================================

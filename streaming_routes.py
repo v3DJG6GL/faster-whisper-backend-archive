@@ -265,6 +265,10 @@ async def transcribe_stream(ws: WebSocket) -> None:
         req_overrides = conf.get("decode_overrides")
         if not isinstance(req_overrides, dict):
             req_overrides = {}
+        # Optional per-request server override-profile name (the client's "Server
+        # override profile"). Applied as the least-specific identity layer; honored
+        # only when ALLOW_REQUEST_OVERRIDE_PROFILE is on, ignored if unknown.
+        req_override_profile = (conf.get("override_profile") or "").strip() or None
         include_words = response_format == "verbose_json"
         audio_fmt = (conf.get("audio") or {}).get("format", "pcm_s16le")
         if audio_fmt not in RAW_FORMATS and audio_fmt not in ENCODED_FORMATS:
@@ -301,7 +305,7 @@ async def transcribe_stream(ws: WebSocket) -> None:
         # output wrappers + postprocess use final_model); identity scalar
         # overrides are model-independent, so they apply to the partial decode
         # too via cfg_for's ident layer.
-        ident = main.build_ident(user, final_model)
+        ident = main.build_ident(user, final_model, request_profile=req_override_profile)
         gate_final_words = bool(main.cfg_for(final_model, "WORD_TIMESTAMPS_ENABLED", ident))
         gate_partial_words = bool(main.cfg_for(partial_model_name, "WORD_TIMESTAMPS_ENABLED", ident))
 
@@ -552,7 +556,7 @@ async def transcribe_stream(ws: WebSocket) -> None:
                 if v == _ident_version:
                     return
                 _ident_version = v
-                ident = main.build_ident(user, final_model)
+                ident = main.build_ident(user, final_model, request_profile=req_override_profile)
                 out_prefix = main.cfg_for(final_model, "OUTPUT_PREFIX", ident) or ""
                 out_suffix = main.cfg_for(final_model, "OUTPUT_SUFFIX", ident) or ""
                 overrides_ignored = sorted(k for k in req_overrides
@@ -598,6 +602,8 @@ async def transcribe_stream(ws: WebSocket) -> None:
         # locked out, so the client can see why it had no effect.
         if overrides_ignored:
             ready_msg["overrides_ignored"] = overrides_ignored
+        if req_override_profile:
+            ready_msg["profile_applied"] = ident.request_profile_applied
         await ws.send_json(ready_msg)
         if pending_audio:
             await transport.feed(pending_audio)
