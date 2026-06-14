@@ -244,3 +244,43 @@ def test_silence_only_input_never_finalizes_or_hallucinates():
     assert called["partial"] == 0
     assert called["final"] == 0
     assert msgs == []
+
+
+def test_skip_partials_suppresses_partial_decode_but_keeps_finals():
+    """B1 backpressure: when the streaming route signals it's behind realtime
+    (_skip_partials), the session skips the EXPENSIVE partial decode but still
+    runs finals on silence — audio/VAD stay intact so we catch up without losing
+    the utterance. Clearing the flag resumes partials."""
+    cfg = StreamConfig(
+        min_chunk_ms=96, vad_min_silence_ms=96, commit_silence_ms=192,
+        min_speech_ms=64, forced_commit_sec=100, buffer_trim_sec=100,
+        rms_gate_dbfs=-60, preroll_keep_ms=100,
+    )
+    calls = {"partial": 0, "final": 0}
+
+    async def decode_partial(audio, prompt):
+        calls["partial"] += 1
+        return [(0.0, 0.2, " x")]
+
+    async def decode_final(audio, prompt):
+        calls["final"] += 1
+        return ("x.", [])
+
+    s, msgs = _make_session(
+        postprocess=lambda raw: raw, decode_partial=decode_partial,
+        decode_final=decode_final, cfg=cfg,
+    )
+
+    async def run():
+        s._skip_partials = True               # behind realtime
+        await s.feed_pcm(_pcm(8000, 500))     # speech — partials would normally fire
+        await s.feed_pcm(_pcm(0, 400))        # silence → finalize (NOT skipped)
+        assert calls["partial"] == 0, "partials must be skipped when behind"
+        assert calls["final"] == 1, "finals must still run when behind"
+        s._skip_partials = False              # caught up → partials resume
+        await s.feed_pcm(_pcm(8000, 500))
+        await s.feed_pcm(_pcm(0, 400))
+
+    asyncio.run(run())
+    assert calls["partial"] >= 1, "partials must resume once caught up"
+    assert calls["final"] == 2

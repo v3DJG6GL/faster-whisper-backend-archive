@@ -1955,7 +1955,7 @@ async def transcribe(
     response_format: str = Form("json"),
     language: str = Form(None),
     temperature: float = Form(0.0),
-    prompt: str = Form(""),
+    prompt: str | None = Form(None),
     decode_overrides: str = Form(None),
     override_profile: str = Form(None),
     user: dict = Depends(_get_current_user_dep),
@@ -1994,6 +1994,14 @@ async def transcribe(
         timestamp_granularities = form_data.getlist("timestamp_granularities[]")
         if not timestamp_granularities:
             timestamp_granularities = form_data.getlist("timestamp_granularities")
+
+        # prompt sentinel: FastAPI coerces an empty `prompt` Form field to the
+        # parameter default (None), erasing the present-but-empty signal. Read the
+        # RAW form value so an explicit "" (CLEAR the inherited prompt) stays
+        # distinct from an absent field (INHERIT DEFAULT_PROMPT). A non-str (e.g. an
+        # accidental file part) is treated as absent.
+        _prompt_field = form_data.get("prompt")
+        prompt = _prompt_field if isinstance(_prompt_field, str) else None
 
         include_words = "word" in timestamp_granularities or (
             response_format == "verbose_json" and not timestamp_granularities
@@ -2050,13 +2058,20 @@ async def transcribe(
             # Prompt: a LOCKED DEFAULT_PROMPT forbids the client's `prompt`
             # param — the admin value stands. `ignored` collects what we drop
             # so the verbose_json response can surface it (never silent).
+            # prompt sentinel: None (field absent) = inherit DEFAULT_PROMPT; an
+            # explicit "" (field present-but-empty) = CLEAR (no initial_prompt); a
+            # value is used verbatim. The `if _prompt else None` coerce below turns
+            # an explicit "" into None for model.transcribe (passing "" trips the
+            # tnfru/primeline finetunes' documented failure mode).
             ignored: "list[str]" = []
             if "DEFAULT_PROMPT" in ident.locked:
                 _prompt = cfg_for(resolved_model, "DEFAULT_PROMPT", ident)
-                if prompt and prompt != _prompt:
+                if prompt is not None and prompt != _prompt:
                     ignored.append("prompt")
+            elif prompt is not None:
+                _prompt = prompt
             else:
-                _prompt = prompt or cfg_for(resolved_model, "DEFAULT_PROMPT", ident)
+                _prompt = cfg_for(resolved_model, "DEFAULT_PROMPT", ident)
             initial_prompt_arg = _prompt if _prompt else None
 
             _vad_filter = cfg_for(resolved_model, "VAD_FILTER", ident)
@@ -2471,8 +2486,21 @@ async def get_override_profile(name: str,
     if name not in allowed:
         raise HTTPException(status_code=404, detail="override-profile not found")
     profiles = getattr(cfg, "OVERRIDE_PROFILES", None) or {}
-    values, locked = effective_config.project_profile_to_client(profiles.get(name))
-    return {"name": name, "values": values, "locked": locked}
+    blob = profiles.get(name)
+    values, locked = effective_config.project_profile_to_client(blob)
+    # `prompt` is exposed SEPARATELY (not in `values`, which is exactly the 19
+    # client decode keys): the client's "Vocabulary / prompt" maps to the server's
+    # DEFAULT_PROMPT, which has no client decode key, so the editor needs it here to
+    # ghost the profile's prompt as an inherited default.
+    prompt = None
+    prompt_locked = False
+    if isinstance(blob, dict):
+        _p = blob.get("DEFAULT_PROMPT")
+        if isinstance(_p, str) and _p:
+            prompt = _p
+        prompt_locked = "DEFAULT_PROMPT" in (blob.get("locks") or [])
+    return {"name": name, "values": values, "locked": locked,
+            "prompt": prompt, "prompt_locked": prompt_locked}
 
 
 # =============================================================================
@@ -3236,4 +3264,9 @@ if __name__ == "__main__":
                 host=cfg.SERVER_HOST,
                 port=cfg.SERVER_PORT,
                 workers=cfg.SERVER_WORKERS,
-                log_level=cfg.SERVER_LOG_LEVEL)
+                log_level=cfg.SERVER_LOG_LEVEL,
+                # WS keepalive: a live decode no longer blocks the receive loop, so
+                # pings stay answered; a generous timeout tolerates a momentary
+                # stall. `or None` lets an admin disable either knob with 0.
+                ws_ping_interval=getattr(cfg, "STREAMING_WS_PING_INTERVAL_SEC", 20.0) or None,
+                ws_ping_timeout=getattr(cfg, "STREAMING_WS_PING_TIMEOUT_SEC", 60.0) or None)

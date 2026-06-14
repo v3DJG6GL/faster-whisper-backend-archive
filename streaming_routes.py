@@ -171,7 +171,12 @@ def _build_transcribe_kwargs(main, model_name: str, *, final: bool,
         speech_pad_ms=cfg_for(model_name, "VAD_SPEECH_PAD_MS", ident),
         threshold=cfg_for(model_name, "VAD_THRESHOLD", ident),
     ) if _vad_filter else None
-    _prompt = prompt or cfg_for(model_name, "DEFAULT_PROMPT", ident)
+    # The caller passes the session's rolling prompt (base_prompt — seeded from the
+    # client prompt or DEFAULT_PROMPT — plus recent confirmed words), so use it
+    # verbatim. An empty prompt means "no initial_prompt" (the client cleared it),
+    # NOT "fall back to DEFAULT_PROMPT": DEFAULT_PROMPT is applied once, at the
+    # base_prompt seed (see StreamSession construction / _refresh_ident).
+    _prompt = prompt
     kwargs = main.assemble_transcribe_kwargs(
         model_name, model_obj,
         language=lang, temperature=0.0,
@@ -230,6 +235,7 @@ async def transcribe_stream(ws: WebSocket) -> None:
     metrics.in_flight_transcriptions += 1
     session: "StreamSession | None" = None
     transport = None
+    consumer_task: "asyncio.Task | None" = None
     try:
         # ---- handshake: first message is the JSON config (binary → defaults) ----
         # An idle/abandoned/dead connection must not hold a session slot, so bound
@@ -257,10 +263,12 @@ async def transcribe_stream(ws: WebSocket) -> None:
         _req_language = conf.get("language")
         req_language = _req_language.strip() if isinstance(_req_language, str) else ""
         response_format = conf.get("response_format", "json")
-        # Per-connection initial prompt (the client's "Vocabulary / prompt"). Empty
-        # → fall back to the model's DEFAULT_PROMPT, then to None — same as batch.
+        # Per-connection initial prompt (the client's "Vocabulary / prompt"). Sentinel,
+        # same as batch: key ABSENT → inherit DEFAULT_PROMPT; present (incl. "") →
+        # use verbatim, where "" CLEARS the inherited prompt (no initial_prompt).
         _req_prompt = conf.get("prompt")
-        req_prompt = _req_prompt.strip() if isinstance(_req_prompt, str) else ""
+        prompt_provided = isinstance(_req_prompt, str)
+        req_prompt = _req_prompt.strip() if prompt_provided else ""
         # Optional per-request decode overrides (the client's "decode overrides").
         # Applied to the FINAL decode (the batch analogue); partials keep their
         # streaming-specific beam/temp/condition/vad knobs (see _build_transcribe_kwargs).
@@ -322,6 +330,7 @@ async def transcribe_stream(ws: WebSocket) -> None:
         _ident_version = config_store.config_version()
         _client_language = req_language
         _client_prompt = req_prompt
+        _client_prompt_provided = prompt_provided
 
         # Locked language / prompt: the admin value stands; the client's
         # handshake value is ignored (and surfaced in the ready frame). Locked
@@ -335,9 +344,10 @@ async def transcribe_stream(ws: WebSocket) -> None:
             req_language = _locked_lang
         if "DEFAULT_PROMPT" in ident.locked:
             _locked_prompt = main.cfg_for(final_model, "DEFAULT_PROMPT", ident) or ""
-            if req_prompt and req_prompt != _locked_prompt:
+            if prompt_provided and req_prompt != _locked_prompt:
                 overrides_ignored.append("prompt")
             req_prompt = _locked_prompt
+            prompt_provided = True  # locked admin value is now authoritative
 
         async def _transcribe(model_obj, audio, kwargs):
             loop = asyncio.get_running_loop()
@@ -373,6 +383,19 @@ async def transcribe_stream(ws: WebSocket) -> None:
         # lock) can build the rich log block + the capture row without re-decoding.
         last_decode: dict = {}
 
+        def _is_failed_segment(seg) -> bool:
+            """Anti-hallucination: True when the final decode of this segment clearly
+            FAILED — both very low confidence AND fell through the temperature ladder.
+            faster-whisper only *retries* on low avg_logprob (never drops), and its
+            silence skip needs no_speech_prob > NO_SPEECH_THRESHOLD, so a low-energy
+            clip can emit a fabricated segment; this drops it. Requiring BOTH signals
+            avoids discarding genuine quiet speech."""
+            alp = getattr(seg, "avg_logprob", 0.0)
+            temp = getattr(seg, "temperature", 0.0)
+            floor = float(getattr(cfg, "STREAMING_FINAL_DROP_MIN_AVG_LOGPROB", -1.0))
+            ceil = float(getattr(cfg, "STREAMING_FINAL_DROP_TEMPERATURE", 0.8))
+            return alp < floor and temp >= ceil
+
         async def decode_final(audio, prompt):
             _refresh_ident()
             kwargs = _build_transcribe_kwargs(
@@ -380,10 +403,11 @@ async def transcribe_stream(ws: WebSocket) -> None:
                 want_words=gate_final_words, language=req_language,
                 model_obj=final_model_obj, overrides=req_overrides, ident=ident)
             segs, info = await _transcribe(final_model_obj, audio, kwargs)
-            raw = "".join(seg.text for seg in segs)
             words_out: list[dict] = []
             seg_diag: list[dict] = []
+            kept: list[str] = []
             for i, seg in enumerate(segs):
+                dropped = _is_failed_segment(seg)
                 seg_diag.append({
                     "id": i, "start": seg.start, "end": seg.end,
                     "alp": getattr(seg, "avg_logprob", 0.0),
@@ -391,9 +415,18 @@ async def transcribe_stream(ws: WebSocket) -> None:
                     "cr": getattr(seg, "compression_ratio", 1.0),
                     "temp": getattr(seg, "temperature", 0.0),
                     "text": seg.text,
+                    "dropped": dropped,
                 })
+                if dropped:
+                    logger.info("[stream %s] dropped low-confidence final segment "
+                                "(alp=%.2f temp=%.2f): %r", session_id[:8],
+                                getattr(seg, "avg_logprob", 0.0),
+                                getattr(seg, "temperature", 0.0), seg.text)
+                    continue
+                kept.append(seg.text)
                 for w in (getattr(seg, "words", None) or []):
                     words_out.append({"word": w.word, "start": w.start, "end": w.end})
+            raw = "".join(kept)
             last_decode.clear()
             last_decode.update(info=info, seg_diag=seg_diag, kwargs=kwargs)
             return raw, words_out
@@ -407,6 +440,12 @@ async def transcribe_stream(ws: WebSocket) -> None:
         # every final is correct — it never accumulates.
         out_prefix = main.cfg_for(final_model, "OUTPUT_PREFIX", ident) or ""
         out_suffix = main.cfg_for(final_model, "OUTPUT_SUFFIX", ident) or ""
+
+        # Serializes EVERY ws send across the producer (receive loop) and the
+        # consumer/decode task, which now run concurrently (see the audio queue
+        # below). Starlette allows receive-in-one-task + send-in-another, but two
+        # concurrent sends could interleave — this lock prevents that.
+        send_lock = asyncio.Lock()
 
         async def emit(message):
             if message.get("type") == "final":
@@ -422,7 +461,8 @@ async def transcribe_stream(ws: WebSocket) -> None:
             # Peer may have vanished mid-drain (page reload during dictation): the
             # socket is already closed, so swallow the send. Side-effects
             # (metrics/trace/captures) still ran in on_final.
-            await _safe_ws_send(ws, message)
+            async with send_lock:
+                await _safe_ws_send(ws, message)
 
         def _maybe_capture(rid, info, raw_text, final_text, words, fw_info):
             """Persist a fine-tuning capture for this utterance, mirroring the batch
@@ -541,7 +581,8 @@ async def transcribe_stream(ws: WebSocket) -> None:
             decode_final=decode_final,
             postprocess=postprocess,
             emit=emit,
-            base_prompt=(req_prompt or main.cfg_for(final_model, "DEFAULT_PROMPT", ident) or ""),
+            base_prompt=(req_prompt if prompt_provided
+                         else (main.cfg_for(final_model, "DEFAULT_PROMPT", ident) or "")),
             on_final=on_final,
         )
 
@@ -573,27 +614,76 @@ async def transcribe_stream(ws: WebSocket) -> None:
                         overrides_ignored.append("language")
                     req_language = _ll
                 req_prompt = _client_prompt
+                _provided = _client_prompt_provided
                 if "DEFAULT_PROMPT" in ident.locked:
                     _lp = main.cfg_for(final_model, "DEFAULT_PROMPT", ident) or ""
-                    if _client_prompt and _client_prompt != _lp:
+                    if _client_prompt_provided and _client_prompt != _lp:
                         overrides_ignored.append("prompt")
                     req_prompt = _lp
+                    _provided = True
                 # The rolling prompt seed lives on the session; updating it makes a
                 # changed DEFAULT_PROMPT take effect from the next utterance's
-                # _make_prompt() (one-utterance convergence).
-                session.base_prompt = (req_prompt
-                                       or main.cfg_for(final_model, "DEFAULT_PROMPT", ident)
-                                       or "")
+                # _make_prompt() (one-utterance convergence). An explicitly cleared
+                # client prompt (_provided + "") keeps the seed empty (no fallback).
+                session.base_prompt = (req_prompt if _provided
+                                       else (main.cfg_for(final_model, "DEFAULT_PROMPT", ident) or ""))
             except Exception as _re:  # noqa: BLE001 — never break dictation on refresh
                 logger.warning("[stream %s] ident refresh failed: %s", session_id[:8], _re)
 
-        # All session mutation is serialized: the ffmpeg reader task and the
-        # control-message handler both touch the session across await points.
-        session_lock = asyncio.Lock()
+        # Producer→consumer hand-off. The receive loop (producer) must NEVER block
+        # on a decode: if it does, it stops draining ws.receive(), the inbound WS
+        # message queue fills, websockets stops reading frames, the client's PONGs
+        # go unread, and the keepalive ping times out → the socket dies mid-
+        # utterance. So sink() only ENQUEUES; a dedicated consumer task (_pump,
+        # below) runs the CPU-bound feed_pcm/decode out of the receive loop's way.
+        # Items: ("pcm", bytes) | ("flush", None) | ("stop", None).
+        audio_q: "asyncio.Queue[tuple[str, bytes | None]]" = asyncio.Queue()
+        _bytes_per_sec = SAMPLE_RATE * 2          # 16 kHz mono s16le
+        # Skip the partial decode when the backlog exceeds ~one partial interval of
+        # audio (we're behind realtime); audio is still fed so VAD/endpointing stays
+        # intact and finals still run, letting us catch up without dropping audio.
+        _behind_bytes = int(_bytes_per_sec * max(0.25, session.cfg.min_chunk_ms / 1000.0))
+        _hard_cap_bytes = _bytes_per_sec * 60     # absolute backlog cap (drop oldest, logged)
+        _qbytes = 0                                # PCM bytes currently queued
 
         async def sink(pcm: bytes):
-            async with session_lock:
-                await session.feed_pcm(pcm)
+            nonlocal _qbytes
+            if not pcm:
+                return
+            # Absolute backlog cap: if the consumer has fallen catastrophically
+            # behind, drop the oldest queued PCM (never silently) so memory can't
+            # grow without bound. Skip-if-behind normally prevents reaching this.
+            while _qbytes + len(pcm) > _hard_cap_bytes:
+                try:
+                    kind, old = audio_q.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                dropped = len(old) if (kind == "pcm" and old) else 0
+                _qbytes -= dropped
+                logger.warning("[stream %s] audio backlog over cap — dropped %d bytes",
+                               session_id[:8], dropped)
+            audio_q.put_nowait(("pcm", pcm))
+            _qbytes += len(pcm)
+
+        async def _pump() -> None:
+            """Consume queued audio/control out of the receive loop's way. Sole
+            session mutator while the connection is live, so session access here
+            needs no lock; session.close() runs only after this task has finished
+            or been cancelled (see teardown)."""
+            nonlocal _qbytes
+            while True:
+                kind, data = await audio_q.get()
+                if kind == "stop":
+                    break
+                try:
+                    if kind == "pcm":
+                        _qbytes -= len(data)
+                        session._skip_partials = _qbytes > _behind_bytes
+                        await session.feed_pcm(data)
+                    elif kind == "flush":
+                        await session.flush_utterance()
+                except Exception as exc:  # noqa: BLE001 — a decode error must not kill the pump
+                    logger.warning("[stream %s] pump error: %s", session_id[:8], exc)
 
         transport = make_transport(audio_fmt, sink, sample_rate=SAMPLE_RATE)
         await transport.start()
@@ -609,11 +699,18 @@ async def transcribe_stream(ws: WebSocket) -> None:
             ready_msg["overrides_ignored"] = overrides_ignored
         if req_override_profile:
             ready_msg["profile_applied"] = ident.request_profile_applied
-        await ws.send_json(ready_msg)
+        async with send_lock:
+            await ws.send_json(ready_msg)
+
+        # Start the consumer before any audio is queued (the handshake byte, pending
+        # audio, or the receive loop) so nothing waits on a not-yet-running pump.
+        consumer_task = asyncio.create_task(_pump())
         if pending_audio:
             await transport.feed(pending_audio)
 
-        # ---- main receive loop ----
+        # ---- main receive loop (PRODUCER) ----
+        # Pure producer: drain ws.receive() and hand audio/control to the consumer.
+        # It must never await a decode (that wedged the socket) — enqueue and move on.
         # Per-identity idle timeout (a trusted profile may allow a longer silence
         # grace); resolved now that the model + identity are known.
         idle_timeout = float(main.cfg_for(final_model, "STREAMING_IDLE_TIMEOUT_SEC", ident) or 0.0)
@@ -623,11 +720,12 @@ async def transcribe_stream(ws: WebSocket) -> None:
                     msg = await _receive_idle(ws, idle_timeout)
                 except asyncio.TimeoutError:
                     logger.info("[stream %s] idle %.0fs — closing", session_id[:8], idle_timeout)
-                    try:
-                        await ws.send_json({"type": "error", "code": "idle_timeout",
-                                            "message": f"no audio for {idle_timeout:.0f}s; closing"})
-                    except Exception:  # noqa: BLE001 — peer may be gone
-                        pass
+                    async with send_lock:
+                        try:
+                            await ws.send_json({"type": "error", "code": "idle_timeout",
+                                                "message": f"no audio for {idle_timeout:.0f}s; closing"})
+                        except Exception:  # noqa: BLE001 — peer may be gone
+                            pass
                     break
                 if msg.get("type") == "websocket.disconnect":
                     break
@@ -640,19 +738,26 @@ async def transcribe_stream(ws: WebSocket) -> None:
                         continue
                     kind = ctrl.get("type")
                     if kind == "flush":
-                        async with session_lock:
-                            await session.flush_utterance()
+                        audio_q.put_nowait(("flush", None))
                     elif kind == "stop":
                         break
         finally:
-            await transport.aclose()      # flush any encoded tail into the session
-        async with session_lock:
-            await session.close()
-        try:
-            await ws.send_json({"type": "closing"})
-            await ws.close()
-        except (RuntimeError, WebSocketDisconnect):
-            pass
+            # Flush the encoded tail into the session (→ sink → queue), then signal
+            # end-of-stream and let the consumer drain everything still queued
+            # (incl. that tail) before we finalize/close the session.
+            await transport.aclose()
+            audio_q.put_nowait(("stop", None))
+            try:
+                await consumer_task
+            except Exception:  # noqa: BLE001
+                pass
+        await session.close()
+        async with send_lock:
+            try:
+                await ws.send_json({"type": "closing"})
+                await ws.close()
+            except (RuntimeError, WebSocketDisconnect):
+                pass
     except WebSocketDisconnect:
         pass  # peer gone; teardown happens in the finally
     except Exception as exc:  # noqa: BLE001
@@ -673,6 +778,15 @@ async def transcribe_stream(ws: WebSocket) -> None:
             try:
                 await transport.aclose()
             except Exception:  # noqa: BLE001
+                pass
+        # Stop the consumer before closing the session so the two never touch the
+        # session concurrently. On the normal path it has already finished (awaited
+        # above); on an error/disconnect path cancel + await it here.
+        if consumer_task is not None and not consumer_task.done():
+            consumer_task.cancel()
+            try:
+                await consumer_task
+            except (Exception, asyncio.CancelledError):  # noqa: BLE001
                 pass
         if session is not None:
             try:

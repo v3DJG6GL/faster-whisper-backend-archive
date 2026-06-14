@@ -122,3 +122,33 @@ def test_output_prefix_suffix_wrap(client, app_module):
 def test_missing_file_is_422(client):
     r = client.post("/v1/audio/transcriptions", data={"model": "whisper-1"})
     assert r.status_code == 422
+
+
+def test_prompt_sentinel_inherit_clear_value(client, fake_model, app_module):
+    """B4: `prompt` is a present-vs-absent sentinel read from the RAW form (FastAPI
+    coerces an empty Form field to its default, so the handler reads request.form()
+    directly). Absent → inherit DEFAULT_PROMPT; present-but-empty "" → CLEAR (no
+    initial_prompt); value → verbatim."""
+    app_module.cfg.DEFAULT_PROMPT = "SERVER PROMPT"
+    # absent → inherit DEFAULT_PROMPT
+    _post(client, response_format="json")
+    assert fake_model.last_kwargs["initial_prompt"] == "SERVER PROMPT"
+    # value → verbatim
+    _post(client, response_format="json", prompt="my terms")
+    assert fake_model.last_kwargs["initial_prompt"] == "my terms"
+    # explicit empty → CLEAR. httpx drops empty `data`/`files` values and FastAPI
+    # coerces an empty Form field to its default, so hand-build the multipart body
+    # to deliver a genuine present-but-empty `prompt` part (what reqwest sends).
+    b = "----p12boundary"
+    body = (
+        f'--{b}\r\nContent-Disposition: form-data; name="file"; filename="a.wav"\r\n'
+        f'Content-Type: audio/wav\r\n\r\nRIFFxxxxWAVE\r\n'
+        f'--{b}\r\nContent-Disposition: form-data; name="model"\r\n\r\nwhisper-1\r\n'
+        f'--{b}\r\nContent-Disposition: form-data; name="response_format"\r\n\r\njson\r\n'
+        f'--{b}\r\nContent-Disposition: form-data; name="prompt"\r\n\r\n\r\n'
+        f'--{b}--\r\n'
+    ).encode()
+    r = client.post("/v1/audio/transcriptions", content=body,
+                    headers={"Content-Type": f"multipart/form-data; boundary={b}"})
+    assert r.status_code == 200, r.text
+    assert fake_model.last_kwargs["initial_prompt"] is None

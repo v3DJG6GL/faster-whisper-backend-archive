@@ -121,6 +121,10 @@ class StreamSession:
         self._utterance_index = 0
         self._prompt = base_prompt.strip()
         self._closed = False
+        # Set by the streaming route's consumer when it has fallen behind realtime:
+        # skip the (expensive) partial decode so we can catch up. Audio is still fed
+        # (VAD/endpointing stays intact) and finals still run.
+        self._skip_partials = False
 
     # ---- public API -------------------------------------------------------
 
@@ -227,6 +231,8 @@ class StreamSession:
 
     async def _run_partial(self) -> None:
         self._new_since_partial = 0
+        if self._skip_partials:
+            return  # behind realtime — skip the partial decode so we can catch up
         if self._speech_ms < self.cfg.min_speech_ms:
             return
         if rms_dbfs(self.audio) < self.cfg.rms_gate_dbfs:

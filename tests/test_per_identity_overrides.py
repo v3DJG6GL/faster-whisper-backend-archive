@@ -108,6 +108,29 @@ def test_override_profile_detail_values_and_locks(client, make_user_key):
     assert j["locked"] == ["beam_size"]
 
 
+def test_override_profile_detail_exposes_prompt(client, make_user_key):
+    """B5: the detail endpoint exposes the profile's DEFAULT_PROMPT SEPARATELY (not
+    in `values`, which is the 19 client decode keys) so the editor can ghost it as
+    the inherited 'Vocabulary / prompt'. Its lock state rides along; a prompt-less
+    profile reports null/false."""
+    _, raw_admin = make_user_key("admin", is_admin=True)
+    h = bearer(raw_admin)
+    _profiles(client, h, {
+        "withp": {"BEAM_SIZE": 3, "DEFAULT_PROMPT": "Medizin: Anamnese",
+                  "locks": ["DEFAULT_PROMPT"]},
+        "nop": {"BEAM_SIZE": 5},
+    })
+    _, raw_alice = make_user_key("alice")
+    ah = bearer(raw_alice)
+    j = client.get("/v1/override-profiles/withp", headers=ah).json()
+    assert j["prompt"] == "Medizin: Anamnese"
+    assert j["prompt_locked"] is True
+    assert "default_prompt" not in j["values"]      # prompt is NOT a client decode key
+    j2 = client.get("/v1/override-profiles/nop", headers=ah).json()
+    assert j2["prompt"] is None
+    assert j2["prompt_locked"] is False
+
+
 def test_override_profile_detail_404_when_not_allowed(client, make_user_key):
     _, raw_admin = make_user_key("admin", is_admin=True)
     h = bearer(raw_admin)

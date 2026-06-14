@@ -788,6 +788,15 @@ INFERENCE_CONCURRENCY: int = 2
 # only fires on a genuinely stalled connection, never on a normal speaking pause.
 # Per-identity overridable (a trusted profile can be given a longer grace).
 STREAMING_IDLE_TIMEOUT_SEC: float = 300.0
+# WebSocket keepalive, passed to uvicorn. The server pings the client every
+# _INTERVAL_ s and drops the socket if no pong returns within _TIMEOUT_ s. The
+# decode now runs off the receive loop (streaming_routes producer/consumer), so
+# pings stay answered during a decode; this generous timeout is belt-and-suspenders
+# against a momentary stall. Keep the interval non-zero so a genuinely dead client
+# is still detected (0 on either → that knob disabled). Read once at uvicorn.run
+# (restart to change).
+STREAMING_WS_PING_INTERVAL_SEC: float = 20.0
+STREAMING_WS_PING_TIMEOUT_SEC: float = 60.0
 
 # (2) Partial decoding — the live-preview loop's model, decode params + cadence.
 # Optional fast model for the live partial loop (e.g. a turbo-German CT2 id).
@@ -816,6 +825,16 @@ STREAMING_GATE_MIN_SPEECH_MS: int = 500
 STREAMING_GATE_RMS_DBFS: float = -42.0
 STREAMING_VAD_INNER_SILENCE_MS: int = 700
 STREAMING_VAD_OUTER_SILENCE_MS: int = 1200
+# Post-decode anti-hallucination guard for the FINAL pass. faster-whisper's
+# built-in silence skip only fires when no_speech_prob > NO_SPEECH_THRESHOLD, so a
+# low-energy clip that slips under it can still emit a fabricated segment ("thank
+# you for watching…"). Drop a final segment only when it is BOTH very low
+# confidence (avg_logprob < _MIN_AVG_LOGPROB) AND fell through the temperature
+# ladder (temperature >= _DROP_TEMPERATURE): together these mean the decode failed,
+# while requiring BOTH avoids discarding genuine quiet speech. Lower _MIN_AVG_LOGPROB
+# (e.g. -10) to effectively disable.
+STREAMING_FINAL_DROP_MIN_AVG_LOGPROB: float = -1.0
+STREAMING_FINAL_DROP_TEMPERATURE: float = 0.8
 
 # (4) Finalize & document breaks. FORCED_COMMIT_SEC hard-caps continuous speech
 # before a forced finalize (keeps the buffer inside Whisper's 30 s field). The

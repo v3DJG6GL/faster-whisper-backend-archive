@@ -143,3 +143,63 @@ def test_stream_picks_up_binding_change_without_reconnect(
         _drain(ws)
 
     assert fake_model.last_kwargs["beam_size"] == 3
+
+
+def test_final_drops_low_confidence_hallucination_segment(
+        client, make_user_key, fake_model, app_module, monkeypatch):
+    """B3: a final-decode segment that is BOTH very low confidence AND fell through
+    the temperature ladder (a hallucination on near-silence) is dropped from the
+    committed text; a normal segment in the same decode is kept."""
+    from tests.conftest import FakeSegment
+    monkeypatch.setattr(app_module.cfg, "STREAMING_VAD_BACKEND", "energy", raising=False)
+    make_user_key("admin", is_admin=True)               # lock down
+    _, raw_alice = make_user_key("alice")
+
+    bad = FakeSegment(" thank you for watching", 0.0, 1.0)
+    bad.avg_logprob, bad.temperature = -2.32, 1.0        # failed decode → drop
+    good = FakeSegment(" der patient hat fieber.", 1.0, 2.0)
+    good.avg_logprob, good.temperature = -0.2, 0.0       # healthy → keep
+    fake_model._segments = [bad, good]
+
+    with client.websocket_connect(
+            f"/v1/audio/transcriptions/stream?key={raw_alice}") as ws:
+        ws.send_json({"type": "config", "model": "whisper-1",
+                      "audio": {"format": "pcm_s16le", "sample_rate": 16000}})
+        assert ws.receive_json()["type"] == "ready"
+        ws.send_bytes(_pcm(8000, 2500))
+        ws.send_bytes(_pcm(0, 1500))
+        ws.send_json({"type": "stop"})
+        msgs = _drain(ws)
+
+    finals = [m for m in msgs if m["type"] == "final"]
+    doc = (finals[-1]["committed"] + finals[-1]["tail"]) if finals else ""
+    assert "fieber" in doc                               # healthy segment kept
+    assert "watching" not in doc                         # hallucination dropped
+
+
+def test_stream_prompt_sentinel_inherit_clear_value(
+        client, make_user_key, fake_model, app_module, monkeypatch):
+    """B4: the WS handshake prompt is a present-vs-absent sentinel. Absent → inherit
+    DEFAULT_PROMPT; explicit "" → CLEAR (no initial_prompt); a value → used verbatim.
+    The first utterance's final decode is seeded straight from base_prompt."""
+    monkeypatch.setattr(app_module.cfg, "STREAMING_VAD_BACKEND", "energy", raising=False)
+    monkeypatch.setattr(app_module.cfg, "DEFAULT_PROMPT", "SERVER PROMPT", raising=False)
+    make_user_key("admin", is_admin=True)
+    _, raw_alice = make_user_key("alice")
+
+    def _run(conf_extra):
+        with client.websocket_connect(
+                f"/v1/audio/transcriptions/stream?key={raw_alice}") as ws:
+            ws.send_json({"type": "config", "model": "whisper-1",
+                          "audio": {"format": "pcm_s16le", "sample_rate": 16000},
+                          **conf_extra})
+            assert ws.receive_json()["type"] == "ready"
+            ws.send_bytes(_pcm(8000, 2500))
+            ws.send_bytes(_pcm(0, 1500))
+            ws.send_json({"type": "stop"})
+            _drain(ws)
+        return fake_model.last_kwargs.get("initial_prompt")
+
+    assert _run({}) == "SERVER PROMPT"            # absent → inherit
+    assert _run({"prompt": ""}) is None           # explicit empty → clear
+    assert _run({"prompt": "my terms"}) == "my terms"   # value → verbatim
