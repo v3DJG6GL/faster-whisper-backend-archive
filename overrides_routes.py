@@ -435,8 +435,6 @@ _OVERRIDES_HTML = r"""<!doctype html>
 
 {{SCALE_PICKER_JS}}
 {{SEV_POLLER_JS}}
-{{TIME_HELPERS_JS}}
-{{TAG_PICKER_JS}}
 <script>
 /* Standalone resolution-waterfall renderer — its own esc() scope so both the
    Explorer and (later) the api-keys inline preview can call it. Pure: takes a
