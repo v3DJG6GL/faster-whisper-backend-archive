@@ -93,6 +93,9 @@ class Resolved:
     dropped: list[str] = field(default_factory=list)
     # Ordered profile names applied (most → least specific), for observability.
     profiles_applied: list[str] = field(default_factory=list)
+    # The request-named override profile actually applied (gate on + valid +
+    # exists), else None. Echoed to the client as `profile_applied`.
+    request_profile_applied: str | None = None
     # Ordered identity layer ids that contributed (most → least specific).
     layers: list[str] = field(default_factory=list)
     # Per-field provenance (verbose path only) — drives the /resolve waterfall.
@@ -133,9 +136,11 @@ def _blob_to_layer(layer_id: str, label: str, profile_name: str | None,
 
 
 def _gather_identity_layers(user_id: str | None,
-                            key_id: str | None) -> list[dict[str, Any]]:
+                            key_id: str | None,
+                            request_profile: str | None = None) -> list[dict[str, Any]]:
     """Build the ordered (most → least specific) identity layer list:
-    key.direct, key.profiles…, user.direct, user.profiles…"""
+    key.direct, key.profiles…, user.direct, user.profiles…, then the
+    request-named profile (least specific) if any."""
     import api_keys_store  # local import keeps module import order flexible
 
     profiles = getattr(cfg, "OVERRIDE_PROFILES", None) or {}
@@ -169,7 +174,32 @@ def _gather_identity_layers(user_id: str | None,
             _append_binding("user", api_keys_store.get_user_config(user_id))
         except Exception:
             pass
+    # The request-named profile is the LEAST-specific identity layer: appended
+    # last, so it fills only fields no key/user layer set and can never override
+    # or unlock an admin-pinned value (first layer with an opinion wins).
+    req_layer = _request_profile_layer(request_profile)
+    if req_layer is not None:
+        layers.append(req_layer)
     return layers
+
+
+def _request_profile_layer(request_profile: str | None) -> dict[str, Any] | None:
+    """The request-supplied profile name as a (least-specific) identity layer, or
+    None when the feature is gated off, the name is malformed, or no such profile
+    exists. Tolerant — an unusable name contributes nothing and never raises."""
+    if not request_profile:
+        return None
+    if not getattr(cfg, "ALLOW_REQUEST_OVERRIDE_PROFILE", True):
+        return None
+    if not config_store.TAG_RE.match(request_profile):
+        return None
+    profiles = getattr(cfg, "OVERRIDE_PROFILES", None) or {}
+    return _blob_to_layer(
+        f"request.profile:{request_profile}",
+        f"request · profile {request_profile}",
+        request_profile,
+        profiles.get(request_profile),
+    )
 
 
 def _per_model_value(model_id: str | None, field_name: str) -> Any:
@@ -336,6 +366,7 @@ def _scalar_provenance(fname: str, layers: list[dict[str, Any]],
 def resolve(model_id: str | None, *, user_id: str | None = None,
             key_id: str | None = None,
             request_overrides: dict[str, Any] | None = None,
+            request_profile: str | None = None,
             with_provenance: bool = False) -> Resolved:
     """Resolve the effective per-identity config.
 
@@ -347,7 +378,16 @@ def resolve(model_id: str | None, *, user_id: str | None = None,
     A caller with no per-identity config (or open mode) yields a Resolved whose
     identity layers are empty but whose pipeline_include/exclude still fold the
     per-model rules — so threading it through behaves exactly like today.
+
+    ``request_profile`` (optional) names an OVERRIDE_PROFILES entry to apply as
+    the least-specific identity layer; gated by ALLOW_REQUEST_OVERRIDE_PROFILE
+    and ignored if malformed/unknown. ``request_profile_applied`` echoes what
+    actually took effect.
     """
-    layers = _gather_identity_layers(user_id, key_id)
-    return _resolve_from_layers(model_id, layers, request_overrides or {},
-                                with_provenance)
+    layers = _gather_identity_layers(user_id, key_id, request_profile)
+    resolved = _resolve_from_layers(model_id, layers, request_overrides or {},
+                                    with_provenance)
+    resolved.request_profile_applied = (
+        request_profile if _request_profile_layer(request_profile) is not None else None
+    )
+    return resolved

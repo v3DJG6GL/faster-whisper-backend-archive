@@ -179,6 +179,7 @@ ENV_VAR_MAPPING: dict[str, str] = {
     "PIPELINE_RULES": "WHISPER_PIPELINE_RULES",
     "MODEL_OVERRIDES": "WHISPER_MODEL_OVERRIDES",
     "OVERRIDE_PROFILES": "WHISPER_OVERRIDE_PROFILES",
+    "ALLOW_REQUEST_OVERRIDE_PROFILE": "WHISPER_ALLOW_REQUEST_OVERRIDE_PROFILE",
 }
 
 # Cold settings — editing these requires a service restart for the new value
@@ -460,6 +461,12 @@ FIELD_DESCRIPTIONS: dict[str, str] = {
         "a `locks` list). Users and API keys reference profiles by name; the "
         "effective config resolves per-key → per-user → profiles → per-model → "
         "global. Edited on the /settings/overrides page.",
+    "ALLOW_REQUEST_OVERRIDE_PROFILE":
+        "Honor a per-request `override_profile` name on the transcription and "
+        "streaming endpoints. On = a request may name an OVERRIDE_PROFILES entry; "
+        "it applies as the least-specific identity layer (fills only fields no "
+        "per-key/per-user binding set, and can never override or unlock an "
+        "admin-pinned value). Off = the request field is ignored.",
     "REVISION":
         "(Per-model only) HuggingFace git revision (branch, tag, commit) "
         "to pin the model snapshot to. Empty = HEAD of default branch.",
@@ -1196,6 +1203,7 @@ class AdminConfig(BaseModel):
 
     # --- Per-identity config profiles (reusable, name → override bundle) ---
     OVERRIDE_PROFILES: dict[ProfileName, OverrideProfile] | None = _F("OVERRIDE_PROFILES")
+    ALLOW_REQUEST_OVERRIDE_PROFILE: bool | None = _F("ALLOW_REQUEST_OVERRIDE_PROFILE")
 
     # --- Pipeline ---
     PIPELINE_RULES: Annotated[list[PipelineRule], Field(max_length=200)] | None = _F("PIPELINE_RULES")

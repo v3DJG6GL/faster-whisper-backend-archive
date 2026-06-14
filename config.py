@@ -420,6 +420,13 @@ MODEL_OVERRIDES: "dict[str, dict[str, object]]" = {}
 # config.local.json. JSON escape hatch: WHISPER_OVERRIDE_PROFILES.
 OVERRIDE_PROFILES: "dict[str, dict[str, object]]" = {}
 
+# Master switch: honor a per-request `override_profile` name (sent by clients on
+# the transcription / streaming endpoints) that selects an OVERRIDE_PROFILES
+# entry to apply. It is applied as the LEAST-specific identity layer, so it only
+# fills fields no per-key/per-user binding set and can never override or unlock
+# an admin-pinned value. False = ignore the request field entirely.
+ALLOW_REQUEST_OVERRIDE_PROFILE = True
+
 
 # =============================================================================
 # Admin WebUI (optional /settings browser editor)
