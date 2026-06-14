@@ -87,6 +87,25 @@ def test_decode_overrides_drop_non_finite_floats():
         assert "temperature" not in kw and "no_speech_threshold" not in kw, (literal, kw)
 
 
+def test_decode_overrides_drop_overflowing_suppress_tokens():
+    """A suppress_tokens override whose member overflows int() is dropped, not
+    500'd: a JSON 1e999 / Infinity literal parses to float('inf') and int(inf)
+    raises OverflowError. Sibling of the non-finite-float and integer-clamp
+    drops; covers the batch route and the streaming FINAL decode via the shared
+    _apply_decode_overrides."""
+    import main
+    # a valid list still applies (float members truncate through int())
+    assert main._apply_decode_overrides({}, "whisper-1",
+        {"suppress_tokens": [1, 2]})["suppress_tokens"] == [1, 2]
+    assert main._apply_decode_overrides({}, "whisper-1",
+        {"suppress_tokens": [1.9, 2.0]})["suppress_tokens"] == [1, 2]
+    # overflowing / non-finite / non-integral members are dropped, never raised
+    for st in ([json.loads("1e999")], [float("inf")], [float("-inf")],
+               [float("nan")], [None], [{}], "1,nan"):
+        kw = main._apply_decode_overrides({}, "whisper-1", {"suppress_tokens": st})
+        assert "suppress_tokens" not in kw, (st, kw)
+
+
 def test_request_block_identity_section():
     from types import SimpleNamespace
     import main
