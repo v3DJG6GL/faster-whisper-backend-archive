@@ -143,3 +143,50 @@ def test_safe_ws_send_swallows_dead_socket():
     live = LiveWS()
     assert asyncio.run(streaming_routes._safe_ws_send(live, {"type": "final"})) is True
     assert live.sent == [{"type": "final"}]
+
+
+def test_stream_handshake_idle_timeout_frees_slot(app_module, monkeypatch):
+    # A client that connects + passes auth but never sends its config handshake
+    # must not hold a session slot forever: the server abandons the wait after
+    # STREAMING_IDLE_TIMEOUT_SEC and closes with the idle close code (4408).
+    import pytest
+    from streaming_routes import _WS_IDLE_TIMEOUT
+    monkeypatch.setattr(app_module.cfg, "STREAMING_IDLE_TIMEOUT_SEC", 0.3, raising=False)
+    with TestClient(app_module.app, client=("127.0.0.1", 12345)) as client:
+        with client.websocket_connect("/v1/audio/transcriptions/stream") as ws:
+            with pytest.raises(WebSocketDisconnect) as ei:
+                ws.receive_json()   # send nothing → idle close
+    assert ei.value.code == _WS_IDLE_TIMEOUT
+
+
+def test_stream_session_idle_timeout_closes_and_notifies(app_module, monkeypatch):
+    # After a successful handshake, a connection that goes silent mid-session is
+    # closed once the idle timeout elapses, with an idle_timeout notice first.
+    monkeypatch.setattr(app_module.cfg, "STREAMING_VAD_BACKEND", "energy", raising=False)
+    monkeypatch.setattr(app_module.cfg, "STREAMING_IDLE_TIMEOUT_SEC", 0.3, raising=False)
+    with TestClient(app_module.app, client=("127.0.0.1", 12345)) as client:
+        with client.websocket_connect("/v1/audio/transcriptions/stream") as ws:
+            ws.send_json({
+                "type": "config", "model": "whisper-1", "response_format": "json",
+                "audio": {"format": "pcm_s16le", "sample_rate": 16000},
+            })
+            assert ws.receive_json()["type"] == "ready"
+            msgs = _drain(ws)   # send nothing further → idle close
+    assert any(m.get("code") == "idle_timeout" for m in msgs)
+
+
+def test_stream_idle_timeout_zero_disables(app_module, monkeypatch):
+    # 0 disables the idle timeout: the normal stop/close flow still works and no
+    # idle_timeout notice is emitted (the receive falls through to a plain await).
+    monkeypatch.setattr(app_module.cfg, "STREAMING_VAD_BACKEND", "energy", raising=False)
+    monkeypatch.setattr(app_module.cfg, "STREAMING_IDLE_TIMEOUT_SEC", 0.0, raising=False)
+    with TestClient(app_module.app, client=("127.0.0.1", 12345)) as client:
+        with client.websocket_connect("/v1/audio/transcriptions/stream") as ws:
+            ws.send_json({
+                "type": "config", "model": "whisper-1", "response_format": "json",
+                "audio": {"format": "pcm_s16le", "sample_rate": 16000},
+            })
+            assert ws.receive_json()["type"] == "ready"
+            ws.send_json({"type": "stop"})
+            msgs = _drain(ws)
+    assert not any(m.get("code") == "idle_timeout" for m in msgs)

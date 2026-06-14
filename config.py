@@ -764,6 +764,13 @@ CAPTURES_PROPOSER_CACHE_TTL_S = 60
 STREAMING_ENABLED: bool = True
 STREAMING_MAX_SESSIONS: int = 10
 INFERENCE_CONCURRENCY: int = 2
+# Close a live-dictation WebSocket that goes silent (no audio or control frame
+# received) for this many seconds, freeing its session slot. Bounds idle,
+# abandoned, or dead connections so they can't hold one of STREAMING_MAX_SESSIONS
+# forever. 0 = no idle timeout. The live client streams PCM continuously, so this
+# only fires on a genuinely stalled connection, never on a normal speaking pause.
+# Per-identity overridable (a trusted profile can be given a longer grace).
+STREAMING_IDLE_TIMEOUT_SEC: float = 300.0
 
 # (2) Partial decoding — the live-preview loop's model, decode params + cadence.
 # Optional fast model for the live partial loop (e.g. a turbo-German CT2 id).

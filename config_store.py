@@ -154,6 +154,7 @@ ENV_VAR_MAPPING: dict[str, str] = {
     # Live streaming (WebSocket dictation) + shared inference concurrency
     "STREAMING_ENABLED": "WHISPER_STREAMING_ENABLED",
     "STREAMING_MAX_SESSIONS": "WHISPER_STREAMING_MAX_SESSIONS",
+    "STREAMING_IDLE_TIMEOUT_SEC": "WHISPER_STREAMING_IDLE_TIMEOUT_SEC",
     "INFERENCE_CONCURRENCY": "WHISPER_INFERENCE_CONCURRENCY",
     "STREAMING_PARTIAL_MODEL": "WHISPER_STREAMING_PARTIAL_MODEL",
     "STREAMING_PARTIAL_BEAM": "WHISPER_STREAMING_PARTIAL_BEAM",
@@ -686,6 +687,10 @@ FIELD_DESCRIPTIONS: dict[str, str] = {
     "STREAMING_MAX_SESSIONS":
         "Max simultaneous streaming sessions; further connections are refused. "
         "Bound to your GPU's real concurrent capacity.",
+    "STREAMING_IDLE_TIMEOUT_SEC":
+        "Close a live-dictation connection that sends no audio for this many "
+        "seconds, freeing its slot (bounds idle/abandoned connections). 0 = off. "
+        "Won't cut a normal session (the client streams continuously).",
     "INFERENCE_CONCURRENCY":
         "Shared cap on concurrent GPU decodes across BOTH streaming and the batch "
         "/transcribe route — prevents oversubscribing the GPU (restart to change).",
@@ -1027,13 +1032,16 @@ class ModelOverride(_CallTimeOverrideMixin):
 class _StreamingOverrideMixin(BaseModel):
     """Live-streaming (WebSocket dictation) override fields that are meaningful
     per-identity — partial-decode knobs, VAD / speech gates, finalize &
-    document-break, buffer trimming. Server-capacity knobs (STREAMING_ENABLED,
-    STREAMING_MAX_SESSIONS, INFERENCE_CONCURRENCY) and the partial-model
-    selector are deliberately NOT here — they are server-wide, not per-caller.
+    document-break, buffer trimming, idle timeout. Hard server-capacity caps
+    (STREAMING_ENABLED, STREAMING_MAX_SESSIONS, INFERENCE_CONCURRENCY) and the
+    partial-model selector are deliberately NOT here — they are server-wide, not
+    per-caller. The idle timeout IS here: it is a per-caller policy (a trusted
+    profile can be granted a longer silence grace than an anonymous one).
     Bounds are lifted verbatim from the AdminConfig STREAMING_* fields so the
     two stay in lockstep. All optional; absent = inherit the next layer down."""
     model_config = {"extra": "forbid", "protected_namespaces": ()}
 
+    STREAMING_IDLE_TIMEOUT_SEC: Annotated[float, Field(ge=0.0, le=3600.0)] | None = None
     STREAMING_PARTIAL_BEAM: Annotated[int, Field(ge=1, le=20)] | None = None
     STREAMING_PARTIAL_TEMPERATURE: Annotated[float, Field(ge=0.0, le=1.0)] | None = None
     STREAMING_PARTIAL_CONDITION_ON_PREVIOUS_TEXT: bool | None = None
@@ -1152,6 +1160,7 @@ class AdminConfig(BaseModel):
     # --- Live streaming (WebSocket dictation) ---
     STREAMING_ENABLED: bool | None = _F("STREAMING_ENABLED")
     STREAMING_MAX_SESSIONS: Annotated[int, Field(ge=1, le=256)] | None = _F("STREAMING_MAX_SESSIONS")
+    STREAMING_IDLE_TIMEOUT_SEC: Annotated[float, Field(ge=0.0, le=3600.0)] | None = _F("STREAMING_IDLE_TIMEOUT_SEC")
     INFERENCE_CONCURRENCY: Annotated[int, Field(ge=1, le=64)] | None = _F("INFERENCE_CONCURRENCY")
     STREAMING_PARTIAL_MODEL: Annotated[str, Field(max_length=96)] | None = _F("STREAMING_PARTIAL_MODEL")
     STREAMING_PARTIAL_BEAM: Annotated[int, Field(ge=1, le=20)] | None = _F("STREAMING_PARTIAL_BEAM")

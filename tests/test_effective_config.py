@@ -33,10 +33,14 @@ def _resolve(layers, model_id=None, req=None, prov=False):
 def test_lockable_excludes_pipeline_lists():
     assert "BEAM_SIZE" in cs.LOCKABLE_FIELDS
     assert "STREAMING_PARTIAL_BEAM" in cs.LOCKABLE_FIELDS
+    # the idle timeout is a per-caller policy → per-identity overridable + lockable
+    assert "STREAMING_IDLE_TIMEOUT_SEC" in cs.LOCKABLE_FIELDS
     assert "PIPELINE_RULES_EXCLUDE" not in cs.LOCKABLE_FIELDS
     assert "PIPELINE_RULES_INCLUDE" not in cs.LOCKABLE_FIELDS
     # load-time model fields are never per-identity overridable
     assert "MODEL_DEVICE" not in cs.LOCKABLE_FIELDS
+    # hard server-capacity caps are server-wide, never per-identity
+    assert "STREAMING_MAX_SESSIONS" not in cs.LOCKABLE_FIELDS
 
 
 def test_model_override_keeps_loadtime_and_calltime():

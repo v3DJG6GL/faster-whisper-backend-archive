@@ -86,6 +86,16 @@ _active_sessions: set[str] = set()
 _WS_UNAUTH = 4401
 _WS_DISABLED = 4503
 _WS_TOO_MANY = 4429
+_WS_IDLE_TIMEOUT = 4408  # client sent nothing for STREAMING_IDLE_TIMEOUT_SEC
+
+
+async def _receive_idle(ws: WebSocket, timeout_sec: float):
+    """`ws.receive()`, but abandoned after `timeout_sec` of silence so an idle /
+    abandoned / dead connection can't hold its session slot forever. A value
+    <= 0 disables the timeout (plain receive). On expiry raises TimeoutError."""
+    if timeout_sec and timeout_sec > 0:
+        return await asyncio.wait_for(ws.receive(), timeout_sec)
+    return await ws.receive()
 
 
 def _ws_credentials(ws: WebSocket) -> "HTTPAuthorizationCredentials | None":
@@ -222,7 +232,15 @@ async def transcribe_stream(ws: WebSocket) -> None:
     transport = None
     try:
         # ---- handshake: first message is the JSON config (binary → defaults) ----
-        first = await ws.receive()
+        # An idle/abandoned/dead connection must not hold a session slot, so bound
+        # the wait for the client's first frame by the global idle timeout (the
+        # per-identity value is resolved once we know the model + identity, below).
+        idle_timeout = float(getattr(cfg, "STREAMING_IDLE_TIMEOUT_SEC", 0.0) or 0.0)
+        try:
+            first = await _receive_idle(ws, idle_timeout)
+        except asyncio.TimeoutError:
+            await ws.close(code=_WS_IDLE_TIMEOUT)
+            return
         if first.get("type") == "websocket.disconnect":
             return
         conf = {}
@@ -585,9 +603,21 @@ async def transcribe_stream(ws: WebSocket) -> None:
             await transport.feed(pending_audio)
 
         # ---- main receive loop ----
+        # Per-identity idle timeout (a trusted profile may allow a longer silence
+        # grace); resolved now that the model + identity are known.
+        idle_timeout = float(main.cfg_for(final_model, "STREAMING_IDLE_TIMEOUT_SEC", ident) or 0.0)
         try:
             while True:
-                msg = await ws.receive()
+                try:
+                    msg = await _receive_idle(ws, idle_timeout)
+                except asyncio.TimeoutError:
+                    logger.info("[stream %s] idle %.0fs — closing", session_id[:8], idle_timeout)
+                    try:
+                        await ws.send_json({"type": "error", "code": "idle_timeout",
+                                            "message": f"no audio for {idle_timeout:.0f}s; closing"})
+                    except Exception:  # noqa: BLE001 — peer may be gone
+                        pass
+                    break
                 if msg.get("type") == "websocket.disconnect":
                     break
                 if msg.get("bytes") is not None:

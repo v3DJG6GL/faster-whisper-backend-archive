@@ -93,6 +93,7 @@ _FIELD_GROUPS: list[tuple[str, list[tuple[str | None, list[str]]]]] = [
     ("Live streaming", [
         (None, [
             "STREAMING_ENABLED", "STREAMING_MAX_SESSIONS", "INFERENCE_CONCURRENCY",
+            "STREAMING_IDLE_TIMEOUT_SEC",
         ]),
         ("Partial decoding (live preview)", [
             "STREAMING_PARTIAL_MODEL", "STREAMING_PARTIAL_BEAM",
