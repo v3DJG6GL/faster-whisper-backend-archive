@@ -124,33 +124,86 @@ def test_per_model_env_scanner_end_to_end(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# _load_factory_pipeline_rules (stdlib loader, distinct from config_store's)
+# _load_defaults (stdlib loader: config.json is the single source of factory
+# defaults; config.py reads every value from it at import)
 # ---------------------------------------------------------------------------
 
-def test_factory_loader_reads_committed_config():
-    rules = config._load_factory_pipeline_rules()
-    assert isinstance(rules, list) and len(rules) >= 2
+def _write_cfg(tmp_path, **extra):
+    """Write a minimal-but-valid config.json into tmp_path and return its path."""
+    data = {"schema_version": 1,
+            "PIPELINE_RULES": [{"name": "trim", "label": "Trim", "type": "terminal"}],
+            **extra}
+    (tmp_path / "config.json").write_text(json.dumps(data), encoding="utf-8")
+    return tmp_path
 
 
-def test_factory_loader_missing_raises(monkeypatch, tmp_path):
+def test_load_defaults_reads_committed_config():
+    d = config._load_defaults()
+    # Returns ALL defaults, not just the rules: scalars + the rules list.
+    assert isinstance(d, dict)
+    assert isinstance(d["PIPELINE_RULES"], list) and len(d["PIPELINE_RULES"]) >= 2
+    assert d["DEFAULT_MODEL"] == "large-v2"
+    assert "schema_version" not in d          # stripped — it's metadata, not a setting
+
+
+def test_load_defaults_missing_raises(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "_REPO_DIR", str(tmp_path))
     with pytest.raises(RuntimeError):
-        config._load_factory_pipeline_rules()
+        config._load_defaults()
 
 
-def test_factory_loader_corrupt_raises(monkeypatch, tmp_path):
+def test_load_defaults_corrupt_raises(monkeypatch, tmp_path):
     (tmp_path / "config.json").write_text("{ not json", encoding="utf-8")
     monkeypatch.setattr(config, "_REPO_DIR", str(tmp_path))
     with pytest.raises(RuntimeError):
-        config._load_factory_pipeline_rules()
+        config._load_defaults()
 
 
-def test_factory_loader_missing_key_raises(monkeypatch, tmp_path):
+def test_load_defaults_missing_rules_raises(monkeypatch, tmp_path):
     (tmp_path / "config.json").write_text(json.dumps({"schema_version": 1}),
                                           encoding="utf-8")
     monkeypatch.setattr(config, "_REPO_DIR", str(tmp_path))
     with pytest.raises(RuntimeError):
-        config._load_factory_pipeline_rules()
+        config._load_defaults()
+
+
+def test_load_defaults_is_the_source(monkeypatch, tmp_path):
+    # A value placed in config.json is what _load_defaults returns — proving
+    # config.json (not config.py) is the source of truth.
+    _write_cfg(tmp_path, BEST_OF=9, DEFAULT_MODEL="my-model")
+    monkeypatch.setattr(config, "_REPO_DIR", str(tmp_path))
+    d = config._load_defaults()
+    assert d["BEST_OF"] == 9
+    assert d["DEFAULT_MODEL"] == "my-model"
+
+
+def test_load_defaults_resolves_repo_dir_placeholder(monkeypatch, tmp_path):
+    _write_cfg(tmp_path, LOG_FILE="{REPO_DIR}/logs/whisper.log")
+    monkeypatch.setattr(config, "_REPO_DIR", str(tmp_path))
+    d = config._load_defaults()
+    assert d["LOG_FILE"] == os.path.normpath(os.path.join(str(tmp_path), "logs/whisper.log"))
+    assert "{REPO_DIR}" not in d["LOG_FILE"]
+
+
+def test_load_defaults_coerces_set_fields(monkeypatch, tmp_path):
+    _write_cfg(tmp_path,
+               ALLOWED_MODELS=["large-v2", "large-v3"],
+               CAPTURES_PIPELINE_RULES_EXCLUDE=["dictation-map"])
+    monkeypatch.setattr(config, "_REPO_DIR", str(tmp_path))
+    d = config._load_defaults()
+    assert d["ALLOWED_MODELS"] == {"large-v2", "large-v3"}
+    assert isinstance(d["ALLOWED_MODELS"], set)
+    assert isinstance(d["CAPTURES_PIPELINE_RULES_EXCLUDE"], set)
+
+
+def test_baseline_comes_from_config_json():
+    # _BASELINE (what "↺ Reset to default" reverts to) must equal the values in
+    # config.json, with the same set-coercion + {REPO_DIR} resolution applied.
+    # Locks "config.json is the single source of truth for factory defaults".
+    expected = config._load_defaults()
+    for k, v in expected.items():
+        assert config._BASELINE[k] == v, k
+    assert set(config._BASELINE) == set(expected)
 
 
 def test_env_float_or_none(monkeypatch):

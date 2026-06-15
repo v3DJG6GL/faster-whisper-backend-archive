@@ -440,6 +440,21 @@ def test_save_overrides_changed_excludes_unchanged(tmp_path):
     assert changed == {}
 
 
+def test_save_factory_rules_preserves_sibling_defaults(tmp_path):
+    # config.json now holds ALL factory defaults, not just PIPELINE_RULES, so a
+    # rules "Promote to factory" must read-modify-write — not clobber the sibling
+    # scalar defaults (the old whole-file replace would wipe every other value).
+    p = str(tmp_path / "config.json")
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump({"schema_version": 1, "DEFAULT_MODEL": "keep-me", "BEST_OF": 7,
+                   "PIPELINE_RULES": [{"name": "t", "label": "T", "type": "terminal"}]}, f)
+    cs.save_factory_rules([{"name": "trim", "label": "Trim", "type": "terminal"}], p)
+    on_disk = json.loads(open(p, encoding="utf-8").read())
+    assert on_disk["DEFAULT_MODEL"] == "keep-me"     # sibling default preserved
+    assert on_disk["BEST_OF"] == 7                    # sibling default preserved
+    assert [r["name"] for r in on_disk["PIPELINE_RULES"]] == ["trim"]   # rules updated
+
+
 def test_sample_sizing_absent_field_uses_baseline_not_live_override(monkeypatch):
     # Regression: _validate_sample_sizing must fall back to config._BASELINE
     # (the immutable in-repo default) for an absent field, NOT the live config

@@ -1833,10 +1833,21 @@ def save_factory_rules(rules: list[Any], path: str = FACTORY_PATH) -> list[dict[
     rules = [{**r, "seeded": True} for r in rules]
     validated = AdminConfig.model_validate({"PIPELINE_RULES": rules})
     out_rules = validated.model_dump(exclude_none=True, mode="json")["PIPELINE_RULES"]
-    _atomic_write_json(
-        {"schema_version": 1, "PIPELINE_RULES": out_rules},
-        path, sort_keys=False, tmp_prefix=".config.",
-    )
+    # config.json now holds ALL factory defaults, not just PIPELINE_RULES, so
+    # read-modify-write to preserve the sibling scalar keys. A blind whole-file
+    # replace (as before) would wipe every other default on a rules promote.
+    merged: dict[str, Any] = {}
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            if isinstance(raw, dict):
+                merged = raw
+        except (OSError, json.JSONDecodeError):
+            merged = {}
+    merged.setdefault("schema_version", 1)
+    merged["PIPELINE_RULES"] = out_rules
+    _atomic_write_json(merged, path, sort_keys=False, tmp_prefix=".config.")
     return out_rules
 
 
