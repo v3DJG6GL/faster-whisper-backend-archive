@@ -653,6 +653,16 @@ _QUICK_CONFIG_HTML = r"""<!doctype html>
   .qc-usage .u-total { color: var(--fg); }
   .card { background: var(--panel); border: 1px solid var(--border);
     border-radius: 4px; padding: 0.75rem 1rem; margin-bottom: 0.75rem; }
+  /* Per-rule colour token mirrored from /settings/pipeline — a 3px coloured
+     left border + a faint background wash (admin uses border + rail gradient;
+     quick-config cards have no rail, so the wash stands in). */
+  .card[data-color="red"]    { border-left: 3px solid rgba(248,81,73,0.7);   background: linear-gradient(90deg, rgba(248,81,73,0.10),   rgba(248,81,73,0.02) 55%),   var(--panel); }
+  .card[data-color="amber"]  { border-left: 3px solid rgba(210,153,34,0.75); background: linear-gradient(90deg, rgba(210,153,34,0.10),  rgba(210,153,34,0.02) 55%),  var(--panel); }
+  .card[data-color="green"]  { border-left: 3px solid rgba(63,185,80,0.7);   background: linear-gradient(90deg, rgba(63,185,80,0.10),   rgba(63,185,80,0.02) 55%),   var(--panel); }
+  .card[data-color="teal"]   { border-left: 3px solid rgba(57,197,207,0.7);  background: linear-gradient(90deg, rgba(57,197,207,0.10),  rgba(57,197,207,0.02) 55%),  var(--panel); }
+  .card[data-color="blue"]   { border-left: 3px solid rgba(121,192,255,0.7); background: linear-gradient(90deg, rgba(121,192,255,0.10), rgba(121,192,255,0.02) 55%), var(--panel); }
+  .card[data-color="purple"] { border-left: 3px solid rgba(188,140,255,0.7); background: linear-gradient(90deg, rgba(188,140,255,0.10), rgba(188,140,255,0.02) 55%), var(--panel); }
+  .card[data-color="pink"]   { border-left: 3px solid rgba(255,123,156,0.7); background: linear-gradient(90deg, rgba(255,123,156,0.10), rgba(255,123,156,0.02) 55%), var(--panel); }
   .card h3 { margin: 0 0 0.25rem 0; font-size: var(--fs-lg); color: var(--bold);
     display: flex; align-items: baseline; gap: 0.5rem; }
   .card .type-pill { display: inline-block; padding: 0 0.375rem;
@@ -1055,6 +1065,8 @@ function renderCards() {
   for (const rule of liveRules) {
     const card = document.createElement('div');
     card.className = 'card';
+    // Mirror the per-rule colour token set on /settings/pipeline (admin).
+    if (rule.color) card.dataset.color = rule.color;
     const h3 = document.createElement('h3');
     const labelText = document.createTextNode(rule.label || rule.name);
     h3.appendChild(labelText);

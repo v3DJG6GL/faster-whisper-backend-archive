@@ -482,15 +482,19 @@ header .page-link.allowed { display: inline-flex; }
   font-family: var(--font-sans); }
 .tag-picker-input.invalid { color: var(--red, #ff7b72); }
 .tag-picker-input::placeholder { color: var(--dim); }
+/* Rendered as a top-layer [popover]; JS positions it (fixed) under the field
+   so it escapes the card's overflow:hidden. The left/top here only apply on
+   the no-Popover-API fallback path. padding:0 neutralises the UA popover box. */
 .tag-picker-suggest { position: absolute; left: 0; top: 100%;
-  z-index: 20; margin-top: 0.15rem;
+  z-index: 20; margin-top: 0.15rem; padding: 0;
   background: var(--panel); border: 1px solid var(--border);
   border-radius: 4px; max-height: 12rem; overflow-y: auto;
   font-size: var(--fs-sm); min-width: 10rem;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4); }
 .tag-picker-suggest-item { padding: 0.25rem 0.6rem;
   cursor: pointer; color: var(--fg); }
-.tag-picker-suggest-item:hover {
+.tag-picker-suggest-item:hover,
+.tag-picker-suggest-item.active {
   background: var(--input-bg); color: var(--cyan, #58a6ff);
 }
 
@@ -1433,11 +1437,94 @@ TAG_PICKER_JS = r"""
   var TAG_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
   function _norm(s) { return String(s == null ? '' : s).trim().toLowerCase(); }
 
+  // ---- Shared top-layer popover positioner -----------------------------
+  // Both the tag-suggest list and the pipeline colour palette live inside
+  // cards with `overflow:hidden` (needed to clip the rail gradient to the
+  // rounded corners), which used to clip those dropdowns. The native Popover
+  // API promotes the element into the browser top layer, escaping ALL
+  // ancestor overflow/clip/z-index. We still position it ourselves from the
+  // anchor's viewport rect (CSS anchor-positioning isn't universal yet) and
+  // keep it pinned while open. Feature-detected; falls back to portaling the
+  // node onto <body> with position:fixed so older engines don't clip it either.
+  var _POPOVER_OK = typeof HTMLElement !== 'undefined'
+    && typeof HTMLElement.prototype.showPopover === 'function';
+
+  var _SUG_SEQ = 0;        // unique-id sequence for combobox <option> ids
+
+  function _anchorPopover(popEl, anchorEl, opts) {
+    opts = opts || {};
+    var align = opts.align || 'left';        // which edge aligns to the anchor
+    var gap = opts.gap == null ? 4 : opts.gap;
+    var nativePop = _POPOVER_OK && popEl.hasAttribute('popover');
+    var listening = false;
+
+    function place() {
+      var r = anchorEl.getBoundingClientRect();
+      var pw = popEl.offsetWidth, ph = popEl.offsetHeight;
+      var vw = document.documentElement.clientWidth;
+      var vh = document.documentElement.clientHeight;
+      var left = (align === 'right') ? (r.right - pw) : r.left;
+      var top = r.bottom + gap;                          // prefer below the anchor
+      if (top + ph > vh && r.top - gap - ph >= 0) top = r.top - gap - ph;  // flip up
+      left = Math.max(4, Math.min(left, vw - pw - 4));   // clamp into viewport
+      top = Math.max(4, Math.min(top, vh - ph - 4));
+      // Override the UA [popover] defaults (inset:0; margin:auto) with explicit
+      // fixed coords; right/bottom:auto so a leftover inset can't stretch it.
+      popEl.style.position = 'fixed';
+      popEl.style.margin = '0';
+      popEl.style.left = left + 'px';
+      popEl.style.top = top + 'px';
+      popEl.style.right = 'auto';
+      popEl.style.bottom = 'auto';
+    }
+    function startListening() {
+      if (listening) return;
+      listening = true;
+      window.addEventListener('scroll', place, true);    // capture: catch inner scrollers
+      window.addEventListener('resize', place);
+    }
+    function stopListening() {
+      if (!listening) return;
+      listening = false;
+      window.removeEventListener('scroll', place, true);
+      window.removeEventListener('resize', place);
+    }
+    function isOpen() {
+      if (nativePop) { try { return popEl.matches(':popover-open'); } catch (e) { return false; } }
+      return !popEl.hidden && popEl.style.display !== 'none';
+    }
+    function show() {
+      if (!isOpen()) {
+        if (nativePop) { try { popEl.showPopover(); } catch (e) {} }
+        else {
+          if (popEl.parentNode !== document.body) document.body.appendChild(popEl);
+          popEl.hidden = false; popEl.style.display = '';
+        }
+      }
+      place(); startListening();
+    }
+    function hide() {
+      if (nativePop) { try { if (isOpen()) popEl.hidePopover(); } catch (e) {} }
+      else { popEl.hidden = true; popEl.style.display = 'none'; }
+      stopListening();
+    }
+    // Keep listeners in sync when the browser opens/closes the popover for us
+    // (auto popovers via an invoker button, Esc, or outside-click light-dismiss).
+    if (nativePop) {
+      popEl.addEventListener('toggle', function (ev) {
+        if (ev.newState === 'open') { place(); startListening(); }
+        else stopListening();
+      });
+    }
+    return { show: show, hide: hide, place: place, isOpen: isOpen };
+  }
+
   function _renderTagPicker(opts) {
     opts = opts || {};
     var tags = Array.isArray(opts.initial) ? opts.initial.slice() : [];
     var available = Array.isArray(opts.available) ? opts.available.slice() : [];
     var disabled = !!opts.disabled;
+    var sugId = 'tag-suggest-' + (++_SUG_SEQ);
 
     var el = document.createElement('div');
     el.className = 'tag-picker' + (disabled ? ' disabled' : '');
@@ -1451,12 +1538,44 @@ TAG_PICKER_JS = r"""
     input.className = 'tag-picker-input';
     input.placeholder = opts.placeholder || '+ tag';
     input.autocomplete = 'off';
+    // WAI-ARIA combobox (editable, with listbox popup). aria-activedescendant
+    // tracks the highlighted suggestion while focus stays in the input.
+    input.setAttribute('role', 'combobox');
+    input.setAttribute('aria-autocomplete', 'list');
+    input.setAttribute('aria-expanded', 'false');
+    input.setAttribute('aria-controls', sugId);
+    input.setAttribute('aria-haspopup', 'listbox');
     if (disabled) input.disabled = true;
 
     var suggest = document.createElement('div');
     suggest.className = 'tag-picker-suggest';
-    suggest.hidden = true;
+    suggest.id = sugId;
+    suggest.setAttribute('role', 'listbox');
+    // Top-layer popover so the card's overflow:hidden can't clip the list.
+    suggest.setAttribute('popover', 'manual');
+    if (!_POPOVER_OK) suggest.hidden = true;     // fallback path manages display
     el.appendChild(suggest);
+    var sugPop = _anchorPopover(suggest, pills, { gap: 2 });
+
+    // Suggestion-list state for keyboard navigation.
+    var matchVals = [];     // string values currently shown
+    var matchEls = [];      // their <div role=option> elements
+    var activeIdx = -1;     // highlighted index, -1 = none
+    function _setActive(i) {
+      if (i < 0 || i >= matchEls.length) i = -1;
+      activeIdx = i;
+      matchEls.forEach(function(elm, j) {
+        var on = j === i;
+        elm.classList.toggle('active', on);
+        elm.setAttribute('aria-selected', on ? 'true' : 'false');
+      });
+      if (i >= 0) {
+        input.setAttribute('aria-activedescendant', matchEls[i].id);
+        matchEls[i].scrollIntoView({ block: 'nearest' });
+      } else {
+        input.removeAttribute('aria-activedescendant');
+      }
+    }
 
     function _hasTag(s) { return tags.indexOf(s) !== -1; }
     function _notify() {
@@ -1510,16 +1629,27 @@ TAG_PICKER_JS = r"""
       return true;
     }
 
-    function _hideSuggest() { suggest.hidden = true; suggest.innerHTML = ''; }
+    function _hideSuggest() {
+      sugPop.hide();
+      suggest.innerHTML = '';
+      matchVals = []; matchEls = []; activeIdx = -1;
+      input.setAttribute('aria-expanded', 'false');
+      input.removeAttribute('aria-activedescendant');
+    }
     function _updateSuggest(prefix) {
       var matches = available.filter(function(a) {
         return a !== prefix && a.indexOf(prefix) === 0 && !_hasTag(a);
       }).slice(0, 8);
       if (!matches.length) { _hideSuggest(); return; }
       suggest.innerHTML = '';
-      matches.forEach(function(a) {
+      matchVals = matches.slice();
+      matchEls = [];
+      matches.forEach(function(a, idx) {
         var item = document.createElement('div');
         item.className = 'tag-picker-suggest-item';
+        item.id = sugId + '-opt' + idx;
+        item.setAttribute('role', 'option');
+        item.setAttribute('aria-selected', 'false');
         item.textContent = a;
         // mousedown not click so input's blur doesn't fire first and
         // hide the suggest before the click registers.
@@ -1529,24 +1659,45 @@ TAG_PICKER_JS = r"""
           _hideSuggest();
           input.focus();
         });
+        // Hover and keyboard share one highlight.
+        item.addEventListener('mouseenter', function() { _setActive(idx); });
         suggest.appendChild(item);
+        matchEls.push(item);
       });
-      suggest.hidden = false;
+      activeIdx = -1;
+      input.setAttribute('aria-expanded', 'true');
+      sugPop.show();      // promote to top layer + position under the field
     }
 
     input.addEventListener('keydown', function(e) {
-      if (e.key === 'Enter' || e.key === ',') {
+      var n = matchEls.length;
+      if (e.key === 'ArrowDown') {
+        if (!n) return;
         e.preventDefault();
-        _tryAdd(input.value);
+        _setActive(activeIdx + 1 >= n ? 0 : activeIdx + 1);
+      } else if (e.key === 'ArrowUp') {
+        if (!n) return;
+        e.preventDefault();
+        _setActive(activeIdx - 1 < 0 ? n - 1 : activeIdx - 1);
+      } else if (e.key === 'Home' && n) {
+        e.preventDefault(); _setActive(0);
+      } else if (e.key === 'End' && n) {
+        e.preventDefault(); _setActive(n - 1);
+      } else if (e.key === 'Enter' || e.key === ',') {
+        // Enter on a highlighted suggestion picks it; otherwise (and for
+        // comma) commit the typed text — preserving the old behaviour.
+        e.preventDefault();
+        if (e.key === 'Enter' && activeIdx >= 0) _tryAdd(matchVals[activeIdx]);
+        else _tryAdd(input.value);
         _hideSuggest();
       } else if (e.key === 'Backspace' && !input.value && tags.length) {
         tags.pop();
         _render();
         _notify();
       } else if (e.key === 'Escape') {
-        input.value = '';
-        input.classList.remove('invalid');
-        _hideSuggest();
+        // First Escape closes the list; if already closed, clear the input.
+        if (sugPop.isOpen()) { e.preventDefault(); _hideSuggest(); }
+        else { input.value = ''; input.classList.remove('invalid'); }
       }
     });
     input.addEventListener('input', function() {
@@ -1577,6 +1728,7 @@ TAG_PICKER_JS = r"""
   }
 
   window._renderTagPicker = _renderTagPicker;
+  window._anchorPopover = _anchorPopover;
 })();</script>
 """
 

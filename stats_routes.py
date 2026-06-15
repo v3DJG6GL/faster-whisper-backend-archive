@@ -368,7 +368,7 @@ _STATS_VIEWER_HTML = r"""<!doctype html>
   .usage-note { color: var(--dim); font-size: var(--fs-xs);
     margin: 0.15rem 0 0.5rem; }
   /* Floating cursor tooltip over the multi-line usage chart. */
-  .usage-tip { position: absolute; z-index: 5; pointer-events: none;
+  .usage-tip { position: fixed; z-index: 5; pointer-events: none;
     background: var(--panel); border: 1px solid var(--border); border-radius: 5px;
     padding: 0.3rem 0.45rem; font: var(--fs-xs)/1.35 var(--font-mono);
     color: var(--fg); white-space: nowrap; display: none;
@@ -1167,13 +1167,19 @@ function updateTip(u) {
   }
   tipEl.innerHTML = html;
   tipEl.style.display = 'block';
-  const ox = u.over.offsetLeft, oy = u.over.offsetTop;
-  const wrap = tipEl.offsetParent;
-  const maxL = (wrap ? wrap.clientWidth : 1e9) - tipEl.offsetWidth - 4;
-  let left = ox + u.cursor.left + 14;
-  if (left > maxL) left = ox + u.cursor.left - tipEl.offsetWidth - 14;  // flip left near right edge
-  tipEl.style.left = Math.max(0, left) + 'px';
-  tipEl.style.top = Math.max(0, oy + u.cursor.top + 14) + 'px';
+  // Position in VIEWPORT space (the tooltip is position:fixed, so the card's
+  // overflow:auto can't clip it near the chart edges). uPlot cursor coords are
+  // relative to the plot over-element; add its viewport rect.
+  const orect = u.over.getBoundingClientRect();
+  const vw = document.documentElement.clientWidth;
+  const vh = document.documentElement.clientHeight;
+  const tw = tipEl.offsetWidth, th = tipEl.offsetHeight;
+  let left = orect.left + u.cursor.left + 14;
+  if (left + tw + 4 > vw) left = orect.left + u.cursor.left - tw - 14;  // flip left near right edge
+  let top = orect.top + u.cursor.top + 14;
+  if (top + th + 4 > vh) top = orect.top + u.cursor.top - th - 14;      // flip up near bottom edge
+  tipEl.style.left = Math.max(4, left) + 'px';
+  tipEl.style.top = Math.max(4, top) + 'px';
 }
 
 // cursor.move hook: snap the vertical guide to the nearest data point's x-pixel

@@ -1216,11 +1216,20 @@ _SETTINGS_VIEWER_HTML = r"""<!doctype html>
     font-size: var(--fs-sm); min-width: 1.6rem; height: 1.6rem; display: flex;
     align-items: center; justify-content: center; background: var(--bg);
     border: 1px solid var(--border); border-radius: 7px; }
+  /* Lock toggle — asymmetric so "locked" reads at a glance independent of the
+     padlock glyph: unlocked = faint open lock (brightens on hover); locked =
+     filled dark glyph on a solid YELLOW chip. The chip carries the state even
+     where the glyph colour is subtle. */
   .rule-rail .lock-btn { background: none; border: 0; cursor: pointer; color: var(--dim);
-    font-size: 0.9rem; line-height: 1; padding: 0.1rem 0.2rem; border-radius: 5px; }
-  .rule-rail .lock-btn:hover { color: var(--fg); background: var(--bg); }
-  .rule-rail .lock-btn.is-locked { color: var(--yellow); }
-  .rule-rail .lock-btn:disabled { cursor: default; opacity: 0.5; }
+    font-size: 0.95rem; line-height: 1; padding: 0.1rem 0.2rem; border-radius: 5px;
+    opacity: 0.45; display: inline-flex; align-items: center; justify-content: center;
+    transition: opacity .12s ease, background .12s ease, color .12s ease; }
+  .rule-rail .lock-btn svg { display: block; }
+  .rule-rail .lock-btn:hover { color: var(--fg); background: var(--bg); opacity: 1; }
+  .rule-rail .lock-btn:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; opacity: 1; }
+  .rule-rail .lock-btn.is-locked { color: #1c1407; background: var(--yellow); opacity: 1; }
+  .rule-rail .lock-btn.is-locked:hover { color: #1c1407; background: #ffd968; }
+  .rule-rail .lock-btn:disabled { cursor: default; opacity: 0.7; }
 
   /* --- main column + two-line header --- */
   .rule-main { flex: 1; min-width: 0; display: flex; flex-direction: column;
@@ -1273,6 +1282,7 @@ _SETTINGS_VIEWER_HTML = r"""<!doctype html>
   .color-swatch { width: 1.5rem; height: 1.5rem; border-radius: 6px; border: 1px solid #45505f;
     cursor: pointer; padding: 0; }
   .color-swatch.sel { outline: 2px solid var(--bold); outline-offset: 1px; }
+  .color-swatch:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
   .color-swatch.none, .rule-row .color-dot[data-color=""] {
     background: repeating-linear-gradient(45deg, #21262d, #21262d 3px, #161b22 3px, #161b22 6px); }
   /* Per-card colour tokens — tint the rail + a left accent; the body stays on
@@ -1300,10 +1310,14 @@ _SETTINGS_VIEWER_HTML = r"""<!doctype html>
   .color-dot[data-color="purple"], .color-swatch[data-color="purple"] { background: rgba(188,140,255,0.6);border-color: rgba(188,140,255,0.8); }
   .color-dot[data-color="pink"],   .color-swatch[data-color="pink"]   { background: rgba(255,123,156,0.6);border-color: rgba(255,123,156,0.8); }
 
-  /* --- locked = protected, FULL contrast (not greyed like disabled) --- */
-  .rule-row.locked { border-left: 3px solid var(--yellow); }
-  .rule-row.locked .rule-rail { background: linear-gradient(180deg, rgba(242,204,96,0.16), rgba(242,204,96,0.04)); }
-  .rule-row.terminal { border-left: 3px solid var(--dim); opacity: 0.9; }
+  /* --- locked = protected, FULL contrast (not greyed like disabled) ---
+     Scoped :not([data-color]) so a per-card colour token always wins the
+     rail/accent — equal specificity + source order would otherwise let
+     .locked override the colour. The yellow lock CHIP carries "locked". */
+  .rule-row.locked:not([data-color]) { border-left: 3px solid var(--yellow); }
+  .rule-row.locked:not([data-color]) .rule-rail { background: linear-gradient(180deg, rgba(242,204,96,0.16), rgba(242,204,96,0.04)); }
+  .rule-row.terminal { opacity: 0.9; }
+  .rule-row.terminal:not([data-color]) { border-left: 3px solid var(--dim); }
 
   /* --- body + footer --- */
   .rule-row .row-body { padding-top: 0.5rem; margin-top: 0.5rem;
@@ -3387,19 +3401,27 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
     const lockBtn = document.createElement('button');
     lockBtn.type = 'button';
     lockBtn.className = 'lock-btn';
+    // Bootstrap Icons lock / unlock (MIT), inline SVG: crisp at rail size and
+    // recolourable (the lock/unlock emoji can't be themed and read poorly small).
+    const _LOCK_SVG = '<svg viewBox="0 0 16 16" width="1em" height="1em" fill="currentColor" aria-hidden="true" focusable="false"><path fill-rule="evenodd" d="M8 0a4 4 0 0 1 4 4v2.05a2.5 2.5 0 0 1 2 2.45v5a2.5 2.5 0 0 1-2.5 2.5h-7A2.5 2.5 0 0 1 2 13.5v-5a2.5 2.5 0 0 1 2-2.45V4a4 4 0 0 1 4-4M4.5 7A1.5 1.5 0 0 0 3 8.5v5A1.5 1.5 0 0 0 4.5 15h7a1.5 1.5 0 0 0 1.5-1.5v-5A1.5 1.5 0 0 0 11.5 7zM8 1a3 3 0 0 0-3 3v2h6V4a3 3 0 0 0-3-3"/></svg>';
+    const _UNLOCK_SVG = '<svg viewBox="0 0 16 16" width="1em" height="1em" fill="currentColor" aria-hidden="true" focusable="false"><path fill-rule="evenodd" d="M12 0a4 4 0 0 1 4 4v2.5h-1V4a3 3 0 1 0-6 0v2h.5A2.5 2.5 0 0 1 12 8.5v5A2.5 2.5 0 0 1 9.5 16h-7A2.5 2.5 0 0 1 0 13.5v-5A2.5 2.5 0 0 1 2.5 6H8V4a4 4 0 0 1 4-4M2.5 7A1.5 1.5 0 0 0 1 8.5v5A1.5 1.5 0 0 0 2.5 15h7a1.5 1.5 0 0 0 1.5-1.5v-5A1.5 1.5 0 0 0 9.5 7z"/></svg>';
     const _setLockGlyph = () => {
-      lockBtn.textContent = rule.locked ? '🔒' : '🔓';
+      lockBtn.innerHTML = rule.locked ? _LOCK_SVG : _UNLOCK_SVG;
       lockBtn.classList.toggle('is-locked', !!rule.locked);
+      lockBtn.setAttribute('aria-pressed', rule.locked ? 'true' : 'false');
       lockBtn.title = rule.locked
         ? 'Protected — click to unlock for editing'
         : 'Click to lock (protect from edits + reorder)';
+      lockBtn.setAttribute('aria-label', rule.locked
+        ? 'Locked — click to unlock' : 'Unlocked — click to lock');
     };
     _setLockGlyph();
     if (rule.type === 'terminal') {
-      lockBtn.textContent = '🔒';
+      lockBtn.innerHTML = _LOCK_SVG;
       lockBtn.disabled = true;
       lockBtn.classList.add('is-locked');
       lockBtn.title = 'The terminal trim is always last and never editable';
+      lockBtn.setAttribute('aria-label', 'Locked — terminal trim is never editable');
     } else {
       lockBtn.addEventListener('click', () => {
         if (rule.locked) {
@@ -3480,30 +3502,8 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
     colorBtn.className = 'color-btn';
     colorBtn.title = 'Card colour';
     colorBtn.innerHTML = '<span class="color-dot" data-color="' + (rule.color || '') + '"></span>';
-    let colorPop = null;
-    const _closeColorPop = () => { if (colorPop) { colorPop.remove(); colorPop = null; } };
-    colorBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      if (colorPop) { _closeColorPop(); return; }
-      colorPop = document.createElement('div');
-      colorPop.className = 'color-pop';
-      ['', 'red', 'amber', 'green', 'teal', 'blue', 'purple', 'pink'].forEach(tok => {
-        const sw = document.createElement('button');
-        sw.type = 'button';
-        sw.className = 'color-swatch' + (tok ? '' : ' none')
-          + (((rule.color || '') === tok) ? ' sel' : '');
-        sw.dataset.color = tok;
-        sw.title = tok || 'none';
-        sw.addEventListener('click', (ev) => {
-          ev.stopPropagation();
-          rule.color = tok;
-          _closeColorPop();
-          commitFull();
-        });
-        colorPop.appendChild(sw);
-      });
-      headActions.appendChild(colorPop);
-    });
+    // The colour palette popover is built after headActions (its anchor)
+    // exists — see just below the action-cluster setup.
 
     // Right-aligned action cluster: colour + edit/expand. Rare/destructive
     // actions (promote / reset / delete) live in the body footer instead, so
@@ -3513,6 +3513,78 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
     if (rule.type !== 'terminal') headActions.appendChild(colorBtn);
     headActions.appendChild(expandBtn);
     headLine1.appendChild(headActions);
+
+    // ----- Colour palette popover. Rendered in the browser top layer (a
+    // [popover]) so the card's overflow:hidden can't clip it; _anchorPopover
+    // pins it under the button. Manual popover + our own Esc / outside-click
+    // dismiss (sidesteps the auto-popover invoker double-toggle), and the 8
+    // swatches get roving arrow-key navigation. Terminal rules have no colour.
+    if (rule.type !== 'terminal') {
+      const colorPop = document.createElement('div');
+      colorPop.className = 'color-pop';
+      colorPop.setAttribute('popover', 'manual');
+      colorPop.setAttribute('role', 'listbox');
+      colorPop.setAttribute('aria-label', 'Card colour');
+      headActions.appendChild(colorPop);
+      const colorPopCtl = window._anchorPopover(colorPop, colorBtn, { align: 'right' });
+
+      const _onDocDown = (ev) => {
+        if (!colorPop.contains(ev.target) && !colorBtn.contains(ev.target)) _closeColorPop();
+      };
+      function _closeColorPop() {
+        document.removeEventListener('pointerdown', _onDocDown, true);
+        colorPopCtl.hide();
+      }
+      const swatches = ['', 'red', 'amber', 'green', 'teal', 'blue', 'purple', 'pink'].map(tok => {
+        const sw = document.createElement('button');
+        sw.type = 'button';
+        sw.className = 'color-swatch' + (tok ? '' : ' none');
+        sw.dataset.color = tok;
+        sw.title = tok || 'none';
+        sw.setAttribute('aria-label', tok || 'none');
+        sw.setAttribute('role', 'option');
+        sw.tabIndex = -1;
+        sw.addEventListener('click', () => {
+          rule.color = tok;
+          _closeColorPop();
+          commitFull();          // repaint reflects the new colour token
+        });
+        colorPop.appendChild(sw);
+        return sw;
+      });
+      const _syncSel = () => swatches.forEach(sw => {
+        const on = (rule.color || '') === sw.dataset.color;
+        sw.classList.toggle('sel', on);
+        sw.setAttribute('aria-selected', on ? 'true' : 'false');
+      });
+      colorBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (colorPopCtl.isOpen()) { _closeColorPop(); return; }
+        _syncSel();
+        colorPopCtl.show();      // showPopover()+place() in one tick → no flash
+        (swatches.find(sw => sw.classList.contains('sel')) || swatches[0]).focus();
+        document.addEventListener('pointerdown', _onDocDown, true);
+      });
+      colorPop.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') { e.preventDefault(); _closeColorPop(); colorBtn.focus(); return; }
+        const i = swatches.indexOf(document.activeElement);
+        if (i < 0) return;
+        let j;
+        if (e.key === 'ArrowRight') j = Math.min(i + 1, swatches.length - 1);
+        else if (e.key === 'ArrowLeft') j = Math.max(i - 1, 0);
+        else if (e.key === 'ArrowDown') j = Math.min(i + 4, swatches.length - 1);
+        else if (e.key === 'ArrowUp') j = Math.max(i - 4, 0);
+        else if (e.key === 'Home') j = 0;
+        else if (e.key === 'End') j = swatches.length - 1;
+        else return;
+        e.preventDefault();
+        swatches[j].focus();
+      });
+      // Safety: drop the doc listener if the popover closes by any other path.
+      colorPop.addEventListener('toggle', (ev) => {
+        if (ev.newState === 'closed') document.removeEventListener('pointerdown', _onDocDown, true);
+      });
+    }
 
     // ⇪ Promote — push this rule into the committed config.json. Built here,
     // appended to the body footer (with reset/delete) further down. Shown only
@@ -3982,7 +4054,9 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
     if (o.bodyEl) panel.appendChild(o.bodyEl);
     const btnRow = document.createElement('div');
     btnRow.className = 'rule-modal-buttons';
+    const _onKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); close(); } };
     function close() {
+      document.removeEventListener('keydown', _onKey);
       if (backdrop.parentNode) backdrop.parentNode.removeChild(backdrop);
     }
     (o.buttons || []).forEach(b => {
@@ -3999,6 +4073,7 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
     backdrop.appendChild(panel);
     backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
     document.body.appendChild(backdrop);
+    document.addEventListener('keydown', _onKey);
     return close;
   }
   // Field-by-field diff between the rule being promoted and its config.json
