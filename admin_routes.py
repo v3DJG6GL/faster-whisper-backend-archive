@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from typing import Any
+from typing import Any, Literal, get_args, get_origin
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -284,6 +284,21 @@ def _baseline_value(name: str) -> Any:
     return v
 
 
+def _field_choices(field: str) -> list[str] | None:
+    """Dropdown options for a field, derived from its AdminConfig `Literal` type —
+    the single source of truth for enum settings. Returns None for non-Literal
+    fields. Unwraps `Literal[...] | None`. The WebUI renders a <select> whenever
+    this is non-None (main form AND the per-model pane), so the dropdown options
+    can never drift from the schema — they ARE the schema."""
+    fld = config_store.AdminConfig.model_fields.get(field)
+    if fld is None:
+        return None
+    for cand in (fld.annotation, *get_args(fld.annotation)):
+        if get_origin(cand) is Literal:
+            return list(get_args(cand))
+    return None
+
+
 def _values_equal(a: Any, b: Any) -> bool:
     """True if `a` and `b` are the same config value. Uses Python equality so
     numbers compare numerically — JSON int 1 == baseline float 1.0, the
@@ -394,6 +409,7 @@ async def get_state() -> dict[str, Any]:
             "provenance": _provenance(name, env_pinned, saved),
             "env_var": env_pinned.get(name),
             "restart_required": name in config_store.RESTART_REQUIRED_FIELDS,
+            "choices": _field_choices(name),
         }
 
     # PIPELINE_RULES: canonicalize key order on both sides of the wire so
@@ -1905,13 +1921,14 @@ function makeEditor(name) {
       || name === 'ADMIN_WEBUI_ALLOWED_HOSTS' || name === 'USER_WEBUI_ALLOWED_HOSTS') {
     return linesEditor(name, []);
   }
-  if (name === 'SERVER_LOG_LEVEL') return selectEditor(name, v, ['debug','info','warning','error','critical']);
-  if (name === 'MODEL_DEVICE' || name === 'MODEL_DEVICE_FALLBACK') return selectEditor(name, v, ['cuda','cpu']);
-  if (name === 'MODEL_COMPUTE_TYPE' || name === 'MODEL_COMPUTE_TYPE_FALLBACK') {
-    return selectEditor(name, v, ['auto','default','float32','float16','bfloat16','int16','int8','int8_float32','int8_float16','int8_bfloat16']);
-  }
-  if (name === 'CONVERT_QUANTIZATION') {
-    return selectEditor(name, v, ['float32','float16','bfloat16','int16','int8','int8_float32','int8_float16','int8_bfloat16']);
+  // Enum fields render as a dropdown sourced from the server's `choices`, which
+  // are derived from the field's AdminConfig Literal (see _field_choices). Single
+  // source of truth — covers SERVER_LOG_LEVEL, MODEL_DEVICE(_FALLBACK),
+  // MODEL_COMPUTE_TYPE(_FALLBACK), CONVERT_QUANTIZATION, STREAMING_VAD_BACKEND,
+  // CAPTURES_SAMPLE_JOIN_STRATEGY, … with no hardcoded option lists to drift.
+  const _ed = fieldDef(name);
+  if (_ed && Array.isArray(_ed.choices) && _ed.choices.length) {
+    return selectEditor(name, v, _ed.choices);
   }
   if (name === 'DEFAULT_PROMPT') return textareaEditor(name, v || '');
   // Numeric fields that can be null ("disabled"). Render as number input with
@@ -1993,10 +2010,12 @@ function modelOverridesEditor(name, v) {
   // Kept compact — extend a row only if behavior differs from a generic
   // input.
   const FIELD_META = {
-    MODEL_DEVICE:                { kind: 'enum', opts: ['cuda','cpu'] },
-    MODEL_COMPUTE_TYPE:          { kind: 'enum', opts: ['auto','default','float32','float16','bfloat16','int16','int8','int8_float32','int8_float16','int8_bfloat16'] },
-    MODEL_DEVICE_FALLBACK:       { kind: 'enum', opts: ['cuda','cpu'] },
-    MODEL_COMPUTE_TYPE_FALLBACK: { kind: 'enum', opts: ['auto','default','float32','float16','bfloat16','int16','int8','int8_float32','int8_float16','int8_bfloat16'] },
+    // Enum opts come from the server `choices` (AdminConfig Literal) at render
+    // time (see makeInputWidget) — listed here only to mark the kind as 'enum'.
+    MODEL_DEVICE:                { kind: 'enum' },
+    MODEL_COMPUTE_TYPE:          { kind: 'enum' },
+    MODEL_DEVICE_FALLBACK:       { kind: 'enum' },
+    MODEL_COMPUTE_TYPE_FALLBACK: { kind: 'enum' },
     REVISION:                    { kind: 'string', placeholder: 'main | <git-sha>' },
     NUM_WORKERS:                 { kind: 'int',   min: 1, max: 8 },
     DEVICE_INDEX:                { kind: 'int',   min: 0, max: 15 },
@@ -2033,7 +2052,7 @@ function modelOverridesEditor(name, v) {
     OUTPUT_SUFFIX:               { kind: 'string' },
     CAPTURES_SAMPLE_MIN_DURATION_S:  { kind: 'float', min: 0, max: 30, step: 0.1 },
     CAPTURES_SAMPLE_MAX_DURATION_S:  { kind: 'float', min: 1, max: 30, step: 0.1 },
-    CAPTURES_SAMPLE_JOIN_STRATEGY:   { kind: 'enum', opts: ['space','period_space'] },
+    CAPTURES_SAMPLE_JOIN_STRATEGY:   { kind: 'enum' },
     CAPTURES_PROPOSER_TARGET_S:      { kind: 'float', min: 1, max: 30, step: 0.5 },
     CAPTURES_PROPOSER_SESSION_GAP_S: { kind: 'int',   min: 1, max: 86400 },
     CAPTURES_PROPOSER_DUP_THRESHOLD: { kind: 'float', min: 0, max: 1, step: 0.01 },
@@ -2455,7 +2474,10 @@ function modelOverridesEditor(name, v) {
     }
     if (meta.kind === 'enum') {
       const sel = document.createElement('select');
-      for (const o of (meta.opts || [])) {
+      // Options from the server's schema-derived choices (single source of
+      // truth); meta.opts is a legacy fallback (now always absent).
+      const opts = (fieldDef(field) && fieldDef(field).choices) || meta.opts || [];
+      for (const o of opts) {
         const opt = document.createElement('option');
         opt.value = o; opt.textContent = o;
         if (o === currentVal) opt.selected = true;

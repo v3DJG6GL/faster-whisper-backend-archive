@@ -164,6 +164,49 @@ def test_pipeline_rules_not_auto_pruned(client):
     assert "PIPELINE_RULES" in config_store.load_overrides()
 
 
+def test_enum_choices_match_schema(client):
+    """Dropdown options are derived from the AdminConfig Literal (single source).
+    GET /settings/state must surface `choices` == the field's Literal values for
+    every enum field, and None for non-enum fields — so the UI <select> and the
+    server-side validation can never disagree. Guards the _field_choices dedup."""
+    import typing
+    import config_store
+
+    def literal_args(field):
+        ann = config_store.AdminConfig.model_fields[field].annotation
+        for c in (ann, *typing.get_args(ann)):
+            if typing.get_origin(c) is typing.Literal:
+                return list(typing.get_args(c))
+        return None
+
+    fields = client.get("/settings/state").json()["fields"]
+    enum_count = 0
+    for name in fields:
+        if name not in config_store.AdminConfig.model_fields:
+            continue
+        expected = literal_args(name)
+        assert fields[name].get("choices") == expected, name
+        if expected is not None:
+            enum_count += 1
+
+    # Concrete spot-checks: API choices ARE the Literal (catch a broken extractor).
+    assert fields["MODEL_COMPUTE_TYPE"]["choices"] == list(config_store.ComputeLit.__args__)
+    assert fields["CONVERT_QUANTIZATION"]["choices"] == list(config_store.ConvertQuantLit.__args__)
+    assert fields["MODEL_DEVICE"]["choices"] == ["cuda", "cpu"]
+    assert fields["BEST_OF"]["choices"] is None        # non-enum -> free input, no dropdown
+    assert enum_count >= 6                              # sanity: the sweep found the enums
+
+
+def test_settings_page_has_no_hardcoded_enum_opts(client):
+    """Both editors (main form + per-model pane) build dropdowns from the server
+    `choices`, not hardcoded JS arrays — so options can't drift from the schema."""
+    page = client.get("/settings").text
+    assert "_ed.choices" in page                        # main form derives from choices
+    assert "fieldDef(field).choices" in page            # per-model pane derives too
+    # The old hardcoded compute-type option arrays must be gone.
+    assert "'int8_float16','int8','float32'" not in page
+
+
 def test_get_factory_rules(client):
     r = client.get("/settings/factory-rules")
     assert r.status_code == 200
