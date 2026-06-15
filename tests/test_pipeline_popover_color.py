@@ -127,7 +127,10 @@ def test_inline_scripts_parse(client, url, tmp_path):
         if not code.strip():
             continue
         f = tmp_path / f"s{i}.js"
-        f.write_text(code)
+        # Force UTF-8: the scripts contain non-Latin-1 chars (e.g. ä≈a in the
+        # collator comment), and Path.write_text() defaults to the platform
+        # locale — cp1252 on Windows CI — which raises UnicodeEncodeError.
+        f.write_text(code, encoding="utf-8")
         p = subprocess.run([_NODE, "--check", str(f)], capture_output=True, text=True)
         if p.returncode != 0:
             tail = p.stderr.strip().splitlines()[-1] if p.stderr.strip() else "?"
