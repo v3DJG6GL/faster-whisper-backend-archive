@@ -276,7 +276,30 @@ async def settings_page() -> HTMLResponse:
     attaches it on every fetch. `no-store` so browsers never serve a stale
     build after a service restart."""
     return HTMLResponse(
-        web_common.render_page(_SETTINGS_VIEWER_HTML, current="settings"),
+        web_common.render_page(
+            _SETTINGS_VIEWER_HTML.replace("{{SETTINGS_VIEW}}", "settings"),
+            current="settings"),
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
+@router.get("/pipeline", response_class=HTMLResponse,
+            dependencies=[Depends(require_admin_webui_host)])
+async def pipeline_page() -> HTMLResponse:
+    """The dedicated Pipeline-rules page. Serves the SAME settings shell + rule
+    editor as /settings, but the IIFE reads the `settings-view=pipeline` meta
+    and renders ONLY the Pipeline section (global rule list + dry-run panel).
+    /settings renders everything else and shows a link here in its place. Same
+    /settings/state + /settings/factory-rules + /settings/test-pipeline
+    contracts — no separate backend. Allowlist-gated exactly like /settings."""
+    return HTMLResponse(
+        web_common.render_page(
+            _SETTINGS_VIEWER_HTML.replace("{{SETTINGS_VIEW}}", "pipeline"),
+            current="pipeline"),
         headers={
             "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
             "Pragma": "no-cache",
@@ -830,6 +853,7 @@ _SETTINGS_VIEWER_HTML = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <title>{{HEADER_TITLE}}</title>
 {{PAGE_META}}
+<meta name="settings-view" content="{{SETTINGS_VIEW}}">
 {{SCALE_BOOTSTRAP_HEAD}}
 <style>
   :root {
@@ -1085,126 +1109,145 @@ _SETTINGS_VIEWER_HTML = r"""<!doctype html>
     border-radius: 4px; padding: 0.625rem 0.75rem; margin: 0.5rem 0 0.875rem 0; }
   .regex-test-panel textarea { resize: vertical; max-width: 100%; }
   .regex-test-out { margin-top: 0.625rem; }
-  /* Pipeline rules editor */
+  /* ===== Pipeline rules editor — redesigned card ====================== */
   .pipeline-rules-wrap { display: flex; flex-direction: column; gap: 0.375rem; }
-  .rule-list { display: flex; flex-direction: column; gap: 0.25rem; }
-  /* Button-like interactive feel on every rule row. :active propagates
-     up from descendants so pressing the drag-handle still tints the row. */
-  .rule-row { background: #161b22; border: 1px solid var(--border); border-radius: 4px;
-    padding: 0.375rem 0.625rem; transition: background-color 120ms ease;
-    cursor: default; }
-  .rule-row.locked { border-left: 3px solid var(--yellow); }
-  .rule-row.terminal { border-left: 3px solid var(--dim); opacity: 0.85; }
-  .rule-row:not(.terminal):hover { background: #1c2230; }
-  .rule-row:not(.terminal):active { background: #232a36; }
-  .rule-row[tabindex]:focus-visible { outline: 2px solid var(--cyan);
-    outline-offset: -1px; }
-  /* Suppress :hover noise while a drag is in flight — otherwise every
-     row the cursor crosses pulses. */
-  .rule-list.dnd-active .rule-row:hover { background: #161b22; }
+  .rule-list { display: flex; flex-direction: column; gap: 0.5rem; }
+  /* Card = a left RAIL (rank + grip + lock) beside the MAIN column (header +
+     body). The rail gives ordering/protection one home and visually separates
+     siblings; elevation-on-hover + whitespace gaps distinguish cards (not zebra
+     striping, which shuffles when you reorder). */
+  .rule-row { display: flex; align-items: stretch; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+    transition: border-color 120ms ease, box-shadow 120ms ease; cursor: default; }
+  .rule-row:not(.terminal):hover { border-color: #45505f;
+    box-shadow: 0 6px 18px -12px rgba(0,0,0,0.85); }
+  .rule-row[tabindex]:focus-visible { outline: 2px solid var(--cyan); outline-offset: -1px; }
   .rule-row.dragging { opacity: 0.3; outline: 2px dashed var(--cyan); }
-  /* Placeholder slot — the empty cyan-bordered space the dragged row
-     will land in. Height set inline at dragstart to match source row. */
-  .rule-placeholder {
-    border: 1px dashed var(--cyan);
-    background: rgba(56, 189, 248, 0.08);
-    border-radius: 4px;
-    margin-bottom: 0.25rem;
-    transition: height 120ms ease;
-  }
-  .rule-row.disabled { opacity: 0.55; }
-  /* Two-line head: identity (drag, #, enabled, label, slug, type, edit)
-     on line 1 — line 2 carries metadata (tag picker, user-editable
-     toggle, untagged badge). Splits the cognitive load so the load-
-     bearing field (rule-label) actually has room to breathe. */
-  .rule-row .row-header { display: flex; flex-direction: column;
-    gap: 0.35rem; padding: 0.45rem 0.6rem; }
-  .rule-row .row-header-line1,
-  .rule-row .row-header-line2 {
-    display: flex; align-items: center; gap: 0.5rem;
-    flex-wrap: wrap; row-gap: 0.25rem;
-    font-family: var(--font-mono); font-size: var(--fs-sm);
-  }
-  /* Line 2 is metadata — slightly smaller + dim, indented under the
-     drag handle so the visual hierarchy reads "this is detail about
-     the row above". */
-  .rule-row .row-header-line2 {
-    padding-left: 1.75rem;
-    font-size: var(--fs-xs);
-    color: var(--dim);
-  }
-  /* Hide line 2 for terminal rules (no tags / no exposed flag apply). */
+  .rule-row.disabled .rule-main { opacity: 0.55; }
+  .rule-list.dnd-active .rule-row:hover { box-shadow: none; }
+  .rule-placeholder { border: 1px dashed var(--cyan); background: rgba(56,189,248,0.08);
+    border-radius: 8px; margin-bottom: 0.25rem; transition: height 120ms ease; }
+
+  /* --- left rail: grip (top) · rank (middle) · lock (bottom) --- */
+  .rule-rail { flex: 0 0 2.5rem; display: flex; flex-direction: column;
+    align-items: center; gap: 0.3rem; padding: 0.5rem 0;
+    background: linear-gradient(180deg, #1b222c, var(--panel));
+    border-right: 1px solid var(--border); }
+  .rule-rail .drag-handle { cursor: grab; user-select: none; color: var(--dim);
+    font-size: 1rem; line-height: 1; padding: 0.1rem 0.2rem; background: none; border: 0; }
+  .rule-rail .drag-handle:hover { color: var(--fg); }
+  .rule-rail .drag-handle:active { cursor: grabbing; }
+  .rule-row.locked .rule-rail .drag-handle { cursor: not-allowed; opacity: 0.4; }
+  .rule-rail .ordinal { font-family: var(--font-mono); font-weight: 700; color: var(--bold);
+    font-size: var(--fs-sm); min-width: 1.6rem; height: 1.6rem; display: flex;
+    align-items: center; justify-content: center; background: var(--bg);
+    border: 1px solid var(--border); border-radius: 7px; }
+  .rule-rail .lock-btn { background: none; border: 0; cursor: pointer; color: var(--dim);
+    font-size: 0.9rem; line-height: 1; padding: 0.1rem 0.2rem; border-radius: 5px; }
+  .rule-rail .lock-btn:hover { color: var(--fg); background: var(--bg); }
+  .rule-rail .lock-btn.is-locked { color: var(--yellow); }
+  .rule-rail .lock-btn:disabled { cursor: default; opacity: 0.5; }
+
+  /* --- main column + two-line header --- */
+  .rule-main { flex: 1; min-width: 0; display: flex; flex-direction: column;
+    padding: 0.45rem 0.6rem; }
+  .rule-row .row-header { display: flex; flex-direction: column; gap: 0.35rem; }
+  .rule-row .row-header-line1, .rule-row .row-header-line2 {
+    display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+    row-gap: 0.25rem; font-family: var(--font-mono); font-size: var(--fs-sm); }
+  .rule-row .row-header-line2 { font-size: var(--fs-xs); color: var(--dim); }
   .rule-row.terminal .row-header-line2 { display: none; }
-  /* Line 2's "tags:" prefix sits before the picker. Fixed-width so
-     pills always start at the same x across rows. */
-  .rule-row .row-header-line2 .meta-label {
-    color: var(--dim); user-select: none; min-width: 2.5rem;
-  }
-  /* The rule label is the load-bearing field — it gets every spare
-     pixel of line 1 and ellipses on the right when truly narrow. The
-     full text lives in title= so hover always reveals it. */
-  .rule-row .rule-label {
-    flex: 1; min-width: 0; color: var(--fg);
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  }
-  /* Phone: the load-bearing name is the only flex item that shrinks, so on a
-     crowded row it collapsed to "R…". Drop it onto its own full-width line and
-     let it wrap in full instead of truncating (flex-basis:100% breaks the flex
-     line; the slug/pills/edit wrap below it). Desktop keeps the single line. */
+  .rule-row .row-header-line2 .meta-label { color: var(--dim); user-select: none; min-width: 2.5rem; }
+  .rule-row .rule-label { flex: 1; min-width: 0; color: var(--bold); font-weight: 600;
+    font-family: var(--font-sans); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   @media (max-width: 40em) {
-    .rule-row .rule-label {
-      flex-basis: 100%;
-      white-space: normal; overflow: visible; text-overflow: clip;
-    }
-  }
-  .rule-row .drag-handle { cursor: grab; user-select: none; color: var(--dim);
-    padding: 0.125rem 0.25rem; }
-  .rule-row .drag-handle:active { cursor: grabbing; }
-  .rule-row.locked .drag-handle { cursor: not-allowed; }
-  .rule-row .ordinal { color: var(--dim); min-width: 1.5rem; text-align: right; }
-  /* Generalised labelled-toggle widget used for BOTH `enabled` (line 1)
-     and `user-editable` (line 2). Same shape, same green-when-on cue,
-     same dim-when-off. Renamed from `.expose-toggle` — that name lied
-     about the toggle below it (the user thought "simple" meant a
-     /simple page somewhere). */
-  .rule-row .toggle { display: inline-flex; gap: 0.3rem;
-    align-items: center; user-select: none; cursor: pointer;
-    padding: 0 0.25rem; border-radius: 3px;
-    color: var(--dim); }
-  /* The switch itself now carries the on/off state; the label just brightens
-     from dim → foreground as a complementary (non-colour-only) cue. */
+    .rule-row .rule-label { flex-basis: 100%; white-space: normal; overflow: visible; text-overflow: clip; } }
+  .rule-row .toggle { display: inline-flex; gap: 0.3rem; align-items: center;
+    user-select: none; cursor: pointer; padding: 0 0.25rem; border-radius: 3px; color: var(--dim); }
   .rule-row .toggle.on { color: var(--fg); }
   .rule-row .toggle input { margin: 0; }
   .rule-row .rule-slug { color: var(--dim); font-size: var(--fs-xs); font-style: italic; }
-  /* Type pill — fixed min-width so the label column starts at a
-     predictable x across rows (the previous shrink-to-fit made the
-     label jump left-right between regex / cb:wordlist / cb:dedup). */
-  .rule-row .type-pill { display: inline-block; padding: 0 0.375rem; border-radius: 3px;
-    font-size: var(--fs-xs); background: #21262d; color: var(--cyan);
-    min-width: 4rem; text-align: center; }
-  .rule-row .expand-btn, .rule-row .delete-btn {
-    background: transparent; border: 1px solid var(--border);
-    color: var(--fg); padding: 0.125rem 0.375rem; border-radius: 3px; cursor: pointer;
-    font: inherit; font-size: var(--fs-xs); }
+  .rule-row .type-pill { display: inline-block; padding: 0.05rem 0.4rem; border-radius: 5px;
+    font-size: var(--fs-xs); background: rgba(121,192,255,0.08); color: var(--cyan);
+    border: 1px solid rgba(121,192,255,0.25); }
+
+  /* --- ONE ghost-button language for every card action --- */
+  .rule-row .head-actions { display: flex; align-items: center; gap: 0.2rem;
+    margin-left: auto; position: relative; }
+  .rule-row .expand-btn, .rule-row .delete-btn, .rule-row .reset-link,
+  .rule-row .promote-btn, .rule-row .color-btn {
+    display: inline-flex; align-items: center; gap: 0.3rem; background: transparent;
+    border: 1px solid transparent; border-radius: 6px; color: var(--dim);
+    padding: 0.2rem 0.45rem; cursor: pointer; font: inherit; font-family: var(--font-sans);
+    font-size: var(--fs-xs); white-space: nowrap; }
+  .rule-row .expand-btn:hover, .rule-row .color-btn:hover,
+  .rule-row .reset-link:hover { color: var(--fg); background: #1f2630; border-color: var(--border); }
+  .rule-row .promote-btn { color: var(--cyan); border-color: rgba(121,192,255,0.3); }
+  .rule-row .promote-btn:hover { background: rgba(121,192,255,0.1); border-color: var(--cyan); }
   .rule-row .delete-btn { color: var(--red); }
-  .rule-row .row-body { padding-left: 2rem; padding-top: 0.375rem; display: none; }
+  .rule-row .delete-btn:hover { background: rgba(248,81,73,0.1); border-color: rgba(248,81,73,0.4); }
+  .rule-row button:disabled { opacity: 0.5; cursor: default; }
+
+  /* --- colour swatch + popover (curated palette; secondary signal) --- */
+  .rule-row .color-btn { padding: 0.25rem 0.4rem; }
+  .rule-row .color-dot { width: 0.85rem; height: 0.85rem; border-radius: 3px;
+    display: inline-block; border: 1px solid var(--border); background: transparent; }
+  .color-pop { position: absolute; top: 1.8rem; right: 0; z-index: 30;
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.35rem;
+    background: #1f2630; border: 1px solid #45505f; border-radius: 8px; padding: 0.5rem;
+    box-shadow: 0 12px 28px -8px rgba(0,0,0,0.7); width: 9.5rem; }
+  .color-swatch { width: 1.5rem; height: 1.5rem; border-radius: 6px; border: 1px solid #45505f;
+    cursor: pointer; padding: 0; }
+  .color-swatch.sel { outline: 2px solid var(--bold); outline-offset: 1px; }
+  .color-swatch.none, .rule-row .color-dot[data-color=""] {
+    background: repeating-linear-gradient(45deg, #21262d, #21262d 3px, #161b22 3px, #161b22 6px); }
+  /* Per-card colour tokens — tint the rail + a left accent; the body stays on
+     the standard surface so text contrast is unaffected (colour is paired with
+     rank+label, never the sole signal — WCAG 1.4.1). */
+  .rule-row[data-color="red"]    { border-left: 3px solid rgba(248,81,73,0.7); }
+  .rule-row[data-color="amber"]  { border-left: 3px solid rgba(210,153,34,0.75); }
+  .rule-row[data-color="green"]  { border-left: 3px solid rgba(63,185,80,0.7); }
+  .rule-row[data-color="teal"]   { border-left: 3px solid rgba(57,197,207,0.7); }
+  .rule-row[data-color="blue"]   { border-left: 3px solid rgba(121,192,255,0.7); }
+  .rule-row[data-color="purple"] { border-left: 3px solid rgba(188,140,255,0.7); }
+  .rule-row[data-color="pink"]   { border-left: 3px solid rgba(255,123,156,0.7); }
+  .rule-row[data-color="red"]    .rule-rail { background: linear-gradient(180deg, rgba(248,81,73,0.18), rgba(248,81,73,0.05)); }
+  .rule-row[data-color="amber"]  .rule-rail { background: linear-gradient(180deg, rgba(210,153,34,0.18), rgba(210,153,34,0.05)); }
+  .rule-row[data-color="green"]  .rule-rail { background: linear-gradient(180deg, rgba(63,185,80,0.18), rgba(63,185,80,0.05)); }
+  .rule-row[data-color="teal"]   .rule-rail { background: linear-gradient(180deg, rgba(57,197,207,0.18), rgba(57,197,207,0.05)); }
+  .rule-row[data-color="blue"]   .rule-rail { background: linear-gradient(180deg, rgba(121,192,255,0.18), rgba(121,192,255,0.05)); }
+  .rule-row[data-color="purple"] .rule-rail { background: linear-gradient(180deg, rgba(188,140,255,0.18), rgba(188,140,255,0.05)); }
+  .rule-row[data-color="pink"]   .rule-rail { background: linear-gradient(180deg, rgba(255,123,156,0.18), rgba(255,123,156,0.05)); }
+  .color-dot[data-color="red"],    .color-swatch[data-color="red"]    { background: rgba(248,81,73,0.6);  border-color: rgba(248,81,73,0.8); }
+  .color-dot[data-color="amber"],  .color-swatch[data-color="amber"]  { background: rgba(210,153,34,0.6); border-color: rgba(210,153,34,0.8); }
+  .color-dot[data-color="green"],  .color-swatch[data-color="green"]  { background: rgba(63,185,80,0.6);  border-color: rgba(63,185,80,0.8); }
+  .color-dot[data-color="teal"],   .color-swatch[data-color="teal"]   { background: rgba(57,197,207,0.6); border-color: rgba(57,197,207,0.8); }
+  .color-dot[data-color="blue"],   .color-swatch[data-color="blue"]   { background: rgba(121,192,255,0.6);border-color: rgba(121,192,255,0.8); }
+  .color-dot[data-color="purple"], .color-swatch[data-color="purple"] { background: rgba(188,140,255,0.6);border-color: rgba(188,140,255,0.8); }
+  .color-dot[data-color="pink"],   .color-swatch[data-color="pink"]   { background: rgba(255,123,156,0.6);border-color: rgba(255,123,156,0.8); }
+
+  /* --- locked = protected, FULL contrast (not greyed like disabled) --- */
+  .rule-row.locked { border-left: 3px solid var(--yellow); }
+  .rule-row.locked .rule-rail { background: linear-gradient(180deg, rgba(242,204,96,0.16), rgba(242,204,96,0.04)); }
+  .rule-row.terminal { border-left: 3px solid var(--dim); opacity: 0.9; }
+
+  /* --- body + footer --- */
+  .rule-row .row-body { padding-top: 0.5rem; margin-top: 0.5rem;
+    border-top: 1px solid var(--border); display: none; }
   .rule-row.expanded .row-body { display: block; }
-  /* Terminal row body obeys the same .expanded gate as every other rule —
-     no display override here, otherwise its expand/collapse toggle (and the
-     note textarea inside) would be permanently pinned open. */
-  .rule-row.terminal .row-body { padding-top: 0.25rem; }
-  /* Destructive-actions footer inside the expanded body. Holds reset /
-     delete — keeps them out of the scannable head row (PatternFly
-     "destructive actions outside scannable rows" guidance). */
-  .rule-row .row-body-actions {
-    display: flex; gap: 0.5rem; margin-top: 0.6rem;
-    padding-top: 0.5rem; border-top: 1px solid var(--border);
-    justify-content: flex-end;
-  }
-  .rule-row .row-body-actions .reset-link,
-  .rule-row .row-body-actions .delete-btn {
-    font-size: var(--fs-xs);
-  }
+  .rule-row.terminal .row-body { padding-top: 0.4rem; }
+  /* Rare/destructive actions (promote / reset / delete) live here, out of the
+     scannable head row. */
+  .rule-row .row-body-actions { display: flex; gap: 0.5rem; margin-top: 0.6rem;
+    padding-top: 0.5rem; border-top: 1px solid var(--border); justify-content: flex-end; }
+  /* /settings stub that replaces the relocated global rule editor. */
+  .pipeline-moved-stub { display: flex; flex-direction: column; gap: 0.6rem;
+    align-items: flex-start; padding: 0.5rem 0.25rem; }
+  .pipeline-moved-stub .pms-text { color: var(--dim); font-size: var(--fs-sm); max-width: 44rem; }
+  .pipeline-moved-stub .pms-link { display: inline-flex; align-items: center; color: var(--cyan);
+    text-decoration: none; font-weight: 600; font-size: var(--fs-sm);
+    border: 1px solid rgba(121,192,255,0.4); border-radius: 7px; padding: 0.3rem 0.7rem; }
+  .pipeline-moved-stub .pms-link:hover { background: rgba(121,192,255,0.1); }
   .rule-editor { display: flex; flex-direction: column; gap: 0.25rem; }
   .rule-editor .map-table { font-family: var(--font-mono); font-size: var(--fs-sm); }
   .rule-editor .map-table input { background: transparent; color: var(--fg);
@@ -1378,17 +1421,19 @@ _SETTINGS_VIEWER_HTML = r"""<!doctype html>
   /* Per-model pipeline rules checklist: makeRuleListEditor renders each
      rule with .rule-row; checklist mode adds .checklist-mode on the wrap
      and per-row .excluded marker. Compact layout: checkbox | label | pill | view.   */
-  .pipeline-rules-wrap.checklist-mode .rule-row {
-    padding: 0.25rem 0.5rem; }
+  /* Per-model + capture scoping rows adopt the redesigned card language: a
+     compact single line — switch | label | pill | chips | view — sharing the
+     card border/hover from the base .rule-row, with the reusable .switch. */
+  .pipeline-rules-wrap.checklist-mode .rule-list { gap: 0.3rem; }
+  .pipeline-rules-wrap.checklist-mode .rule-row { padding: 0.35rem 0.6rem; border-radius: 7px; }
   .pipeline-rules-wrap.checklist-mode .rule-row .row-header {
-    /* Override the two-line column flow used in the global rule editor —
-       per-model checklist rows are intentionally single-line + compact. */
-    display: flex; flex-direction: row; align-items: center;
-    gap: 0.5rem; padding: 0; }
+    display: flex; flex-direction: row; align-items: center; gap: 0.55rem; padding: 0; }
+  .pipeline-rules-wrap.checklist-mode .rule-row .switch { flex: 0 0 auto; }
+  .pipeline-rules-wrap.checklist-mode .rule-row .rule-label { font-family: var(--font-sans); }
   .pipeline-rules-wrap.checklist-mode .rule-row.excluded .rule-label {
     color: var(--dim); text-decoration: line-through; }
   .pipeline-rules-wrap.checklist-mode .rule-row .rule-checklist-status {
-    font-size: var(--fs-xs); color: var(--yellow); font-style: italic; }
+    font-size: var(--fs-xs); color: var(--yellow); font-weight: 600; letter-spacing: 0.03em; }
   .pipeline-rules-wrap.checklist-mode .rule-row.terminal {
     border-left-color: var(--dim); }
   /* Globally-disabled, NOT force-included → dim the row so the admin sees
@@ -1399,15 +1444,15 @@ _SETTINGS_VIEWER_HTML = r"""<!doctype html>
     opacity: 0.5; filter: grayscale(0.6); }
   .pipeline-rules-wrap.checklist-mode .rule-row.globally-disabled:hover {
     opacity: 0.85; filter: grayscale(0.3); }
-  /* Tags: small italic badges sitting after the rule label/pill. */
+  /* Override-state chips after the label/pill (pill-shaped, consistent). */
   .pipeline-rules-wrap.checklist-mode .rule-globally-disabled-tag,
   .pipeline-rules-wrap.checklist-mode .rule-force-included-tag {
-    font-size: var(--fs-xs); padding: 0 0.4rem;
-    border-radius: 3px; font-style: italic; margin-left: 0.25rem; }
+    font-size: var(--fs-xs); padding: 0.05rem 0.45rem;
+    border-radius: 999px; margin-left: 0.1rem; }
   .pipeline-rules-wrap.checklist-mode .rule-globally-disabled-tag {
     color: var(--dim); border: 1px solid var(--border); }
   .pipeline-rules-wrap.checklist-mode .rule-force-included-tag {
-    color: var(--cyan); border: 1px solid #194f73; }
+    color: var(--cyan); border: 1px solid rgba(121,192,255,0.3); background: rgba(121,192,255,0.08); }
   .rule-checklist-footer { color: var(--dim); margin-top: 0.4rem;
     font-size: var(--fs-sm); }
   /* Narrow viewport: stack sidebar above main pane; let it scroll
@@ -1487,6 +1532,15 @@ _SETTINGS_VIEWER_HTML = r"""<!doctype html>
 
 let state = null;          // last server state
 let dirty = {};            // field -> new value (only changed)
+
+// Which view is this shell rendering? The Pipeline rule editor is served on a
+// second route (/settings/pipeline) using this SAME page; the `settings-view`
+// meta tells render() to show ONLY the Pipeline section there. On /settings it
+// shows every section EXCEPT Pipeline (replaced by a link to the dedicated
+// page). Both load the same /settings/state, so the per-model + capture
+// scoping pickers on /settings still read the live PIPELINE_RULES list.
+const SETTINGS_VIEW = ((document.querySelector('meta[name="settings-view"]') || {}).content) || 'settings';
+const PIPELINE_ONLY = SETTINGS_VIEW === 'pipeline';
 
 const $ = (id) => document.getElementById(id);
 
@@ -2785,17 +2839,9 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
     const oldIdx = dragSrcIdx;
     if (newIdx === oldIdx) return;     // dropped in place
     const src = rules[oldIdx];
-    const targetEl = placeholder.nextElementSibling;
-    const movingLocked = src.locked
-      || (targetEl && targetEl.classList && targetEl.classList.contains('locked'));
-    if (movingLocked) {
-      const ok = confirm(
-        'Reordering ' + src.name + ' near a locked rule may break the\n' +
-        'pipeline (e.g. dictation must run before its tidy rules).\n\n' +
-        'Proceed anyway?'
-      );
-      if (!ok) return;                 // dragend cleans up
-    }
+    // A locked rule can't be dragged (its grip is disabled while locked), and
+    // moving other rules around a locked one is allowed — lock protects the
+    // rule's content + its own position, not the whole list. No confirm needed.
     const [moved] = rules.splice(oldIdx, 1);
     rules.splice(newIdx, 0, moved);
     // Defensive: keep terminal last.
@@ -3011,6 +3057,8 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
 
       const cb = document.createElement('input');
       cb.type = 'checkbox';
+      cb.className = 'switch';                 // reuse the shared toggle look
+      cb.setAttribute('role', 'switch');
       cb.checked = effective;
       // Per-model PIPELINE_RULES_EXCLUDE: the live /transcribe path
       // re-trims after wrappers unconditionally, so a per-model exclude
@@ -3131,6 +3179,17 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
     // Restore expansion across repaints (state lives in expandedNames Set).
     if (expandedNames.has(rule.name)) row.classList.add('expanded');
 
+    // ---- Redesigned card chrome: a left "rail" (drag grip + rank number +
+    // lock padlock) beside the main column (header + body). The rail gives
+    // ordering + protection one home and visually separates sibling cards. A
+    // per-card colour token tints the rail/accent (data-color → CSS). -------
+    row.classList.add('rule-card');
+    if (rule.color) row.dataset.color = rule.color;
+    const rail = document.createElement('div');
+    rail.className = 'rule-rail';
+    const cardMain = document.createElement('div');
+    cardMain.className = 'rule-main';
+
     // ----- Labelled-toggle factory (used for `enabled` on line 1 and
     // `user-editable` on line 2). Same shape, same green-when-on cue,
     // same dim-when-off — readable as a parallel pair. ------------------
@@ -3169,10 +3228,8 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
 
     const drag = document.createElement('span');
     drag.className = 'drag-handle';
-    drag.textContent = rule.locked ? '🔒' : '⋮⋮';
-    drag.title = rule.locked
-      ? 'Locked — reorder will warn before applying'
-      : 'Drag to reorder';
+    drag.textContent = '⠿';   // grip; lock state is shown by the rail padlock
+    drag.title = 'Drag to reorder';
     if (rule.type !== 'terminal') {
       drag.draggable = true;
       drag.addEventListener('dragstart', (e) => {
@@ -3207,7 +3264,7 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
         dragSrcIdx = null;
       });
     }
-    headLine1.appendChild(drag);
+    rail.appendChild(drag);
 
     // `enabled` toggle on line 1 — gets a visible label "enabled" (not
     // just a tooltip). Terminal rules disable the toggle but still show
@@ -3237,8 +3294,41 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
 
     const ord = document.createElement('span');
     ord.className = 'ordinal';
-    ord.textContent = '#' + (idx + 1);
-    headLine1.appendChild(ord);
+    ord.textContent = String(idx + 1);
+    rail.appendChild(ord);
+
+    // Lock padlock — toggles rule.locked. Locked = enforced read-only (the
+    // whole body + header toggles + drag are disabled) at FULL contrast, not
+    // greyed like "disabled". Click to unlock (with a confirm). The terminal
+    // trim is inherently fixed, so it shows a static, non-interactive padlock.
+    const lockBtn = document.createElement('button');
+    lockBtn.type = 'button';
+    lockBtn.className = 'lock-btn';
+    const _setLockGlyph = () => {
+      lockBtn.textContent = rule.locked ? '🔒' : '🔓';
+      lockBtn.classList.toggle('is-locked', !!rule.locked);
+      lockBtn.title = rule.locked
+        ? 'Protected — click to unlock for editing'
+        : 'Click to lock (protect from edits + reorder)';
+    };
+    _setLockGlyph();
+    if (rule.type === 'terminal') {
+      lockBtn.textContent = '🔒';
+      lockBtn.disabled = true;
+      lockBtn.classList.add('is-locked');
+      lockBtn.title = 'The terminal trim is always last and never editable';
+    } else {
+      lockBtn.addEventListener('click', () => {
+        if (rule.locked) {
+          if (!confirm('Unlock “' + (rule.label || rule.name) + '” for editing?')) return;
+          rule.locked = false;
+        } else {
+          rule.locked = true;
+        }
+        commitFull();   // repaint applies / lifts the read-only lockdown
+      });
+    }
+    rail.appendChild(lockBtn);
 
     const lbl = document.createElement('span');
     lbl.className = 'rule-label';
@@ -3299,20 +3389,61 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
       _saveExpanded();
       _setExpandLabel();
     });
-    headLine1.appendChild(expandBtn);
+    // Colour swatch — tint this card with a curated token for visual grouping
+    // (data-color → CSS). Colour is a SECONDARY signal (rank + label still
+    // identify the rule); the popover offers 7 muted tints + "none".
+    const colorBtn = document.createElement('button');
+    colorBtn.type = 'button';
+    colorBtn.className = 'color-btn';
+    colorBtn.title = 'Card colour';
+    colorBtn.innerHTML = '<span class="color-dot" data-color="' + (rule.color || '') + '"></span>';
+    let colorPop = null;
+    const _closeColorPop = () => { if (colorPop) { colorPop.remove(); colorPop = null; } };
+    colorBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (colorPop) { _closeColorPop(); return; }
+      colorPop = document.createElement('div');
+      colorPop.className = 'color-pop';
+      ['', 'red', 'amber', 'green', 'teal', 'blue', 'purple', 'pink'].forEach(tok => {
+        const sw = document.createElement('button');
+        sw.type = 'button';
+        sw.className = 'color-swatch' + (tok ? '' : ' none')
+          + (((rule.color || '') === tok) ? ' sel' : '');
+        sw.dataset.color = tok;
+        sw.title = tok || 'none';
+        sw.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          rule.color = tok;
+          _closeColorPop();
+          commitFull();
+        });
+        colorPop.appendChild(sw);
+      });
+      headActions.appendChild(colorPop);
+    });
 
-    // ⇪ Promote — push this rule into the committed config.json. Shown only
-    // for rules that differ from config.json (refreshControlsVisibility
-    // toggles visibility); never for the terminal rule.
+    // Right-aligned action cluster: colour + edit/expand. Rare/destructive
+    // actions (promote / reset / delete) live in the body footer instead, so
+    // the header stays scannable and stops jumping width as state changes.
+    const headActions = document.createElement('div');
+    headActions.className = 'head-actions';
+    if (rule.type !== 'terminal') headActions.appendChild(colorBtn);
+    headActions.appendChild(expandBtn);
+    headLine1.appendChild(headActions);
+
+    // ⇪ Promote — push this rule into the committed config.json. Built here,
+    // appended to the body footer (with reset/delete) further down. Shown only
+    // when the rule differs from config.json (refreshControlsVisibility toggles
+    // it via the .promote-btn selector regardless of where it lives).
+    let promoteBtnEl = null;
     if (rule.type !== 'terminal') {
-      const promoteBtn = document.createElement('button');
-      promoteBtn.type = 'button';
-      promoteBtn.className = 'promote-btn';
-      promoteBtn.textContent = '⇪ promote';
-      promoteBtn.title = 'Promote this rule into the committed config.json';
-      promoteBtn.style.display = 'none';
-      promoteBtn.addEventListener('click', () => _promoteOne(rule));
-      headLine1.appendChild(promoteBtn);
+      promoteBtnEl = document.createElement('button');
+      promoteBtnEl.type = 'button';
+      promoteBtnEl.className = 'promote-btn';
+      promoteBtnEl.textContent = '⇪ promote';
+      promoteBtnEl.title = 'Promote this rule into the committed config.json';
+      promoteBtnEl.style.display = 'none';
+      promoteBtnEl.addEventListener('click', () => _promoteOne(rule));
     }
 
     // ----- Line 2 (metadata): tag picker + user-editable toggle +
@@ -3409,7 +3540,7 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
       });
       _destructiveBtns.push(del);
     }
-    row.appendChild(head);
+    cardMain.appendChild(head);
 
     // Drop logic lives at list level (see top of makeRuleListEditor) —
     // the shared placeholder follows the cursor between rows there.
@@ -3510,14 +3641,34 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
     // Destructive actions live in a body-footer (out of the scannable
     // head row). Append AFTER the rule editor + test panel so the
     // visual order reads: edit body → run test → reset/delete.
-    if (_destructiveBtns.length) {
+    if (promoteBtnEl || _destructiveBtns.length) {
       const footer = document.createElement('div');
       footer.className = 'row-body-actions';
+      if (promoteBtnEl) footer.appendChild(promoteBtnEl);
       for (const btn of _destructiveBtns) footer.appendChild(btn);
       body.appendChild(footer);
     }
 
-    row.appendChild(body);
+    cardMain.appendChild(body);
+    row.appendChild(rail);
+    row.appendChild(cardMain);
+
+    // Enforced read-only: a locked rule disables every editable control (body
+    // content + header toggles + tag picker + drag), leaving the rail padlock
+    // (to unlock), the colour swatch and the expand/view toggle live. The
+    // .locked class styles it as protected (full contrast), not greyed-out.
+    function _applyLockState() {
+      // Only ever DISABLE when locked — never force-enable (a lock toggle
+      // triggers a full repaint, so the unlocked row is rebuilt fresh with
+      // controls in their natural state; forcing .disabled=false here would
+      // wrongly re-enable e.g. the terminal rule's always-disabled toggle).
+      if (!rule.locked || rule.type === 'terminal') return;
+      body.querySelectorAll('input, select, textarea, button').forEach(el => { el.disabled = true; });
+      headLine1.querySelectorAll('.switch').forEach(el => { el.disabled = true; });
+      headLine2.querySelectorAll('input, button, .switch').forEach(el => { el.disabled = true; });
+      drag.draggable = false;
+    }
+    _applyLockState();
     return row;
   }
 
@@ -4442,10 +4593,32 @@ function highlightNavChip(id) {
   });
 }
 
+function pipelineMovedStub() {
+  // /settings replaces the (now relocated) global rule editor with this link.
+  const box = document.createElement('div');
+  box.className = 'pipeline-moved-stub';
+  const txt = document.createElement('div');
+  txt.className = 'pms-text';
+  txt.textContent = 'The pipeline rule editor now has its own page — the global '
+    + 'rule list, drag-reorder, lock, colour and the dry-run tester all live there. '
+    + 'Per-model and capture rule scoping stay below.';
+  const a = document.createElement('a');
+  a.className = 'pms-link';
+  a.href = '/settings/pipeline';
+  a.textContent = 'Open the Pipeline page →';
+  box.appendChild(txt);
+  box.appendChild(a);
+  return box;
+}
+
 function render() {
   const main = $('main');
   main.innerHTML = '';
   for (const g of state.groups) {
+    // View routing: the dedicated /settings/pipeline page shows ONLY the
+    // Pipeline section; /settings shows every other section (Pipeline becomes
+    // a link to that page — see the stub branch below).
+    if (PIPELINE_ONLY && g.title !== 'Pipeline') continue;
     const sec = document.createElement('section');
     sec.id = 'sec-' + slug(g.title);
     // Collapsible section: the <h2> is promoted into a <summary> inside a
@@ -4471,6 +4644,15 @@ function render() {
     const body = document.createElement('div');
     body.className = 'section-body';
     secDet.appendChild(body);
+    // On /settings the global Pipeline editor is replaced by a link to the
+    // dedicated /settings/pipeline page (PIPELINE_RULES stays in state.fields
+    // as data for the per-model + capture scoping pickers, so nothing breaks).
+    if (!PIPELINE_ONLY && g.title === 'Pipeline') {
+      body.appendChild(pipelineMovedStub());
+      sec.appendChild(secDet);
+      main.appendChild(sec);
+      continue;
+    }
     // Each group has subgroups; iterate them. A subgroup with title===null
     // emits no subheader. A subgroup WITH a title is wrapped in
     // <details>/<summary> so the admin can collapse long-tail "Advanced —"

@@ -759,8 +759,24 @@ input[type="checkbox"].switch:focus-visible {
   color: var(--dim, #6e7681); text-align: right; }
 .rule-editor .rl-fr input { width: 100%; font-family: var(--font-mono); font-size: var(--fs-sm); }
 .rule-editor .rl-enote { margin: 0.3rem 0 0.1rem; }
+/* Normalised note style — ONE look for prose annotations everywhere: the
+   per-card rationale (textarea.rule-note) and the per-entry note
+   (.rl-enote textarea). Sans / --fs-md / dimmed in a distinct bordered box
+   with a left accent, so a human note never reads like the monospace config
+   values around it. (Mirrors the Captures "Admin notes" box.) NAV_CSS is
+   injected after each page's CSS so these two-class selectors win over the
+   generic mono `.input-col textarea`. */
+.rule-editor textarea.rule-note,
 .rule-editor .rl-enote textarea { width: 100%; box-sizing: border-box;
-  font-family: var(--font-sans); font-size: var(--fs-xs); color: var(--help, #8b949e); }
+  font-family: var(--font-sans); font-size: var(--fs-md); line-height: 1.55;
+  color: var(--help, #8b949e); background: var(--input-bg, #0d1117);
+  border: 1px solid var(--border, #30363d);
+  border-left: 2px solid var(--border2, #3d444d); border-radius: 5px;
+  padding: 0.45rem 0.55rem; resize: vertical; }
+.rule-editor textarea.rule-note::placeholder,
+.rule-editor .rl-enote textarea::placeholder { color: var(--dim, #6e7681); font-style: italic; }
+.rule-editor .rl-enote textarea { min-height: 2.4rem; }
+.rule-editor textarea.rule-note { min-height: 3rem; }
 """
 
 
@@ -2162,6 +2178,7 @@ _NAV_SPEC: list[tuple[str, str, str, bool]] = [
     ("stats",    "/stats",             "stats",        False),
     ("logs",     "/logs",              "logs",         False),
     ("settings", "/settings",          "settings",     True),
+    ("pipeline", "/settings/pipeline", "pipeline",     True),
     ("keys",     "/settings/api-keys", "api-keys",     True),
     ("overrides", "/settings/overrides", "overrides",  True),
 ]
@@ -2189,7 +2206,7 @@ def nav_html(current: str) -> str:
         "reports":  "reports",
         "captures": "captures",
     }
-    admin_only_labels = {"settings", "keys", "overrides"}
+    admin_only_labels = {"settings", "pipeline", "keys", "overrides"}
     # Hamburger toggle (shown only ≤40em via NAV_CSS) + the nav links. The
     # links keep their admin-only / page-link gating classes; on narrow
     # screens NAV_CSS turns the same #navrow into an off-canvas drawer and
@@ -2321,6 +2338,7 @@ _PAGE_KEY_BY_CURRENT: dict[str, str] = {
     # "no per-page perm to check" from "we're on a data page that maps
     # to a key in the permissions dict".
     "settings":     "__admin_only__",
+    "pipeline":     "__admin_only__",
     "api-keys":     "__admin_only__",
     "overrides":    "__admin_only__",
 }
@@ -2337,6 +2355,7 @@ _PAGE_PATH_BY_CURRENT: dict[str, str] = {
     "reports":      "/reports",
     "captures":     "/captures",
     "settings":     "/settings",
+    "pipeline":     "/settings/pipeline",
     "api-keys":     "/settings/api-keys",
     "overrides":    "/settings/overrides",
 }
@@ -2355,6 +2374,7 @@ _HEADER_SLUG_BY_CURRENT: dict[str, str] = {
     "reports":      "reports",
     "captures":     "captures",
     "overrides":    "overrides",
+    "pipeline":     "pipeline",
 }
 
 

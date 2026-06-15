@@ -859,6 +859,11 @@ def normalize_tags(raw: Any) -> list[str]:
     return out
 
 
+# Curated palette of card-tint tokens for the pipeline editor. "" = no tint.
+# Semantic names (not hex) so the theme / dark-mode own the actual colour.
+RULE_CARD_COLORS = ("red", "amber", "green", "teal", "blue", "purple", "pink")
+
+
 class _RuleBase(BaseModel):
     """Common fields for every PipelineRule row."""
     model_config = {"extra": "forbid"}
@@ -883,11 +888,22 @@ class _RuleBase(BaseModel):
     # config.json). Optional; defaults to "" so older config.local.json files
     # that predate this field still validate.
     note: Annotated[str, Field(max_length=4000)] = ""
+    # Optional card tint for the pipeline editor (one of RULE_CARD_COLORS, or
+    # "" for none). Forgiving by design: an unknown/typo'd token normalises to
+    # "" rather than raising, so this cosmetic value can never trip
+    # load_overrides (which drops ALL overrides on any validation error).
+    color: str = ""
 
     @field_validator("tags", mode="before")
     @classmethod
     def _normalize_tags(cls, v: Any) -> list[str]:
         return normalize_tags(v)
+
+    @field_validator("color", mode="before")
+    @classmethod
+    def _normalize_color(cls, v: Any) -> str:
+        s = ("" if v is None else str(v)).strip().lower()
+        return s if s in RULE_CARD_COLORS else ""
 
 
 class RegexListEntry(BaseModel):
