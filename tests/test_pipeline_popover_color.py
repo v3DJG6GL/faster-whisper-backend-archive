@@ -80,9 +80,22 @@ def test_pipeline_tag_picker_is_aria_combobox(client):
 
 def test_pipeline_lock_color_precedence_scoped(client):
     t = client.get("/settings/pipeline").text
-    # colour token must win over the locked/terminal tint
-    assert ".rule-row.locked:not([data-color])" in t
+    # Locked rows are no longer tinted at all: the yellow row tint reused the
+    # per-card colour mechanism and made an un-coloured locked rule read as
+    # "coloured yellow". The lock chip alone signals locked, so the colour
+    # token always owns the rail/border — there must be no locked row tint.
+    assert ".rule-row.locked:not([data-color])" not in t
+    # Terminal keeps a neutral accent, still scoped so a colour token wins.
     assert ".rule-row.terminal:not([data-color])" in t
+
+
+def test_pipeline_color_palette_hidden_until_opened(client):
+    # The colour palette is a [popover]; an unconditional author `display`
+    # would defeat the UA rule that hides a closed popover, leaving it expanded
+    # inline — clipped by the card's overflow:hidden and covering the expand
+    # toggle. The closed state is re-asserted at higher specificity.
+    t = client.get("/settings/pipeline").text
+    assert ".color-pop:not(:popover-open) { display: none; }" in t
 
 
 def test_pipeline_lock_icon_is_svg_not_emoji(client):

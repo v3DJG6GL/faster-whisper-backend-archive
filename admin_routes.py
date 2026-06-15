@@ -1279,6 +1279,14 @@ _SETTINGS_VIEWER_HTML = r"""<!doctype html>
     display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.35rem;
     background: #1f2630; border: 1px solid #45505f; border-radius: 8px; padding: 0.5rem;
     box-shadow: 0 12px 28px -8px rgba(0,0,0,0.7); width: 9.5rem; }
+  /* A [popover] with an author `display` set defeats the UA rule that hides a
+     closed popover ([popover]:not(:popover-open){display:none}) — the
+     `display:grid` above outranks it, so the palette would render inline (and
+     get clipped by the card's overflow:hidden) instead of opening on demand.
+     Re-assert the hidden state at higher specificity so it shows only while
+     open. (A browser without :popover-open drops this rule; the JS fallback
+     toggles inline display there.) */
+  .color-pop:not(:popover-open) { display: none; }
   .color-swatch { width: 1.5rem; height: 1.5rem; border-radius: 6px; border: 1px solid #45505f;
     cursor: pointer; padding: 0; }
   .color-swatch.sel { outline: 2px solid var(--bold); outline-offset: 1px; }
@@ -1311,11 +1319,11 @@ _SETTINGS_VIEWER_HTML = r"""<!doctype html>
   .color-dot[data-color="pink"],   .color-swatch[data-color="pink"]   { background: rgba(255,123,156,0.6);border-color: rgba(255,123,156,0.8); }
 
   /* --- locked = protected, FULL contrast (not greyed like disabled) ---
-     Scoped :not([data-color]) so a per-card colour token always wins the
-     rail/accent — equal specificity + source order would otherwise let
-     .locked override the colour. The yellow lock CHIP carries "locked". */
-  .rule-row.locked:not([data-color]) { border-left: 3px solid var(--yellow); }
-  .rule-row.locked:not([data-color]) .rule-rail { background: linear-gradient(180deg, rgba(242,204,96,0.16), rgba(242,204,96,0.04)); }
+     The yellow lock CHIP in the rail is the SOLE "locked" signal. We
+     deliberately don't tint the row border/rail: that reused the per-card
+     colour mechanism and made an un-coloured locked rule read as "coloured
+     yellow", competing with the colour feature. Terminal rules keep a neutral
+     grey accent, scoped :not([data-color]) so a colour token still wins. */
   .rule-row.terminal { opacity: 0.9; }
   .rule-row.terminal:not([data-color]) { border-left: 3px solid var(--dim); }
 
@@ -3527,6 +3535,7 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
       colorPop.setAttribute('aria-label', 'Card colour');
       headActions.appendChild(colorPop);
       const colorPopCtl = window._anchorPopover(colorPop, colorBtn, { align: 'right' });
+      colorPopCtl.hide();   // start closed — covers the no-Popover-API fallback's initial state
 
       const _onDocDown = (ev) => {
         if (!colorPop.contains(ev.target) && !colorBtn.contains(ev.target)) _closeColorPop();
