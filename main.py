@@ -363,7 +363,7 @@ def rebuild_caches() -> None:
 
 def _apply_rule(rule: _CompiledRule, text: str) -> str:
     """Dispatch on rule type. Hot path — payload is pre-bound at
-    rebuild_caches() time (a replacement string for `regex`, a pre-built
+    rebuild_caches() time (a replacement string for `regex-list`, a pre-built
     callable for every callback:* type), so every type collapses to a
     single pattern.sub call with no per-request closure allocation."""
     return rule.pattern.sub(rule.payload, text)  # type: ignore[arg-type]
