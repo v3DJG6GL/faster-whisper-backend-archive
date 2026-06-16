@@ -641,14 +641,11 @@ _API_KEYS_HTML = r"""<!doctype html>
   .perm-matrix tbody tr.admin-row td:first-child { color: var(--dim); }
   .perm-matrix tbody tr.dirty td {
     background: rgba(242, 204, 96, 0.07); }
-  .perm-matrix select {
-    background: var(--input-bg); color: var(--fg);
-    border: 1px solid var(--border); border-radius: 3px;
-    padding: 0.15rem 0.3rem; font: inherit; font-size: var(--fs-sm);
-    font-family: var(--font-sans);
-  }
-  .perm-matrix select:disabled {
-    opacity: 0.35; cursor: not-allowed; }
+  /* Per-cell scope is a shared .status-btn-group (none/own/all) from NAV_CSS —
+     keep adjacent cells from crowding, and trim the segment padding so the
+     5-column matrix fits a normal screen without the wrap's scrollbar. */
+  .perm-matrix td .status-btn-group { white-space: nowrap; }
+  .perm-matrix td .status-btn { padding: 0.2rem 0.45rem; }
   .perm-matrix .admin-cell {
     color: var(--dim); font-style: italic; }
   /* The matrix is an inherently 2-D users×pages grid that doesn't stack into
@@ -681,12 +678,30 @@ _API_KEYS_HTML = r"""<!doctype html>
     color: var(--dim); font-family: var(--font-sans);
   }
   .perm-matrix .tag-preview.muted { font-style: italic; opacity: 0.7; }
-  /* Per-identity config binding drawer (overrides) */
-  .cfg-drawer { border: 1px solid var(--border); border-radius: 4px;
-    background: var(--bg); margin: 0.5rem 0; padding: 0.6rem 0.75rem; }
-  .cfg-drawer h4 { margin: 0.6rem 0 0.3rem; font-size: var(--fs-sm);
-    color: var(--bold); } .cfg-drawer h4:first-child { margin-top: 0; }
+  /* Per-identity config binding drawer (overrides) — three titled cards in a
+     bordered container + a footer holding the actions. */
+  .cfg-drawer { border: 1px solid var(--border); border-radius: 0.5rem;
+    background: var(--bg); margin: 0.5rem 0; overflow: hidden; }
   .cfg-drawer .lbl { font-size: var(--fs-xs); color: var(--dim); }
+  .ov-card { padding: 0.85rem 0.95rem; border-bottom: 1px solid var(--border); }
+  .ov-card .ohead { display: flex; align-items: baseline; gap: 0.5rem; }
+  .ov-card .ohead .t { font-size: var(--fs-md); font-weight: 600; color: var(--bold); }
+  .ov-card .ohead .c { font-size: var(--fs-xs); color: var(--dim); }
+  .ov-card .ohint { font-size: var(--fs-xs); color: var(--help);
+    margin: 0.15rem 0 0.6rem; }
+  /* one request gate = label left, segmented control right; uniform rows with
+     hairlines so the set reads as a group (not a raw table, not loose selects) */
+  .gaterow { display: grid; grid-template-columns: 1fr auto; align-items: center;
+    gap: 0.8rem; padding: 0.4rem 0; border-top: 1px solid rgba(48, 54, 61, 0.55); }
+  .gaterow:first-of-type { border-top: 0; }
+  .gaterow .gl { font-size: var(--fs-sm); color: var(--fg); }
+  .gaterow .gl .sub { display: block; font-family: var(--font-mono);
+    font-size: var(--fs-xs); color: var(--dim); }
+  .gaterow .eff { font-size: var(--fs-xs); color: var(--dim); justify-self: end; }
+  /* restrict-to checkbox grid (replaces the former inline-style px) */
+  .ov-checks { display: flex; flex-wrap: wrap; gap: 0.5rem 0.9rem; margin-top: 0.5rem; }
+  .ov-checks label { display: inline-flex; align-items: center; gap: 0.25rem;
+    font-size: var(--fs-sm); }
   .cfg-chips { display: flex; flex-wrap: wrap; gap: 0.3rem; align-items: center;
     margin: 0.2rem 0; }
   .cfg-chip { display: inline-flex; align-items: center; gap: 0.25rem;
@@ -709,13 +724,15 @@ _API_KEYS_HTML = r"""<!doctype html>
   .cfg-ovr-row .lk { background: none; border: 0; cursor: pointer; color: var(--dim); }
   .cfg-ovr-row .lk.on { color: var(--yellow); }
   .cfg-ovr-row .rm { background: none; border: 0; cursor: pointer; color: var(--dim); }
+  /* footer: exactly one primary (Save) on the right, Preview ghost on the left */
+  .ov-footer { display: flex; align-items: center; gap: 0.5rem;
+    padding: 0.65rem 0.95rem; background: var(--panel); }
+  .ov-footer .spacer { flex: 1; }
   .cfg-eff { font-family: var(--font-mono); font-size: var(--fs-xs);
-    border-top: 1px solid var(--border); margin-top: 0.4rem; padding-top: 0.3rem; }
+    border-top: 1px solid var(--border); padding: 0.5rem 0.95rem; }
   .cfg-eff .ef { display: flex; gap: 0.5rem; }
   .cfg-eff .ef .v { color: var(--green); } .cfg-eff .ef .src { color: var(--dim); }
   .cfg-eff .ef .lk { color: var(--yellow); }
-  .cfg-actions { display: flex; gap: 0.4rem; align-items: center;
-    margin-top: 0.5rem; }
   {{NAV_CSS}}
 </style></head>
 <body>
@@ -956,6 +973,42 @@ _API_KEYS_HTML = r"""<!doctype html>
     logs:         'server-wide log stream — no per-user view (none|all only)'
   };
 
+  // Build the segmented none/own/all (or none/all for access-only pages)
+  // control for one page cell — replaces the old <select>. role=radiogroup +
+  // role=radio/aria-checked; the active segment carries a semantic data-tone
+  // fill (none=grey, own=blue, all=amber). Clicking sets active + marks the
+  // row dirty (same effect the old select.change had). Shared .status-btn-group
+  // styling comes from web_common.NAV_CSS.
+  var SCOPE_LABEL = { none: 'None', own: 'Own', all: 'All' };
+  function _permSeg(page, allowed, cur, tr) {
+    var grp = document.createElement('span');
+    grp.className = 'status-btn-group';
+    grp.dataset.page = page;
+    grp.setAttribute('role', 'radiogroup');
+    allowed.forEach(function(s) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'status-btn' + (s === cur ? ' active' : '');
+      b.dataset.val = s;
+      b.dataset.tone = s;
+      b.textContent = SCOPE_LABEL[s] || s;
+      b.setAttribute('role', 'radio');
+      b.setAttribute('aria-checked', s === cur ? 'true' : 'false');
+      b.addEventListener('click', function() {
+        if (b.classList.contains('active')) return;
+        grp.querySelectorAll('.status-btn').forEach(function(x) {
+          x.classList.remove('active');
+          x.setAttribute('aria-checked', 'false');
+        });
+        b.classList.add('active');
+        b.setAttribute('aria-checked', 'true');
+        tr.classList.add('dirty');
+      });
+      grp.appendChild(b);
+    });
+    return grp;
+  }
+
   function renderMatrix(j) {
     var card = document.getElementById('perm-matrix-card');
     var wrap = document.getElementById('perm-matrix-wrap');
@@ -1042,23 +1095,12 @@ _API_KEYS_HTML = r"""<!doctype html>
           td.textContent = '—';
           td.title = 'admin bypasses all page + scope checks';
         } else {
-          var sel = document.createElement('select');
-          sel.dataset.page = page;
           var allowed = accessOnly.has(page)
             ? ['none', 'all']
             : ['none', 'own', 'all'];
-          allowed.forEach(function(s) {
-            var opt = document.createElement('option');
-            opt.value = s;
-            opt.textContent = s;
-            sel.appendChild(opt);
-          });
-          sel.value = allowed.indexOf(currentPages[page]) >= 0
+          var cur = allowed.indexOf(currentPages[page]) >= 0
             ? currentPages[page] : 'none';
-          sel.addEventListener('change', function() {
-            tr.classList.add('dirty');
-          });
-          td.appendChild(sel);
+          td.appendChild(_permSeg(page, allowed, cur, tr));
         }
         tr.appendChild(td);
       });
@@ -1135,8 +1177,9 @@ _API_KEYS_HTML = r"""<!doctype html>
 
   function savePerms(uid, tr, btn) {
     var pages = {};
-    tr.querySelectorAll('select').forEach(function(sel) {
-      pages[sel.dataset.page] = sel.value;
+    tr.querySelectorAll('.status-btn-group[data-page]').forEach(function(g) {
+      var act = g.querySelector('.status-btn.active');
+      pages[g.dataset.page] = act ? act.dataset.val : 'none';
     });
     var body = { pages: pages };
     // Tag picker is row-scoped; the controller was stashed at render.
@@ -1605,6 +1648,37 @@ _API_KEYS_HTML = r"""<!doctype html>
     return el;
   }
 
+  // Segmented control for the drawer's tri/quad-state gates. `options` is a
+  // list of [value, label, tone]; clicking a segment updates the active
+  // visuals (so it works whether or not the callback rerenders) then calls
+  // onpick(value). Shared .status-btn-group styling from web_common.NAV_CSS.
+  function _ovSeg(options, current, onpick) {
+    var grp = document.createElement('span');
+    grp.className = 'status-btn-group';
+    grp.setAttribute('role', 'radiogroup');
+    options.forEach(function (o) {
+      var val = o[0], label = o[1], tone = o[2];
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'status-btn' + (val === current ? ' active' : '');
+      btn.dataset.val = val;
+      if (tone) btn.dataset.tone = tone;
+      btn.textContent = label;
+      btn.setAttribute('role', 'radio');
+      btn.setAttribute('aria-checked', val === current ? 'true' : 'false');
+      btn.onclick = function () {
+        if (btn.classList.contains('active')) return;
+        grp.querySelectorAll('.status-btn').forEach(function (x) {
+          x.classList.remove('active'); x.setAttribute('aria-checked', 'false');
+        });
+        btn.classList.add('active'); btn.setAttribute('aria-checked', 'true');
+        onpick(val);
+      };
+      grp.appendChild(btn);
+    });
+    return grp;
+  }
+
   function buildBindingDrawer(opts) {
     var b = opts.binding;
     var root = document.createElement('div'); root.className = 'cfg-drawer';
@@ -1618,35 +1692,46 @@ _API_KEYS_HTML = r"""<!doctype html>
     // Per-identity REQUEST GATES — whether this identity may request override-
     // profiles / decode tweaks, and which profiles it may name. These can only
     // NARROW the global gates (set on /settings); the server enforces this.
-    function _triRow(label, hint, val, set) {
-      var row = document.createElement('div'); row.className = 'cfg-ovr-row';
-      var nm = document.createElement('span'); nm.className = 'nm';
-      nm.textContent = label; nm.title = hint; row.appendChild(nm);
-      var vc = document.createElement('span');
-      var sel = document.createElement('select');
-      [['inherit', 'Inherit (global)'], ['allow', 'Allow'], ['deny', 'Deny']]
-        .forEach(function (o) {
-          var op = document.createElement('option'); op.value = o[0]; op.textContent = o[1];
-          sel.appendChild(op);
-        });
-      sel.value = val === true ? 'allow' : (val === false ? 'deny' : 'inherit');
-      sel.onchange = function () {
-        set(sel.value === 'allow' ? true : (sel.value === 'deny' ? false : null));
-      };
-      vc.appendChild(sel); row.appendChild(vc); return row;
+    // Build a card shell: title (+ optional caption) header and optional hint.
+    function _ovCard(title, caption, hintText) {
+      var card = document.createElement('div'); card.className = 'ov-card';
+      var head = document.createElement('div'); head.className = 'ohead';
+      var t = document.createElement('span'); t.className = 't'; t.textContent = title;
+      head.appendChild(t);
+      if (caption) {
+        var c = document.createElement('span'); c.className = 'c'; c.textContent = caption;
+        head.appendChild(c);
+      }
+      card.appendChild(head);
+      if (hintText) {
+        var hn = document.createElement('div'); hn.className = 'ohint';
+        hn.textContent = hintText; card.appendChild(hn);
+      }
+      return card;
+    }
+
+    function _triRow(label, slug, hint, val, set) {
+      var row = document.createElement('div'); row.className = 'gaterow';
+      var gl = document.createElement('span'); gl.className = 'gl';
+      gl.title = hint; gl.appendChild(document.createTextNode(label));
+      var sub = document.createElement('span'); sub.className = 'sub'; sub.textContent = slug;
+      gl.appendChild(sub); row.appendChild(gl);
+      var cur = val === true ? 'allow' : (val === false ? 'deny' : 'inherit');
+      row.appendChild(_ovSeg(
+        [['inherit', 'Inherit', 'inherit'], ['allow', 'Allow', 'allow'], ['deny', 'Deny', 'deny']],
+        cur,
+        function (v) { set(v === 'allow' ? true : (v === 'deny' ? false : null)); }));
+      return row;
     }
 
     function requestGatesSection(b) {
-      var sec = document.createElement('div');
-      var h = document.createElement('h4'); h.textContent = 'Request gates'; sec.appendChild(h);
-      var hint = document.createElement('div'); hint.className = 'lbl';
-      hint.textContent = 'Narrow the global gates for this identity only (can never widen them).';
-      sec.appendChild(hint);
-      sec.appendChild(_triRow('Allow requesting override-profiles',
+      var sec = _ovCard('Request gates', null,
+        'Narrow the global gates for this identity only — can never widen them.');
+      sec.appendChild(_triRow('Allow requesting override-profiles', 'override_profile',
         'May this identity name a profile in a per-request override_profile?',
         b.allow_request_override_profile,
         function (v) { b.allow_request_override_profile = v; rerender(); }));
-      sec.appendChild(_triRow('Allow custom decode params',
+      sec.appendChild(_triRow('Allow custom decode params', 'decode_overrides',
         'May this identity send inline per-request decode_overrides?',
         b.allow_request_decode_overrides,
         function (v) { b.allow_request_decode_overrides = v; }));
@@ -1660,33 +1745,32 @@ _API_KEYS_HTML = r"""<!doctype html>
       else if (dataMode === 'restrict') restrictOpen = true;
       // Keep the grid open when restrict was chosen but the list is still empty.
       var mode = (restrictOpen && dataMode === 'none') ? 'restrict' : dataMode;
-      var arow = document.createElement('div'); arow.className = 'cfg-ovr-row';
-      var anm = document.createElement('span'); anm.className = 'nm';
-      anm.textContent = 'Requestable profiles'; arow.appendChild(anm);
-      var avc = document.createElement('span');
-      var asel = document.createElement('select');
-      [['inherit', 'Inherit (all)'], ['all', 'All (*)'],
-       ['restrict', 'Restrict to…'], ['none', 'None']].forEach(function (o) {
-        var op = document.createElement('option'); op.value = o[0]; op.textContent = o[1];
-        asel.appendChild(op);
-      });
-      asel.value = mode;
-      asel.onchange = function () {
-        if (asel.value === 'inherit') { b.allowed_override_profiles = null; restrictOpen = false; }
-        else if (asel.value === 'all') { b.allowed_override_profiles = ['*']; restrictOpen = false; }
-        else if (asel.value === 'none') { b.allowed_override_profiles = []; restrictOpen = false; }
-        else {
-          b.allowed_override_profiles =
-            (Array.isArray(al) ? al.filter(function (n) { return n !== '*'; }) : []);
-          restrictOpen = true;
-        }
-        rerender();
-      };
-      avc.appendChild(asel); arow.appendChild(avc); sec.appendChild(arow);
+      var arow = document.createElement('div'); arow.className = 'gaterow';
+      var agl = document.createElement('span'); agl.className = 'gl';
+      agl.appendChild(document.createTextNode('Requestable profiles'));
+      var asub = document.createElement('span'); asub.className = 'sub';
+      asub.textContent = 'allowed_override_profiles'; agl.appendChild(asub);
+      arow.appendChild(agl);
+      arow.appendChild(_ovSeg(
+        [['inherit', 'Inherit', 'inherit'], ['all', 'All', 'all'],
+         ['restrict', 'Restrict…', 'own'], ['none', 'None', 'deny']],
+        mode,
+        function (v) {
+          if (v === 'inherit') { b.allowed_override_profiles = null; restrictOpen = false; }
+          else if (v === 'all') { b.allowed_override_profiles = ['*']; restrictOpen = false; }
+          else if (v === 'none') { b.allowed_override_profiles = []; restrictOpen = false; }
+          else {
+            b.allowed_override_profiles =
+              (Array.isArray(al) ? al.filter(function (n) { return n !== '*'; }) : []);
+            restrictOpen = true;
+          }
+          rerender();
+        }));
+      sec.appendChild(arow);
 
       if (mode === 'restrict') {
         var names = Object.keys(ovState().profiles || {}).sort();
-        var box = document.createElement('div'); box.className = 'cfg-chips';
+        var box = document.createElement('div'); box.className = 'ov-checks';
         if (!names.length) {
           var e = document.createElement('span'); e.className = 'lbl';
           e.textContent = '(no profiles defined — create them on the Overrides page)';
@@ -1694,7 +1778,6 @@ _API_KEYS_HTML = r"""<!doctype html>
         }
         names.forEach(function (n) {
           var lab = document.createElement('label');
-          lab.style.cssText = 'display:inline-flex;align-items:center;gap:4px;margin-right:10px';
           var cb = document.createElement('input'); cb.type = 'checkbox';
           cb.checked = al.indexOf(n) >= 0;
           cb.onchange = function () {
@@ -1712,10 +1795,9 @@ _API_KEYS_HTML = r"""<!doctype html>
     }
 
     function draw() {
-      var ph = document.createElement('h4'); ph.textContent = 'Profiles'; root.appendChild(ph);
-      var hint = document.createElement('div'); hint.className = 'lbl';
-      hint.textContent = 'earlier wins ↓ — applied before the direct overrides below';
-      root.appendChild(hint);
+      // --- Profiles card ---
+      var pcard = _ovCard('Profiles', 'ordered · earlier wins',
+        'Applied in order, before the direct overrides below.');
       var chips = document.createElement('div'); chips.className = 'cfg-chips';
       b.profiles.forEach(function (name, i) {
         var c = document.createElement('span'); c.className = 'cfg-chip';
@@ -1739,11 +1821,15 @@ _API_KEYS_HTML = r"""<!doctype html>
         e.textContent = '(no profiles defined — create them on the Overrides page)';
         chips.appendChild(e);
       }
-      root.appendChild(chips);
+      pcard.appendChild(chips);
+      root.appendChild(pcard);
 
+      // --- Request gates card ---
       root.appendChild(requestGatesSection(b));
 
-      var oh = document.createElement('h4'); oh.textContent = 'Direct overrides'; root.appendChild(oh);
+      // --- Direct overrides card ---
+      var dcard = _ovCard('Direct overrides', 'pin a field value',
+        'Force a config value for this identity; lock to stop clients overriding it.');
       Object.keys(b.overrides).sort().forEach(function (name) {
         var row = document.createElement('div'); row.className = 'cfg-ovr-row';
         var nm = document.createElement('span'); nm.className = 'nm'; nm.textContent = name; row.appendChild(nm);
@@ -1757,16 +1843,20 @@ _API_KEYS_HTML = r"""<!doctype html>
         row.appendChild(lk);
         var rm = document.createElement('button'); rm.className = 'rm'; rm.textContent = '×';
         rm.onclick = function () { delete b.overrides[name]; var i = b.locks.indexOf(name); if (i >= 0) b.locks.splice(i, 1); rerender(); };
-        row.appendChild(rm); root.appendChild(row);
+        row.appendChild(rm); dcard.appendChild(row);
       });
       var avf = _cfgAvailFields().filter(function (n) { return !(n in b.overrides); });
+      var addwrap = document.createElement('div'); addwrap.className = 'cfg-chips';
       var addsel = document.createElement('select'); addsel.innerHTML = '<option value="">+ add field…</option>';
       avf.forEach(function (n) { var o = document.createElement('option'); o.value = n; o.textContent = n; addsel.appendChild(o); });
       addsel.onchange = function () { if (addsel.value) { b.overrides[addsel.value] = _cfgDefault(addsel.value); rerender(); } };
-      root.appendChild(addsel);
+      addwrap.appendChild(addsel); dcard.appendChild(addwrap);
+      root.appendChild(dcard);
 
-      var acts = document.createElement('div'); acts.className = 'cfg-actions';
-      var prev = document.createElement('button'); prev.className = 'ghost'; prev.textContent = 'Preview effective (saved)';
+      // --- footer: Preview (ghost, left) + Save (primary, right) ---
+      var foot = document.createElement('div'); foot.className = 'ov-footer';
+      var prev = document.createElement('button'); prev.className = 'ghost'; prev.textContent = '⟲ Preview effective';
+      var spacer = document.createElement('span'); spacer.className = 'spacer';
       var save = document.createElement('button'); save.className = 'primary'; save.textContent = 'Save overrides';
       save.onclick = function () {
         save.disabled = true;
@@ -1780,9 +1870,11 @@ _API_KEYS_HTML = r"""<!doctype html>
           .catch(function (er) { showToast(String(er.message || er), 'err'); })
           .finally(function () { save.disabled = false; });
       };
-      acts.appendChild(prev); acts.appendChild(save); root.appendChild(acts);
-      var eff = document.createElement('div'); eff.className = 'cfg-eff'; root.appendChild(eff);
+      foot.appendChild(prev); foot.appendChild(spacer); foot.appendChild(save);
+      root.appendChild(foot);
+      var eff = document.createElement('div'); eff.className = 'cfg-eff'; eff.style.display = 'none'; root.appendChild(eff);
       prev.onclick = function () {
+        eff.style.display = '';
         eff.innerHTML = '<span class="lbl">resolving…</span>';
         fetch('/settings/overrides/resolve?' + opts.previewQuery)
           .then(function (r) { return r.ok ? r.json() : null; })

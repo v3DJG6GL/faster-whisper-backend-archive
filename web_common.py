@@ -718,6 +718,50 @@ input[type="checkbox"].switch:focus-visible {
   input[type="checkbox"].switch,
   input[type="checkbox"].switch::after { transition: none; } }
 
+/* ---- Segmented control — a connected row of buttons for a single choice
+   among 3+ MUTUALLY-EXCLUSIVE values (where a 2-state .switch can't reach).
+   Used for the captures status filter and the api-keys page-permissions
+   (none/own/all) + override request-gates (inherit/allow/deny). One click vs
+   open-pick; the selected value is always visible. Mark the group
+   role="radiogroup" and each button role="radio" + aria-checked. The selected
+   segment shows BOTH a fill AND font-weight (never colour alone — WCAG 1.4.1).
+   NAV_CSS is injected AFTER each page's own <style>, so this wins ties; the
+   base block is the former local copy from captures_routes.py verbatim. */
+.status-btn-group {
+  display: inline-flex; gap: 0;
+  border: 1px solid var(--border); border-radius: 0.375rem;
+  overflow: hidden; font-family: var(--font-sans);
+  vertical-align: middle;
+}
+.status-btn {
+  background: var(--input-bg); color: var(--fg);
+  border: 0; border-right: 1px solid var(--border);
+  padding: 0.25rem 0.625rem; font-size: var(--fs-sm);
+  font-family: var(--font-sans); cursor: pointer; line-height: 1.4;
+  border-radius: 0;
+  transition: background-color 0.1s ease, color 0.1s ease;
+}
+.status-btn:last-child { border-right: 0; }
+.status-btn:hover:not(.active):not(:disabled) {
+  background: #21262d; color: var(--bold);
+}
+.status-btn.active {
+  background: var(--cyan); color: #0d1117; font-weight: 600;
+}
+.status-btn:focus-visible {
+  outline: 2px solid var(--cyan); outline-offset: -2px;
+}
+.status-btn:disabled { color: var(--dim); cursor: not-allowed; }
+/* Semantic active tones (opt-in via data-tone; un-toned buttons keep the
+   cyan default above so the captures filter is unchanged). Escalating
+   exposure → escalating emphasis; red reserved for deny/destructive. */
+.status-btn.active[data-tone="none"]    { background: var(--border2, #3d444d); color: var(--bold); }
+.status-btn.active[data-tone="own"]     { background: #1f6feb;                 color: #fff; }
+.status-btn.active[data-tone="all"]     { background: var(--yellow);           color: #1c1407; }
+.status-btn.active[data-tone="inherit"] { background: var(--border2, #3d444d); color: var(--bold); }
+.status-btn.active[data-tone="allow"]   { background: rgba(63,185,80,0.85);    color: #06210d; }
+.status-btn.active[data-tone="deny"]    { background: rgba(248,81,73,0.8);     color: #2a0a08; }
+
 /* ---- regex-list entry editor (shared by /settings + /quick-config). NAV_CSS
    is injected AFTER each page's own <style>, so these scoped rules win ties
    against `.rule-editor input` / `.card .rule-editor input`. All sizing in

@@ -348,15 +348,13 @@ _OVERRIDES_HTML = r"""<!doctype html>
   .ov-ctrl button { background: none; border: 0; cursor: pointer;
     font-size: var(--fs-xs); color: var(--cyan); padding: 0; }
   .ov-ctrl .reset { color: var(--dim); }
-  /* pipeline tri-state */
-  .ov-rule { display: grid; grid-template-columns: 1fr 9rem; align-items: center;
+  /* pipeline tri-state — label left, shared segmented control (inherit/on/off)
+     right; .status-btn-group styling comes from web_common.NAV_CSS. */
+  .ov-rule { display: grid; grid-template-columns: 1fr auto; align-items: center;
     gap: 0.4rem; padding: 0.15rem 0; }
   .ov-rule .rl { font-size: var(--fs-sm); }
   .ov-rule .rl .slug { font-family: var(--font-mono); color: var(--dim);
     font-size: var(--fs-xs); }
-  .ov-rule select { background: var(--input-bg); color: var(--fg);
-    border: 1px solid var(--border); border-radius: 4px; font: inherit;
-    font-size: var(--fs-sm); padding: 0.1rem 0.25rem; }
   /* explorer */
   .ov-expl-bar { display: flex; flex-wrap: wrap; gap: 0.5rem 0.75rem;
     align-items: center; margin-bottom: 0.6rem; }
@@ -819,14 +817,27 @@ window._renderWaterfall = (function () {
       var state = exc.indexOf(r.name) >= 0 ? 'off' : (inc.indexOf(r.name) >= 0 ? 'on' : 'inherit');
       row.innerHTML = '<span class="rl">' + esc(r.label)
         + ' <span class="slug">' + esc(r.name) + (r.enabled ? '' : ' (off)') + '</span></span>';
-      var seln = document.createElement('select');
-      [['inherit', 'inherit (' + (r.enabled ? 'on' : 'off') + ')'],
-       ['on', 'force on'], ['off', 'force off']].forEach(function (o) {
-        var op = document.createElement('option'); op.value = o[0]; op.textContent = o[1];
-        if (o[0] === state) op.selected = true; seln.appendChild(op);
+      var grp = document.createElement('span'); grp.className = 'status-btn-group';
+      grp.setAttribute('role', 'radiogroup');
+      // inherit label carries the resolved global default, as the old select did
+      [['inherit', 'Inherit (' + (r.enabled ? 'on' : 'off') + ')', 'inherit'],
+       ['on', 'On', 'allow'], ['off', 'Off', 'deny']].forEach(function (o) {
+        var btn = document.createElement('button'); btn.type = 'button';
+        btn.className = 'status-btn' + (o[0] === state ? ' active' : '');
+        btn.dataset.val = o[0]; btn.dataset.tone = o[2]; btn.textContent = o[1];
+        btn.setAttribute('role', 'radio');
+        btn.setAttribute('aria-checked', o[0] === state ? 'true' : 'false');
+        btn.onclick = function () {
+          if (btn.classList.contains('active')) return;
+          grp.querySelectorAll('.status-btn').forEach(function (x) {
+            x.classList.remove('active'); x.setAttribute('aria-checked', 'false');
+          });
+          btn.classList.add('active'); btn.setAttribute('aria-checked', 'true');
+          setRule(p, r.name, o[0]);
+        };
+        grp.appendChild(btn);
       });
-      seln.onchange = function () { setRule(p, r.name, seln.value); };
-      row.appendChild(seln); sec.appendChild(row);
+      row.appendChild(grp); sec.appendChild(row);
     });
     if (!(S.rules || []).length) {
       sec.innerHTML += '<p class="hint">No pipeline rules configured.</p>';

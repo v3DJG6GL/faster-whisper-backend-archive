@@ -2652,34 +2652,10 @@ _CAPTURES_HTML = r"""<!doctype html>
   }
   .adv-progress[hidden] { display: none; }
 
-  /* Radio-style status button group. Used in the toolbar filter and
-     in the per-row + per-group action rows. Replaces the previous
-     <select> dropdowns; a 1-click switch is faster than open-pick. */
-  .status-btn-group {
-    display: inline-flex; gap: 0;
-    border: 1px solid var(--border); border-radius: 0.375rem;
-    overflow: hidden; font-family: var(--font-sans);
-    vertical-align: middle;
-  }
-  .status-btn {
-    background: var(--input-bg); color: var(--fg);
-    border: 0; border-right: 1px solid var(--border);
-    padding: 0.25rem 0.625rem; font-size: var(--fs-sm);
-    font-family: var(--font-sans); cursor: pointer; line-height: 1.4;
-    border-radius: 0;
-    transition: background-color 0.1s ease, color 0.1s ease;
-  }
-  .status-btn:last-child { border-right: 0; }
-  .status-btn:hover:not(.active):not(:disabled) {
-    background: #21262d; color: var(--bold);
-  }
-  .status-btn.active {
-    background: var(--cyan); color: #0d1117; font-weight: 600;
-  }
-  .status-btn:focus-visible {
-    outline: 2px solid var(--cyan); outline-offset: -2px;
-  }
-  .status-btn:disabled { color: var(--dim); cursor: not-allowed; }
+  /* The radio-style status button group (.status-btn-group / .status-btn) is
+     now shared from web_common.NAV_CSS (injected after this <style>), so the
+     local copy was removed. Captures' buttons carry no data-tone, so they keep
+     the default cyan .active. */
 
   button {
     background: var(--input-bg); color: var(--fg);
