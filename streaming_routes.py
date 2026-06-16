@@ -392,8 +392,10 @@ async def transcribe_stream(ws: WebSocket) -> None:
             avoids discarding genuine quiet speech."""
             alp = getattr(seg, "avg_logprob", 0.0)
             temp = getattr(seg, "temperature", 0.0)
-            floor = float(getattr(cfg, "STREAMING_FINAL_DROP_MIN_AVG_LOGPROB", -1.0))
-            ceil = float(getattr(cfg, "STREAMING_FINAL_DROP_TEMPERATURE", 0.8))
+            # Resolve through the per-identity layer like every sibling STREAMING_*
+            # decode knob here (cfg_for honours ident > per-model > global).
+            floor = float(main.cfg_for(final_model, "STREAMING_FINAL_DROP_MIN_AVG_LOGPROB", ident))
+            ceil = float(main.cfg_for(final_model, "STREAMING_FINAL_DROP_TEMPERATURE", ident))
             return alp < floor and temp >= ceil
 
         async def decode_final(audio, prompt):
