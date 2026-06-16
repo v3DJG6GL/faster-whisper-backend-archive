@@ -3226,6 +3226,23 @@ except Exception as _e:
 
 
 # =============================================================================
+# /v1/pipeline-rules - client API for the desktop "Dictionary" editor
+# =============================================================================
+# Always registered (unlike the /quick-config WebUI, which rides
+# ADMIN_UI_ENABLED). Same tag/exposed gating + per-type field allow-list +
+# validation as /quick-config (shared build_visible_rules / apply_rules_patch in
+# quick_config_routes), but in the /v1 namespace with NO host allowlist — auth is
+# the per-user API key (bearer) plus the quick_config page permission. Lets the
+# desktop client view + edit the post-processing rules the caller is permitted to.
+try:
+    from quick_config_routes import v1_router as _pipeline_v1_router
+    app.include_router(_pipeline_v1_router)
+    logger.info("Pipeline-rules client API at GET/PATCH /v1/pipeline-rules")
+except Exception as _e:
+    logger.error("Failed to load pipeline-rules v1 router: %s", _e)
+
+
+# =============================================================================
 # /settings - admin WebUI (opt-in)
 # =============================================================================
 # Off by default: registered only when cfg.ADMIN_UI_ENABLED is True (set in

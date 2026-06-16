@@ -138,6 +138,249 @@ def _rule_fingerprint(rule: dict[str, Any]) -> str:
     return hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:12]
 
 
+# ---------------------------------------------------------------------------
+# Shared view/edit helpers — single home for the pipeline-rule policy, reused
+# by the /quick-config WebUI routes below AND the /v1/pipeline-rules client API
+# (v1_router, further down). Keeping these in one place means the desktop
+# client and the browser behave identically.
+# ---------------------------------------------------------------------------
+
+def build_visible_rules(user: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
+    """The pipeline rules `user` may see (canonical + fingerprinted) and their
+    role. The visibility policy (Permissions.can_see_rule: rule must be
+    `exposed`, then admin OR untagged rule OR rule.tags ∩ caller.tags) lives in
+    exactly one place. The terminal sentinel is always excluded. Each returned
+    rule carries a `_fp` (computed AFTER _canon_rules, so client + server hash
+    the same canonical bytes) for optimistic-concurrency on the patch path."""
+    perms = user["permissions"]
+    canonical = [
+        r for r in _canon_rules(list(cfg.PIPELINE_RULES))
+        if isinstance(r, dict)
+        and r.get("type") != "terminal"
+        and perms.can_see_rule(r)
+    ]
+    for rd in canonical:
+        rd["_fp"] = _rule_fingerprint(rd)
+    role = "admin" if user.get("is_admin") else "user"
+    return canonical, role
+
+
+def editable_fields_map() -> dict[str, list[str]]:
+    """The per-rule-type field allow-list as JSON-serialisable sorted lists, so
+    a client can render exactly the editable fields without hardcoding the
+    policy. Mirrors _PATCH_ALLOWED_FIELDS (the server-side enforcement)."""
+    return {rtype: sorted(fields) for rtype, fields in _PATCH_ALLOWED_FIELDS.items()}
+
+
+async def apply_rules_patch(
+    user: dict[str, Any],
+    rules_patch: dict[str, dict[str, Any]],
+    fingerprints: dict[str, str] | None = None,
+    *,
+    client_host: str = "?",
+) -> tuple[int, dict[str, Any]]:
+    """Validate + apply a per-rule patch to PIPELINE_RULES. Shared by
+    POST /quick-config/state and PATCH /v1/pipeline-rules so the edit policy
+    lives in one home: per-type field allow-list, the same can_see_rule
+    re-check the GET uses, terminal guard, optimistic-concurrency by
+    fingerprint, server-owned map_meta stamping, then the full Pydantic
+    re-validation (incl. the 2 s ReDoS guard) via save_overrides.
+
+    Returns (status_code, body): 200 on success or conflict-only; 422
+    {"errors": [...]} when save validation fails (an error may name a rule the
+    user didn't touch — the admin's pipeline is invalid). Raises HTTPException
+    for 400 (malformed patch / unknown slug / disallowed field), 403 (rule not
+    visible to this user / terminal rule) or 500 (config write failure)."""
+    fingerprints = fingerprints or {}
+    if not rules_patch:
+        return 200, {
+            "saved": [], "conflicts": [],
+            "hot_applied": [], "cold_pending": [],
+            "env_pinned_ignored": [], "evicted": [],
+            "requires_restart": False,
+        }
+
+    # Snapshot the current PIPELINE_RULES as plain dicts so we can overlay
+    # patches deterministically; the merged list replaces cfg.PIPELINE_RULES
+    # verbatim (count + order preserved → terminal rule stays last).
+    current_rules: list[dict[str, Any]] = []
+    for r in cfg.PIPELINE_RULES:
+        if hasattr(r, "model_dump"):
+            current_rules.append(r.model_dump())
+        else:
+            current_rules.append(dict(r))
+    by_slug = {r.get("name"): i for i, r in enumerate(current_rules)}
+    # Canonicalize for fingerprint comparison — must hash the same shape /state
+    # served. _canon_rules drops None fields and sorts dict keys.
+    canonical_now = {r["name"]: r for r in _canon_rules(current_rules)
+                     if isinstance(r, dict) and r.get("name")}
+
+    saved: list[str] = []
+    conflicts: list[dict[str, Any]] = []
+    for slug, patch in rules_patch.items():
+        if not isinstance(patch, dict):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"rules_patch['{slug}'] must be an object",
+            )
+        idx = by_slug.get(slug)
+        if idx is None:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"unknown rule slug: '{slug}' (adding rules is not allowed)",
+            )
+        target = current_rules[idx]
+        # Defense-in-depth: must pass the same can_see_rule check the GET uses,
+        # so a user can't PATCH a rule their tag set forbids them from seeing.
+        # The exposed + terminal + admin checks all live inside can_see_rule.
+        if not user["permissions"].can_see_rule(target):
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                f"rule '{slug}' is not visible to your user",
+            )
+        rtype = target.get("type", "?")
+        if rtype == "terminal":
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                "the terminal rule cannot be edited",
+            )
+        allowed = _PATCH_ALLOWED_FIELDS.get(rtype, frozenset())
+        for field in patch.keys():
+            if field not in allowed:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    f"field '{field}' is not editable on rule '{slug}' "
+                    f"(type={rtype})",
+                )
+        # Optimistic-concurrency: if the client sent a fingerprint, it must
+        # match what's on disk now. Mismatch → another writer changed this rule
+        # between load and save; skip + report rather than clobber. Patches
+        # without a fingerprint fall through to legacy last-writer-wins.
+        client_fp = fingerprints.get(slug)
+        if client_fp:
+            current = canonical_now.get(slug, {})
+            current_fp = _rule_fingerprint(current) if current else None
+            if current_fp != client_fp:
+                conflicts.append({"slug": slug, "current_fp": current_fp})
+                continue
+        # Server-owned map_meta: stamp added/value-changed cb:map entries with
+        # the current epoch, drop meta for removed keys. Done after the conflict
+        # check, before the overlay — so the client can't forge timestamps.
+        if rtype == "callback:map" and "map" in patch:
+            old_map = target.get("map") or {}
+            new_map = patch["map"] or {}
+            meta = dict(target.get("map_meta") or {})
+            now = int(time.time())
+            for k, v in new_map.items():
+                if k not in old_map or old_map[k] != v:
+                    meta[k] = now
+            target["map_meta"] = {k: meta[k] for k in new_map if k in meta}
+        target.update(patch)
+        saved.append(slug)
+
+    # If every patch conflicted, skip the save+rebuild — nothing to write.
+    if not saved:
+        return 200, {
+            "saved": [],
+            "conflicts": conflicts,
+            "hot_applied": [], "cold_pending": [],
+            "env_pinned_ignored": [], "evicted": [],
+            "requires_restart": False,
+        }
+
+    # Hand the merged list to the same save path the admin uses: full Pydantic
+    # re-validation incl. the 2 s ReDoS guard. An error may name a rule the user
+    # didn't touch — the client surfaces this gracefully.
+    try:
+        written = config_store.save_overrides({"PIPELINE_RULES": current_rules})
+    except ValidationError as e:
+        return status.HTTP_422_UNPROCESSABLE_ENTITY, {
+            "errors": config_store.format_validation_errors(e),
+        }
+    except OSError as e:
+        logger.error("[pipeline-rules] save failed: %s", e)
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            f"could not write config.local.json: {e}",
+        )
+
+    applied = await _apply_hot_changes(written)
+
+    logger.info(
+        "[pipeline-rules] patch from=%s user=%s admin=%s saved=%s conflicts=%s",
+        client_host, user.get("username"), user.get("is_admin"),
+        saved, [c["slug"] for c in conflicts],
+    )
+
+    captures_count = 0
+    if getattr(cfg, "CAPTURE_RECORDINGS_ENABLED", False):
+        try:
+            import captures_store
+            captures_count = captures_store.count()
+        except Exception as _e:
+            logger.warning("[pipeline-rules] capture count lookup failed: %s", _e)
+
+    return 200, {
+        "saved": saved,
+        "conflicts": conflicts,
+        **applied,
+        "requires_restart": bool(applied["cold_pending"]),
+        "captures_count": captures_count,
+    }
+
+
+# ---------------------------------------------------------------------------
+# /v1/pipeline-rules — client API (desktop app). NOT host-gated.
+# ---------------------------------------------------------------------------
+# Same tag/exposed gating + per-type field allow-list + validation as the
+# /quick-config WebUI below (shared build_visible_rules / apply_rules_patch),
+# but in the /v1 namespace with NO host allowlist — auth is the per-user API
+# key (bearer) plus the quick_config page permission. Mounted always-on in
+# main.py alongside /v1/me, so the desktop client can manage rules regardless
+# of the ADMIN_UI_ENABLED WebUI switch.
+v1_router = APIRouter(prefix="/v1")
+
+
+@v1_router.get(
+    "/pipeline-rules",
+    dependencies=[Depends(require_page("quick_config"))],
+)
+async def v1_get_pipeline_rules(
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    """The post-processing (pipeline) rules THIS caller may view + edit, with
+    the same `exposed` + tag gating as /quick-config. Returns
+    `{rules, role, editable_fields}`; each rule carries an `_fp` to echo back on
+    PATCH. User-tier auth (any valid key); 403 if the caller's quick_config page
+    scope is "none". No host allowlist (unlike the /quick-config WebUI)."""
+    rules, role = build_visible_rules(user)
+    return {"rules": rules, "role": role, "editable_fields": editable_fields_map()}
+
+
+@v1_router.patch(
+    "/pipeline-rules",
+    dependencies=[Depends(require_page("quick_config"))],
+)
+async def v1_patch_pipeline_rules(
+    payload: QuickPatchPayload,
+    request: Request,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> JSONResponse:
+    """Apply a per-rule patch — `enabled` + the per-type body fields only
+    (regex-list→entries, callback:map→map, lowercase-wordlist→pattern+wordlist,
+    dedup/upper→pattern). name/label/type/tags/colour/exposed/locked are never
+    editable here, and rules can't be added/removed/reordered (admin-only, on
+    the /settings WebUI). Body `{rules_patch:{slug:{field:val}}, fingerprints:
+    {slug:fp}}`. 200 `{saved, conflicts, requires_restart, …}`; 422
+    `{errors:[…]}` on validation; 400/403 on malformed/forbidden patches.
+    Identical semantics to POST /quick-config/state (shared apply_rules_patch)."""
+    client_host = request.client.host if request.client else "?"
+    code, body = await apply_rules_patch(
+        user, payload.rules_patch, payload.fingerprints, client_host=client_host,
+    )
+    return JSONResponse(body, status_code=code)
+
+
 @router.get(
     "",
     # HTML page is host-only — the login modal runs in this page's
@@ -174,19 +417,9 @@ async def get_state(
     All three checks live behind `perms.can_see_rule()` (auth.py) so the
     policy lives in exactly one place — same pattern as the existing
     page-permission gates."""
-    perms = user["permissions"]
-    canonical = [
-        r for r in _canon_rules(list(cfg.PIPELINE_RULES))
-        if isinstance(r, dict)
-        and r.get("type") != "terminal"
-        and perms.can_see_rule(r)
-    ]
-    # Tag each rule with a fingerprint of its canonical form. Client
-    # echoes back per-rule on save; server uses it to detect concurrent
-    # edits. Fingerprint is computed AFTER _canon_rules so client and
-    # server hash the same canonical bytes.
-    for rd in canonical:
-        rd["_fp"] = _rule_fingerprint(rd)
+    # Visibility + fingerprinting lives in build_visible_rules (shared with
+    # GET /v1/pipeline-rules) so the policy has exactly one home.
+    canonical, role = build_visible_rules(user)
     # Server-authoritative "this transcription has been reported" set
     # + the user's previously-submitted chip corrections per request_id.
     # The /quick-config page reads both: badges sync from the id list;
@@ -218,7 +451,7 @@ async def get_state(
         pass
     return {
         "rules": canonical,
-        "role": "admin" if user.get("is_admin") else "user",
+        "role": role,
         "reported_chips": reported_chips,
     }
 
@@ -289,158 +522,11 @@ async def post_state(
     Pydantic schema (which accepts `locked` as a real field) by routing it
     through the merge step.
     """
-    rules_patch = payload.rules_patch
-    fingerprints = payload.fingerprints or {}
-    if not rules_patch:
-        return JSONResponse({
-            "saved": [], "conflicts": [],
-            "hot_applied": [], "cold_pending": [],
-            "env_pinned_ignored": [], "evicted": [],
-            "requires_restart": False,
-        })
-
-    # Snapshot the current PIPELINE_RULES as plain dicts so we can overlay
-    # patches deterministically. Keep order; the merged list will replace
-    # cfg.PIPELINE_RULES verbatim (count + order preserved → terminal rule
-    # stays last).
-    current_rules: list[dict[str, Any]] = []
-    for r in cfg.PIPELINE_RULES:
-        if hasattr(r, "model_dump"):
-            current_rules.append(r.model_dump())
-        else:
-            current_rules.append(dict(r))
-    by_slug = {r.get("name"): i for i, r in enumerate(current_rules)}
-    # Canonicalize for fingerprint comparison — must hash the same shape
-    # /state served. _canon_rules drops None fields and sorts dict keys.
-    canonical_now = {r["name"]: r for r in _canon_rules(current_rules)
-                     if isinstance(r, dict) and r.get("name")}
-
-    saved: list[str] = []
-    conflicts: list[dict[str, Any]] = []
-    for slug, patch in rules_patch.items():
-        if not isinstance(patch, dict):
-            raise HTTPException(
-                status.HTTP_400_BAD_REQUEST,
-                f"rules_patch['{slug}'] must be an object",
-            )
-        idx = by_slug.get(slug)
-        if idx is None:
-            raise HTTPException(
-                status.HTTP_400_BAD_REQUEST,
-                f"unknown rule slug: '{slug}' "
-                f"(adding rules from /quick-config is not allowed)",
-            )
-        target = current_rules[idx]
-        # Defense-in-depth: must pass the same can_see_rule check the GET
-        # uses, so a user can't PATCH a rule their tag set forbids them
-        # from seeing (which would have been hidden in the UI anyway).
-        # The exposed + terminal + admin checks all live inside
-        # can_see_rule, so this single call replaces the bare
-        # `target.get("exposed")` test from before.
-        if not user["permissions"].can_see_rule(target):
-            raise HTTPException(
-                status.HTTP_403_FORBIDDEN,
-                f"rule '{slug}' is not visible to your user",
-            )
-        rtype = target.get("type", "?")
-        if rtype == "terminal":
-            raise HTTPException(
-                status.HTTP_403_FORBIDDEN,
-                "the terminal rule cannot be edited from /quick-config",
-            )
-        allowed = _PATCH_ALLOWED_FIELDS.get(rtype, frozenset())
-        for field in patch.keys():
-            if field not in allowed:
-                raise HTTPException(
-                    status.HTTP_400_BAD_REQUEST,
-                    f"field '{field}' is not editable on rule '{slug}' "
-                    f"(type={rtype}) from /quick-config",
-                )
-        # Optimistic-concurrency check: if the client included a
-        # fingerprint for this rule, it must match what's on disk now.
-        # Mismatch → another writer (admin or another /quick-config tab)
-        # changed this rule between load and save. Skip the patch and
-        # report conflict rather than silently overwrite. Patches without
-        # a fingerprint fall through to the legacy last-writer-wins path
-        # (kept so older clients / curl scripts still work).
-        client_fp = fingerprints.get(slug)
-        if client_fp:
-            current = canonical_now.get(slug, {})
-            current_fp = _rule_fingerprint(current) if current else None
-            if current_fp != client_fp:
-                conflicts.append({"slug": slug, "current_fp": current_fp})
-                continue
-        # Server-owned map_meta: stamp added/value-changed cb:map entries with
-        # the current epoch (added-or-last-updated), drop meta for removed keys.
-        # Done here — after the conflict check, before the overlay — so the
-        # client can't forge timestamps and the fingerprint above still compared
-        # against the shape /state served. The mutation lands on `target` (an
-        # element of current_rules) and so reaches save_overrides below.
-        if rtype == "callback:map" and "map" in patch:
-            old_map = target.get("map") or {}
-            new_map = patch["map"] or {}
-            meta = dict(target.get("map_meta") or {})
-            now = int(time.time())
-            for k, v in new_map.items():
-                if k not in old_map or old_map[k] != v:
-                    meta[k] = now
-            target["map_meta"] = {k: meta[k] for k in new_map if k in meta}
-        target.update(patch)
-        saved.append(slug)
-
-    # If every patch conflicted, skip the save+rebuild entirely — nothing
-    # to write. Return the conflict list so the client can refetch.
-    if not saved:
-        return JSONResponse({
-            "saved": [],
-            "conflicts": conflicts,
-            "hot_applied": [], "cold_pending": [],
-            "env_pinned_ignored": [], "evicted": [],
-            "requires_restart": False,
-        })
-
-    # Hand off the merged list to the same save path the admin uses. This
-    # re-runs the full Pydantic validation including the 2 s ReDoS guard;
-    # an error may name a rule the user didn't touch — the client surfaces
-    # this gracefully ("admin's pipeline has an error").
-    try:
-        written = config_store.save_overrides({"PIPELINE_RULES": current_rules})
-    except ValidationError as e:
-        return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            content={"errors": config_store.format_validation_errors(e)},
-        )
-    except OSError as e:
-        logger.error("[quick-config] save failed: %s", e)
-        raise HTTPException(
-            status.HTTP_500_INTERNAL_SERVER_ERROR,
-            f"could not write config.local.json: {e}",
-        )
-
-    applied = await _apply_hot_changes(written)
-
     client_host = request.client.host if request.client else "?"
-    logger.info(
-        "[quick-config] update from=%s user=%s admin=%s saved=%s conflicts=%s",
-        client_host, user.get("username"), user.get("is_admin"),
-        saved, [c["slug"] for c in conflicts],
+    code, body = await apply_rules_patch(
+        user, payload.rules_patch, payload.fingerprints, client_host=client_host,
     )
-
-    captures_count = 0
-    if getattr(cfg, "CAPTURE_RECORDINGS_ENABLED", False):
-        try:
-            import captures_store
-            captures_count = captures_store.count()
-        except Exception as _e:
-            logger.warning("[quick-config] capture count lookup failed: %s", _e)
-
-    return JSONResponse({
-        "saved": saved,
-        "conflicts": conflicts,
-        **applied,
-        "requires_restart": bool(applied["cold_pending"]),
-        "captures_count": captures_count,
-    })
+    return JSONResponse(body, status_code=code)
 
 
 # --- Re-apply current pipeline rules to existing captures ------------
