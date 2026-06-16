@@ -172,6 +172,37 @@ def editable_fields_map() -> dict[str, list[str]]:
     return {rtype: sorted(fields) for rtype, fields in _PATCH_ALLOWED_FIELDS.items()}
 
 
+def build_word_suggestions(user: dict[str, Any], *, max_words: int) -> list[str]:
+    """Recently-transcribed word + phrase suggestions for `user`, scoped exactly
+    like GET /quick-config/recent (own rows unless quick_config scope == "all";
+    admins / open-mode see everything). Aggregates each row's tokens ∪ bigrams
+    newest-first with a case-insensitive dedup (first-seen = newest casing wins),
+    capped at `max_words`. This is the single-source-of-truth Python port of the
+    web page's rebuildDatalist() JS, reused by GET /v1/recent-words so the
+    desktop Dictionary and the browser autocomplete agree. max_words <= 0 → [].
+    Resilient: any store error (e.g. store not yet initialised) → []."""
+    if max_words <= 0:
+        return []
+    perms = user["permissions"]
+    sees_all = perms.scope("quick_config") == "all"
+    user_filter = None if sees_all else (user.get("user_id") or "")
+    scan = int(getattr(cfg, "RECENT_TRANSCRIPTIONS_PAGE_SIZE", 100))
+    try:
+        rows = transcriptions_store.list_recent(limit=scan, user_id_filter=user_filter)
+    except Exception:
+        return []
+    seen: dict[str, str] = {}
+    for row in rows:
+        for word in list(row.get("tokens") or []) + list(row.get("bigrams") or []):
+            ws = str(word)
+            key = ws.lower()
+            if key and key not in seen:
+                seen[key] = ws
+                if len(seen) >= max_words:
+                    return list(seen.values())
+    return list(seen.values())
+
+
 async def apply_rules_patch(
     user: dict[str, Any],
     rules_patch: dict[str, dict[str, Any]],
@@ -386,6 +417,29 @@ async def v1_patch_pipeline_rules(
     return JSONResponse(body, status_code=code)
 
 
+@v1_router.get("/recent-words")
+async def v1_get_recent_words(
+    user: dict[str, Any] = Depends(get_current_user),
+    limit: int | None = None,
+) -> dict[str, Any]:
+    """Recently-transcribed word + phrase suggestions for filling a spoken-symbol
+    (callback:map) key in the desktop Dictionary — the /v1 analogue of the
+    /quick-config autocomplete datalist. Scoped to the caller (own rows unless
+    their quick_config scope is "all"). Returns `{words, max}` where `max` is the
+    server cap (QUICK_CONFIG_WORD_SUGGESTIONS_MAX; 0 = disabled). Optional
+    `?limit=` lets the client request fewer (clamped to the cap). User-tier; 403
+    if the caller's quick_config scope is "none". No host allowlist (unlike the
+    host-gated /quick-config/recent)."""
+    cap = int(getattr(cfg, "QUICK_CONFIG_WORD_SUGGESTIONS_MAX", 200))
+    max_words = cap
+    if limit is not None:
+        try:
+            max_words = max(0, min(cap, int(limit)))
+        except (TypeError, ValueError):
+            max_words = cap
+    return {"words": build_word_suggestions(user, max_words=max_words), "max": cap}
+
+
 @router.get(
     "",
     # HTML page is host-only — the login modal runs in this page's
@@ -459,6 +513,7 @@ async def get_state(
         "role": role,
         "reported_chips": reported_chips,
         "map_collapse_after": int(getattr(cfg, "QUICK_CONFIG_MAP_COLLAPSE_AFTER", 15)),
+        "word_suggestions_max": int(getattr(cfg, "QUICK_CONFIG_WORD_SUGGESTIONS_MAX", 200)),
     }
 
 
@@ -2004,12 +2059,17 @@ function rebuildDatalist() {
     }
   });
   dl.innerHTML = '';
+  // Cap sourced from the backend config (QUICK_CONFIG_WORD_SUGGESTIONS_MAX) so
+  // the page + desktop client agree; _MAX_DATALIST is the fallback default.
+  // 0 = suggestions disabled (datalist already cleared above).
+  const cap = (typeof window.__wsm === 'number') ? window.__wsm : _MAX_DATALIST;
+  if (cap <= 0) return;
   let n = 0;
   for (const v of seen.values()) {
     const opt = document.createElement('option');
     opt.value = v;
     dl.appendChild(opt);
-    if (++n >= _MAX_DATALIST) break;
+    if (++n >= cap) break;
   }
 }
 
@@ -2186,6 +2246,9 @@ async function load() {
   // Newest-cb:map-entries-shown threshold, sourced from the backend config
   // (QUICK_CONFIG_MAP_COLLAPSE_AFTER) so the page + desktop client agree.
   window.__mca = (typeof j.map_collapse_after === 'number') ? j.map_collapse_after : 15;
+  // Recent-word autocomplete cap, sourced from the backend config
+  // (QUICK_CONFIG_WORD_SUGGESTIONS_MAX) so the page + desktop client agree.
+  window.__wsm = (typeof j.word_suggestions_max === 'number') ? j.word_suggestions_max : 200;
   liveRules = JSON.parse(JSON.stringify(initialRules));
   dirty = new Set();
   // role: "admin" reveals .admin-only nav links + sev pills. Non-admin keys

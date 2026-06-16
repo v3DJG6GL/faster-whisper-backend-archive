@@ -572,6 +572,12 @@ RECENT_TRANSCRIPTIONS_PAGE_SIZE = _D("RECENT_TRANSCRIPTIONS_PAGE_SIZE")
 # agree. 0 = show all (no collapse).
 QUICK_CONFIG_MAP_COLLAPSE_AFTER: int = _D("QUICK_CONFIG_MAP_COLLAPSE_AFTER")
 
+# How many recently-transcribed word/phrase suggestions the spoken-symbol
+# (callback:map) key field offers as autocomplete — on /quick-config AND the
+# desktop Dictionary (served via /v1/recent-words). Aggregated newest-first from
+# the recent-transcriptions store, scoped per user. 0 = suggestions disabled.
+QUICK_CONFIG_WORD_SUGGESTIONS_MAX: int = _D("QUICK_CONFIG_WORD_SUGGESTIONS_MAX")
+
 # Lazy-prune cadence — every Nth insert runs a single DELETE that
 # enforces both the row cap and the TTL. 0 disables lazy pruning (rows
 # accumulate until a manual /clear or service restart sweep). 50 is the

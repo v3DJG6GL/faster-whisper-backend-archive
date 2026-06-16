@@ -101,6 +101,7 @@ ENV_VAR_MAPPING: dict[str, str] = {
     "RECENT_TRANSCRIPTIONS_TTL_DAYS": "WHISPER_RECENT_TRANSCRIPTIONS_TTL_DAYS",
     "RECENT_TRANSCRIPTIONS_PAGE_SIZE": "WHISPER_RECENT_TRANSCRIPTIONS_PAGE_SIZE",
     "QUICK_CONFIG_MAP_COLLAPSE_AFTER": "WHISPER_QUICK_CONFIG_MAP_COLLAPSE_AFTER",
+    "QUICK_CONFIG_WORD_SUGGESTIONS_MAX": "WHISPER_QUICK_CONFIG_WORD_SUGGESTIONS_MAX",
     "RECENT_TRANSCRIPTIONS_PRUNE_EVERY": "WHISPER_RECENT_TRANSCRIPTIONS_PRUNE_EVERY",
     "STATS_RECENT_TRANSCRIPTIONS_COUNT": "WHISPER_STATS_RECENT_TRANSCRIPTIONS_COUNT",
     "CAPTURE_RECORDINGS_ENABLED": "WHISPER_CAPTURE_RECORDINGS_ENABLED",
@@ -596,6 +597,11 @@ FIELD_DESCRIPTIONS: dict[str, str] = {
         "How many of the newest spoken-symbol (callback:map) entries the "
         "/quick-config rule editor shows before collapsing the rest behind a "
         "\"show older\" toggle. Also served to the desktop client. 0 = show all.",
+    "QUICK_CONFIG_WORD_SUGGESTIONS_MAX":
+        "How many recently-transcribed word/phrase suggestions the spoken-symbol "
+        "(callback:map) key field offers as autocomplete (on /quick-config and "
+        "the desktop Dictionary via /v1/recent-words). Scoped per user. "
+        "0 = disabled.",
     "RECENT_TRANSCRIPTIONS_PRUNE_EVERY":
         "Lazy-prune cadence — every Nth insert runs a single DELETE "
         "that enforces both the row cap and the TTL. 0 disables lazy "
@@ -1360,6 +1366,7 @@ class AdminConfig(BaseModel):
     RECENT_TRANSCRIPTIONS_TTL_DAYS: Annotated[int, Field(ge=0, le=3650)] | None = _F("RECENT_TRANSCRIPTIONS_TTL_DAYS")
     RECENT_TRANSCRIPTIONS_PAGE_SIZE: Annotated[int, Field(ge=10, le=1000)] | None = _F("RECENT_TRANSCRIPTIONS_PAGE_SIZE")
     QUICK_CONFIG_MAP_COLLAPSE_AFTER: Annotated[int, Field(ge=0, le=100_000)] | None = _F("QUICK_CONFIG_MAP_COLLAPSE_AFTER")
+    QUICK_CONFIG_WORD_SUGGESTIONS_MAX: Annotated[int, Field(ge=0, le=10_000)] | None = _F("QUICK_CONFIG_WORD_SUGGESTIONS_MAX")
     RECENT_TRANSCRIPTIONS_PRUNE_EVERY: Annotated[int, Field(ge=0, le=10_000)] | None = _F("RECENT_TRANSCRIPTIONS_PRUNE_EVERY")
     STATS_RECENT_TRANSCRIPTIONS_COUNT: Annotated[int, Field(ge=1, le=100)] | None = _F("STATS_RECENT_TRANSCRIPTIONS_COUNT")
 
