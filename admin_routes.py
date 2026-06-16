@@ -766,17 +766,28 @@ async def test_pipeline(payload: dict[str, Any]) -> JSONResponse:
                 try:
                     cur = text
                     total = 0
+                    bad: str | None = None
                     for entry in entries:
                         ep = entry.get("pattern", "") or ""
                         if not ep:
                             continue
-                        ecre = re.compile(ep)
+                        try:
+                            ecre = re.compile(ep)
+                        except re.error as e:
+                            # Engine parity (main.rebuild_caches): a bad entry is
+                            # SKIPPED, not the whole card — the valid entries still
+                            # apply. Surface the first bad pattern as an advisory.
+                            if bad is None:
+                                bad = str(e)
+                            continue
                         er = entry.get("replacement", "") or ""
                         erep = (lambda mt, _r=er: mt.expand(_r) if "\\" in _r else _r)
                         total += sum(1 for _ in ecre.finditer(cur))
                         cur = ecre.sub(erep, cur)
                     lout["after"] = cur
                     lout["matches"] = total
+                    if bad is not None:
+                        lout["err"] = bad
                     lout["done"] = True
                 except Exception as e:  # noqa: BLE001
                     lout["err"] = str(e)
@@ -786,9 +797,10 @@ async def test_pipeline(payload: dict[str, Any]) -> JSONResponse:
             tl.join(timeout=2.0)
             if not lout["done"]:
                 return {**common, "after": text, "slow": True}
-            if "err" in lout:
-                return {**common, "after": text, "error": lout["err"]}
-            return {**common, "after": lout["after"], "matches": lout["matches"]}
+            # A bad entry no longer blanks the card (the engine skips it per-entry),
+            # so show the valid entries' result + the bad pattern as an advisory.
+            return {**common, "after": lout["after"], "matches": lout["matches"],
+                    "error": lout.get("err")}
 
         try:
             if rtype == "callback:map":

@@ -300,6 +300,32 @@ def test_test_pipeline_dry_run(client):
     assert body["final"] == "hallo world"
 
 
+def test_test_pipeline_regex_list_skips_bad_entry(client):
+    # A regex-list with one uncompilable entry must NOT blank the whole card:
+    # the engine (main.rebuild_caches) skips the bad entry per-entry and still
+    # applies the valid ones. The dry-run mirrors that and reports the bad
+    # pattern as an advisory rather than discarding every entry's effect.
+    r = client.post(
+        "/settings/test-pipeline",
+        json={
+            "sample": "foo bar",
+            "rules": [
+                {"name": "rl", "type": "regex-list", "enabled": True, "entries": [
+                    {"pattern": "foo", "replacement": "X"},
+                    {"pattern": "(", "replacement": "Y"},   # uncompilable
+                    {"pattern": "bar", "replacement": "Z"},
+                ]},
+            ],
+        },
+    )
+    assert r.status_code == 200
+    step = r.json()["steps"][0]
+    assert step["after"] == "X Z"        # valid entries applied despite the bad one
+    assert step["matches"] == 2
+    assert step["error"]                 # bad pattern surfaced as an advisory
+    assert r.json()["final"] == "X Z"
+
+
 def test_test_pipeline_rules_not_list_400(client):
     r = client.post("/settings/test-pipeline", json={"sample": "x", "rules": "nope"})
     assert r.status_code == 400
