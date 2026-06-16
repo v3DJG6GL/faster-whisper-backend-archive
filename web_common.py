@@ -1664,7 +1664,7 @@ TAG_PICKER_JS = r"""
         suggest.appendChild(item);
         matchEls.push(item);
       });
-      activeIdx = -1;
+      _setActive(-1);   // reset highlight + clear any stale aria-activedescendant
       input.setAttribute('aria-expanded', 'true');
       sugPop.show();      // promote to top layer + position under the field
     }
