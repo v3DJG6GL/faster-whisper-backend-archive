@@ -18,6 +18,23 @@ def test_list_users_open_mode(client):
     assert "pages" in body
 
 
+def test_list_users_surfaces_activity_fields(client):
+    # The user-card header reads both batched fields straight off /api/users:
+    # active_key_count and (server-computed) last_used_ts. An unused key yields
+    # a null last_used_ts (the header renders "—" / a grey dot).
+    r = client.post(
+        "/settings/api-keys/api/users",
+        json={"username": "dave", "is_admin": False},
+    )
+    uid = r.json()["user_id"]
+    client.post(f"/settings/api-keys/api/users/{uid}/keys", json={"label": "k1"})
+    users = client.get("/settings/api-keys/api/users").json()["users"]
+    u = next(x for x in users if x["id"] == uid)
+    assert u["active_key_count"] == 1
+    assert "last_used_ts" in u
+    assert u["last_used_ts"] is None
+
+
 def test_create_user_and_key_flow(client):
     # Create a user.
     r = client.post(

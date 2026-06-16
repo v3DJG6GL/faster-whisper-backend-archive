@@ -118,6 +118,33 @@ def test_last_used_debounce(api_keys_db):
     assert ak.get_key(rec["id"])["last_used_ts"] == t1
 
 
+def test_last_used_by_user_batched_max(api_keys_db):
+    ak = api_keys_db
+    conn = ak._require_conn()
+    # User A: two keys — the newer use wins the MAX.
+    a = ak.create_user("a", is_admin=False)
+    _, ka1 = ak.create_key(a)
+    _, ka2 = ak.create_key(a)
+    conn.execute("UPDATE api_keys SET last_used_ts=? WHERE id=?", (100.0, ka1["id"]))
+    conn.execute("UPDATE api_keys SET last_used_ts=? WHERE id=?", (250.0, ka2["id"]))
+    # User B: a key that was never used -> absent (NULL last_used_ts).
+    b = ak.create_user("b", is_admin=False)
+    ak.create_key(b)
+    # User C: a more-recently-used key that gets revoked is excluded; only the
+    # remaining active key's use counts (matches the "N active keys" framing).
+    c = ak.create_user("c", is_admin=False)
+    _, kc1 = ak.create_key(c)
+    _, kc2 = ak.create_key(c)
+    conn.execute("UPDATE api_keys SET last_used_ts=? WHERE id=?", (300.0, kc1["id"]))
+    conn.execute("UPDATE api_keys SET last_used_ts=? WHERE id=?", (500.0, kc2["id"]))
+    ak.revoke_key(kc2["id"])
+
+    m = ak.last_used_by_user()
+    assert m[a] == 250.0
+    assert b not in m            # never used -> absent, caller renders "—"
+    assert m[c] == 300.0         # 500.0 belonged to a now-revoked key
+
+
 # ---------------------------------------------------------------------------
 # create_key validation
 # ---------------------------------------------------------------------------

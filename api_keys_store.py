@@ -539,6 +539,23 @@ def active_key_counts() -> dict[str, int]:
     return {r["user_id"]: int(r["n"]) for r in rows}
 
 
+def last_used_by_user() -> dict[str, float]:
+    """Return {user_id: newest last_used_ts} across each user's non-revoked
+    keys, in one SQL roundtrip — the batched companion to active_key_counts()
+    for the user-card header's "last active" line + activity dot. Restricted
+    to non-revoked keys to match the header's "N active keys" framing; users
+    with no used active key are absent (caller treats missing as "no activity
+    → idle/—")."""
+    conn = _require_conn()
+    with _lock:
+        rows = conn.execute(
+            "SELECT user_id, MAX(last_used_ts) AS t FROM api_keys"
+            " WHERE revoked_ts IS NULL AND last_used_ts IS NOT NULL"
+            " GROUP BY user_id"
+        ).fetchall()
+    return {r["user_id"]: float(r["t"]) for r in rows}
+
+
 def get_key(key_id: str) -> dict[str, Any] | None:
     conn = _require_conn()
     with _lock:

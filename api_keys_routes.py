@@ -151,10 +151,17 @@ async def list_users_api() -> JSONResponse:
     # Annotate each user with their active key count for the card header.
     # Batched: one GROUP BY query instead of N list_keys() roundtrips.
     counts = api_keys_store.active_key_counts()
+    # Newest last_used_ts across each user's non-revoked keys — feeds the
+    # header's "last active" timestamp + activity dot (renderUser builds the
+    # header synchronously, before the per-user /keys fetch, so this can't be
+    # derived client-side from the rendered key cards). Same batched shape as
+    # the counts above.
+    last_used = api_keys_store.last_used_by_user()
     out = [
         {
             **u,
             "active_key_count": counts.get(u["id"], 0),
+            "last_used_ts": last_used.get(u["id"]),
             # permissions is already in `u` via _row_to_user_dict — keep
             # the canonical key name so the matrix UI can read it
             # directly without a second roundtrip.
@@ -498,6 +505,15 @@ _API_KEYS_HTML = r"""<!doctype html>
     font-size: var(--fs-md); }
   .user-usage .stat .k { color: var(--dim); font-size: var(--fs-xs);
     text-transform: lowercase; }
+  /* "last active" leads the strip: neutral mono timestamp (the cyan stays a
+     cue for the numeric aggregates), label first so it reads "last active
+     <when>". Updated live by timeTick() via the [data-ts] span metaWhen emits. */
+  .user-usage .stat.lastact .v { color: var(--fg); font-size: var(--fs-sm); }
+  /* User-level activity dot in the header: reuses .kdot (green = any non-
+     revoked key used in the last 15 min, grey = idle), decayed by the same
+     30s _refreshApiKeyDots timer via data-used-ts. flex:none keeps its size
+     as a flex child of the h3 header row (.card h3 is display:flex). */
+  .user-head .kdot { flex: none; }
   /* Buttons inside <main>: a quiet ghost baseline so nothing is ever browser-
      default, plus filled .primary and red .danger — mirrors the /pipeline
      button language. (Modal + header + matrix buttons carry their own,
@@ -986,6 +1002,28 @@ _API_KEYS_HTML = r"""<!doctype html>
   // fill (none=grey, own=blue, all=amber). Clicking sets active + marks the
   // row dirty (same effect the old select.change had). Shared .status-btn-group
   // styling comes from web_common.NAV_CSS.
+  // Saved-state signature for one permission row: the segmented page scopes
+  // plus the (order-insensitive) quick-config tag set, canonicalised to a
+  // string. recomputePermDirty() compares the live row against the baseline
+  // captured at render / after a successful save — so reverting an edit back
+  // to the saved value clears the dirty tint + Save affordance, instead of
+  // latching dirty on the first change (which left Save lit even when nothing
+  // actually differed from what was saved).
+  function permRowState(tr) {
+    var pages = {};
+    tr.querySelectorAll('.status-btn-group[data-page]').forEach(function(g) {
+      var act = g.querySelector('.status-btn.active');
+      pages[g.dataset.page] = act ? act.dataset.val : 'none';
+    });
+    var canon = {};
+    Object.keys(pages).sort().forEach(function(k) { canon[k] = pages[k]; });
+    var tags = tr._tagPicker ? tr._tagPicker.getTags().slice().sort() : [];
+    return JSON.stringify({ pages: canon, tags: tags });
+  }
+  function recomputePermDirty(tr) {
+    tr.classList.toggle('dirty', permRowState(tr) !== tr._permBaseline);
+  }
+
   var SCOPE_LABEL = { none: 'None', own: 'Own', all: 'All' };
   function _permSeg(page, allowed, cur, tr) {
     var grp = document.createElement('span');
@@ -1009,7 +1047,7 @@ _API_KEYS_HTML = r"""<!doctype html>
         });
         b.classList.add('active');
         b.setAttribute('aria-checked', 'true');
-        tr.classList.add('dirty');
+        recomputePermDirty(tr);
       });
       grp.appendChild(b);
     });
@@ -1152,7 +1190,7 @@ _API_KEYS_HTML = r"""<!doctype html>
           available: availableTags,
           placeholder: '+ tag',
           onChange: function(newTags) {
-            tr.classList.add('dirty');
+            recomputePermDirty(tr);
             _refreshPreview(newTags);
           },
         });
@@ -1176,6 +1214,9 @@ _API_KEYS_HTML = r"""<!doctype html>
       }
       tr.appendChild(tdSave);
 
+      // Snapshot the saved state now that every cell (segments + tag picker)
+      // is attached; subsequent edits diff against this.
+      tr._permBaseline = permRowState(tr);
       tbody.appendChild(tr);
     });
     table.appendChild(tbody);
@@ -1200,7 +1241,9 @@ _API_KEYS_HTML = r"""<!doctype html>
         return r.json();
       })
       .then(function() {
-        tr.classList.remove('dirty');
+        // The just-saved state is the new baseline; recompute clears dirty.
+        tr._permBaseline = permRowState(tr);
+        recomputePermDirty(tr);
         showToast('Permissions saved', 'ok');
       })
       .catch(function(e) {
@@ -1261,6 +1304,17 @@ _API_KEYS_HTML = r"""<!doctype html>
     var chev = document.createElement('span');
     chev.className = 'uchev'; chev.textContent = '▸';
     head.appendChild(chev);
+    // User-level activity dot: green if ANY non-revoked key was used in the
+    // last 15 min (max last_used_ts over the user's keys, server-computed).
+    // data-used-ts opts it into the same 30s refreshKeyDots() decay timer as
+    // the per-key dots; dotClassFor() never returns 'dead' here (no ts → idle).
+    var udotCls = dotClassFor(u.last_used_ts);
+    var udot = document.createElement('span');
+    udot.className = 'kdot ' + udotCls;
+    if (u.last_used_ts) udot.setAttribute('data-used-ts', u.last_used_ts);
+    udot.title = udotCls === 'live'
+      ? 'a key was used in the last 15 min' : 'no recent key use';
+    head.appendChild(udot);
     var nameEl = document.createElement('span');
     nameEl.textContent = u.username;
     head.appendChild(nameEl);
@@ -1277,7 +1331,7 @@ _API_KEYS_HTML = r"""<!doctype html>
     // space beside the name instead of crowding a line below.
     var usageStrip = document.createElement('div');
     usageStrip.innerHTML = userUsageHtml(
-      (window.__usage && window.__usage.by_user || {})[u.id]);
+      (window.__usage && window.__usage.by_user || {})[u.id], u.last_used_ts);
     head.appendChild(usageStrip.firstChild);
     head.onclick = function () {
       var open = !card.classList.contains('open');
@@ -1578,17 +1632,20 @@ _API_KEYS_HTML = r"""<!doctype html>
               stat.errors ? 'err' : '')
       + '</div>';
   }
-  // One-line lifetime summary strip under a user card header.
-  function userUsageHtml(stat) {
-    if (!stat || !stat.requests) {
-      return '<div class="user-usage"><span class="hint">No usage recorded yet.</span></div>';
-    }
-    return '<div class="user-usage">'
-      + _stat(fmtCount(stat.requests), 'requests')
-      + _stat(fmtCount(stat.words), 'words')
-      + _stat(fmtDuration(stat.audio_s), 'audio')
-      + _stat(fmtErrRate(stat.requests, stat.errors), 'errors')
-      + '</div>';
+  // One-line activity + lifetime summary strip under a user card header.
+  // "last active" leads (always shown, even before any usage is rolled up);
+  // the lifetime aggregates follow when present. lastUsedTs is the newest
+  // last_used_ts across the user's non-revoked keys (server-computed).
+  function userUsageHtml(stat, lastUsedTs) {
+    var lastact = '<span class="stat lastact"><span class="k">last active</span>'
+      + '<span class="v">' + metaWhen(lastUsedTs) + '</span></span>';
+    var rest = (!stat || !stat.requests)
+      ? '<span class="hint">No usage recorded yet.</span>'
+      : (_stat(fmtCount(stat.requests), 'requests')
+         + _stat(fmtCount(stat.words), 'words')
+         + _stat(fmtDuration(stat.audio_s), 'audio')
+         + _stat(fmtErrRate(stat.requests, stat.errors), 'errors'));
+    return '<div class="user-usage">' + lastact + rest + '</div>';
   }
 
   // ---- per-identity config binding drawer (overrides) ----
@@ -1693,6 +1750,30 @@ _API_KEYS_HTML = r"""<!doctype html>
     var b = opts.binding;
     var root = document.createElement('div'); root.className = 'cfg-drawer';
     function rerender() { root.innerHTML = ''; draw(); }
+    // Dirty-gating: snapshot the binding on open and keep "Save overrides"
+    // disabled until the live binding actually differs from it (mirrors the
+    // /settings/overrides page's snapshot-compare). Arrays whose order is
+    // immaterial (locks, the requestable allowlist) are sorted before
+    // comparison; the profiles order is meaningful (earlier wins) and kept
+    // as-is. allowed_override_profiles keeps null (=inherit) distinct from []
+    // (=none). Every rerender() rebuilds the footer and re-evaluates this;
+    // the few mutation paths that DON'T rerender call _syncSave() directly.
+    function _sig(x) {
+      var ov = {};
+      Object.keys(x.overrides || {}).sort().forEach(function (k) { ov[k] = x.overrides[k]; });
+      return JSON.stringify({
+        overrides: ov,
+        profiles: (x.profiles || []),
+        locks: (x.locks || []).slice().sort(),
+        arop: x.allow_request_override_profile,
+        ardo: x.allow_request_decode_overrides,
+        aop: x.allowed_override_profiles == null
+          ? null : x.allowed_override_profiles.slice().sort(),
+      });
+    }
+    var _baseline = _sig(b);
+    var _saveBtn = null;
+    function _syncSave() { if (_saveBtn) _saveBtn.disabled = (_sig(b) === _baseline); }
     // UI intent: a freshly-chosen but still-empty "Restrict to…" allowlist has
     // the same data ([]) as "None". Without this sticky flag the dropdown would
     // snap back to "None" on rerender and the checkbox grid (the only way to add
@@ -1744,7 +1825,7 @@ _API_KEYS_HTML = r"""<!doctype html>
       sec.appendChild(_triRow('Allow custom decode params', 'decode_overrides',
         'May this identity send inline per-request decode_overrides?',
         b.allow_request_decode_overrides,
-        function (v) { b.allow_request_decode_overrides = v; }));
+        function (v) { b.allow_request_decode_overrides = v; _syncSave(); }));
 
       // Allowlist of requestable profiles: null=inherit(all), ['*']=all, []=none,
       // [names]=restrict.
@@ -1794,6 +1875,7 @@ _API_KEYS_HTML = r"""<!doctype html>
             var i = b.allowed_override_profiles.indexOf(n);
             if (cb.checked && i < 0) b.allowed_override_profiles.push(n);
             else if (!cb.checked && i >= 0) b.allowed_override_profiles.splice(i, 1);
+            _syncSave();
           };
           lab.appendChild(cb);
           lab.appendChild(document.createTextNode(' ' + n));
@@ -1844,7 +1926,7 @@ _API_KEYS_HTML = r"""<!doctype html>
         var row = document.createElement('div'); row.className = 'cfg-ovr-row';
         var nm = document.createElement('span'); nm.className = 'nm'; nm.textContent = name; row.appendChild(nm);
         var vc = document.createElement('span');
-        vc.appendChild(_cfgWidget(name, b.overrides[name], function (v) { if (v !== null) b.overrides[name] = v; }));
+        vc.appendChild(_cfgWidget(name, b.overrides[name], function (v) { if (v !== null) b.overrides[name] = v; _syncSave(); }));
         row.appendChild(vc);
         var on = b.locks.indexOf(name) >= 0;
         var lk = document.createElement('button'); lk.className = 'lk' + (on ? ' on' : '');
@@ -1868,6 +1950,8 @@ _API_KEYS_HTML = r"""<!doctype html>
       var prev = document.createElement('button'); prev.className = 'ghost'; prev.textContent = '⟲ Preview effective';
       var spacer = document.createElement('span'); spacer.className = 'spacer';
       var save = document.createElement('button'); save.className = 'primary'; save.textContent = 'Save overrides';
+      _saveBtn = save;
+      save.disabled = (_sig(b) === _baseline);   // nothing changed yet → off
       save.onclick = function () {
         save.disabled = true;
         opts.save({
@@ -1878,7 +1962,9 @@ _API_KEYS_HTML = r"""<!doctype html>
         })
           .then(function () { showToast('Overrides saved', 'ok'); load(); })
           .catch(function (er) { showToast(String(er.message || er), 'err'); })
-          .finally(function () { save.disabled = false; });
+          // On success load() tears the drawer down; on failure the binding is
+          // still dirty, so re-enable only if it genuinely differs.
+          .finally(function () { _syncSave(); });
       };
       foot.appendChild(prev); foot.appendChild(spacer); foot.appendChild(save);
       root.appendChild(foot);
