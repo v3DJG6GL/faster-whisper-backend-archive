@@ -566,6 +566,12 @@ RECENT_TRANSCRIPTIONS_TTL_DAYS = _D("RECENT_TRANSCRIPTIONS_TTL_DAYS")
 # server-side LIMIT, so a hostile client can't request a huge page.
 RECENT_TRANSCRIPTIONS_PAGE_SIZE = _D("RECENT_TRANSCRIPTIONS_PAGE_SIZE")
 
+# How many of the NEWEST spoken-symbol (callback:map) entries the /quick-config
+# rule editor shows before collapsing the rest behind a "show older" toggle. Also
+# served to the desktop client (Dictionary) via /v1/pipeline-rules so both UIs
+# agree. 0 = show all (no collapse).
+QUICK_CONFIG_MAP_COLLAPSE_AFTER: int = _D("QUICK_CONFIG_MAP_COLLAPSE_AFTER")
+
 # Lazy-prune cadence — every Nth insert runs a single DELETE that
 # enforces both the row cap and the TTL. 0 disables lazy pruning (rows
 # accumulate until a manual /clear or service restart sweep). 50 is the

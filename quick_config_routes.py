@@ -357,7 +357,12 @@ async def v1_get_pipeline_rules(
     PATCH. User-tier auth (any valid key); 403 if the caller's quick_config page
     scope is "none". No host allowlist (unlike the /quick-config WebUI)."""
     rules, role = build_visible_rules(user)
-    return {"rules": rules, "role": role, "editable_fields": editable_fields_map()}
+    return {
+        "rules": rules,
+        "role": role,
+        "editable_fields": editable_fields_map(),
+        "map_collapse_after": int(getattr(cfg, "QUICK_CONFIG_MAP_COLLAPSE_AFTER", 15)),
+    }
 
 
 @v1_router.patch("/pipeline-rules")
@@ -453,6 +458,7 @@ async def get_state(
         "rules": canonical,
         "role": role,
         "reported_chips": reported_chips,
+        "map_collapse_after": int(getattr(cfg, "QUICK_CONFIG_MAP_COLLAPSE_AFTER", 15)),
     }
 
 
@@ -1181,7 +1187,7 @@ function renderCards() {
       makeSaveBtn: () => _buildPerCardSaveBtn(slug),
       commitOnEnter: doSave,
       showMapDates: true,
-      collapseMapAfter: 15,
+      collapseMapAfter: (window.__mca ?? 15),
     });
     card.appendChild(editor);
 
@@ -2177,6 +2183,9 @@ async function load() {
   }
   const j = await r.json();
   initialRules = j.rules || [];
+  // Newest-cb:map-entries-shown threshold, sourced from the backend config
+  // (QUICK_CONFIG_MAP_COLLAPSE_AFTER) so the page + desktop client agree.
+  window.__mca = (typeof j.map_collapse_after === 'number') ? j.map_collapse_after : 15;
   liveRules = JSON.parse(JSON.stringify(initialRules));
   dirty = new Set();
   // role: "admin" reveals .admin-only nav links + sev pills. Non-admin keys
