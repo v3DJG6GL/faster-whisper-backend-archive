@@ -844,6 +844,18 @@ _API_KEYS_HTML = r"""<!doctype html>
 (function() {
   'use strict';
 
+  // Leading glyph for every key card's rail. A line-art key whose stroke uses
+  // currentColor, so it inherits the rail's var(--dim) tone and sits at the
+  // same weight as the page's other glyphs (✎ ⚙ ▸) — unlike a colour emoji.
+  var KEY_ICON_SVG =
+    '<svg viewBox="0 0 24 24" width="1.15em" height="1.15em" fill="none"'
+    + ' stroke="currentColor" stroke-width="1.7" stroke-linecap="round"'
+    + ' stroke-linejoin="round" aria-hidden="true">'
+    + '<path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1'
+    + 'v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586'
+    + 'l.814-.814a6.5 6.5 0 1 0-4-4z"/>'
+    + '<circle cx="16.5" cy="7.5" r=".6" fill="currentColor"/></svg>';
+
   // Sign-in is handled by the shared full-screen login gate (web_common):
   // on a 401 we call window._showLoginGate(), which prompts + reloads.
   async function api(method, path, body) {
@@ -1461,7 +1473,7 @@ _API_KEYS_HTML = r"""<!doctype html>
       : (dotCls === 'live' ? 'used in the last 15 min' : 'no recent use');
     var rail = document.createElement('div');
     rail.className = 'krail';
-    rail.innerHTML = '<span aria-hidden="true">🔑</span>'
+    rail.innerHTML = KEY_ICON_SVG
       + '<span class="kdot ' + dotCls + '"'
       + (revoked ? '' : ' data-used-ts="' + (k.last_used_ts || 0) + '"')
       + ' title="' + dotTitle + '"></span>';
