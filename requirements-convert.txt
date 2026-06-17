@@ -8,7 +8,7 @@ transformers>=5.12.1
 
 # transformers' from_pretrained() needs torch for tensor materialisation.
 # CPU-only is fine — conversion never touches CUDA.
-torch>=2.12.0
+torch>=2.12.1
 
 # Enables `low_cpu_mem_usage=True` and sharded loading; cuts peak RAM ~half.
 accelerate>=1.14.0
