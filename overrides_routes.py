@@ -373,6 +373,14 @@ _OVERRIDES_HTML = r"""<!doctype html>
   .hint { color: var(--help); font-size: var(--fs-sm); margin: 0.3rem 0 0; }
   .status { font-size: var(--fs-sm); color: var(--dim); margin-left: 0.5rem; }
   .status.ok { color: var(--green); } .status.err { color: var(--red); }
+  /* contained intro / help banner (was bare floating text) */
+  .ov-intro { border: 1px solid var(--border); border-radius: 9px;
+    background: linear-gradient(180deg, #12171f, var(--panel));
+    padding: 0.6rem 0.85rem; margin-bottom: 1rem; color: var(--help);
+    font-size: var(--fs-sm); line-height: 1.55; }
+  .ov-intro p { margin: 0; }
+  .ov-intro #ov-globals { margin-top: 0.3rem; }
+  .ov-intro .lk { width: 0.9em; height: 0.9em; vertical-align: -0.12em; color: var(--yellow); }
   /* subbar tabs */
   .ov-tab { background: transparent; border: 1px solid var(--border);
     color: var(--dim); padding: 0.2rem 0.7rem; border-radius: 999px;
@@ -565,19 +573,27 @@ _OVERRIDES_HTML = r"""<!doctype html>
 
 <main>
   <section id="panel-profiles">
-    <p class="hint">Reusable config profiles. Assign them (ordered, earlier
-      wins) to users &amp; API keys on the <a href="/settings/api-keys">API keys</a>
-      page. A &#128274; field cannot be overridden per-request by the client.</p>
-    <div id="ov-globals" class="hint"></div>
+    <div class="ov-intro">
+      <p>Reusable config profiles. Assign them (ordered, earlier wins) to users
+        &amp; API keys on the <a href="/settings/api-keys">API keys</a> page. A
+        <svg class="lk" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor"
+          stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><rect x="5"
+          y="11" width="14" height="9.5" rx="2"/><path d="M8 11V7.5a4 4 0 0 1 8 0V11"
+          fill="none"/></svg>
+        field cannot be overridden per-request by the client.</p>
+      <div id="ov-globals"></div>
+    </div>
     <div class="ov-wrap">
       <div class="ov-side" id="profile-list"></div>
       <div class="ov-main" id="profile-main"></div>
     </div>
   </section>
   <section id="panel-explorer" hidden>
-    <p class="hint">What-if: pick who is resolving and (optionally) a hypothetical
-      client override to see how every setting resolves &mdash; which layer wins,
-      what is overridden, and what is locked.</p>
+    <div class="ov-intro">
+      <p>What-if: pick who is resolving and (optionally) a hypothetical client
+        override to see how every setting resolves &mdash; which layer wins, what
+        is overridden, and what is locked.</p>
+    </div>
     <div class="ex-grid">
       <div class="ex-card identity">
         <div class="eh"><span class="lab"><b>Identity</b> &mdash; who is resolving</span></div>
