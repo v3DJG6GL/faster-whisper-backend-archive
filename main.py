@@ -206,6 +206,12 @@ class _CompiledRule:
     pattern: "re.Pattern[str]"
     payload: object
     enabled: bool
+    # 1-based position of this rule's CARD in cfg.PIPELINE_RULES (terminal card
+    # included) — identical to the /settings/pipeline card ordinal. `sub_no` is
+    # the 1-based entry row within a regex-list card (None for single-compile
+    # rules). Together they drive the `#P` / `#P.S` trace step number.
+    card_no: int
+    sub_no: "int | None" = None
 
 
 _COMPILED_RULES: list[_CompiledRule] = []
@@ -216,6 +222,17 @@ _COMPILED_RULES: list[_CompiledRule] = []
 # CAPTURES_PIPELINE_RULES_EXCLUDE).
 _TERMINAL_NAME: str = "trim-edges"
 _TERMINAL_LABEL: str = "Trim edges (always-last)"
+# 1-based card position of the terminal trim, captured at rebuild time so its
+# trace step number matches the /settings/pipeline card ordinal. Falls back to
+# len(PIPELINE_RULES)+1 when the user deleted the terminal row.
+_TERMINAL_CARD_NO: int = 0
+
+
+def _rule_ordinal(card_no: int, sub_no: "int | None" = None) -> str:
+    """Format a pipeline step number to match the /settings/pipeline card
+    position: '#P' for a single-compile rule, '#P.S' for a regex-list entry
+    (S = the entry's 1-based row within that card)."""
+    return f"#{card_no}.{sub_no}" if sub_no else f"#{card_no}"
 
 
 def _dedup_callback(match: "re.Match[str]") -> str:
@@ -282,15 +299,17 @@ def rebuild_caches() -> None:
     usually catches these, but a hand-edited config.py or a runtime
     catastrophic-backtracking case might surface here).
     """
-    global _COMPILED_RULES, _TERMINAL_NAME, _TERMINAL_LABEL
+    global _COMPILED_RULES, _TERMINAL_NAME, _TERMINAL_LABEL, _TERMINAL_CARD_NO
     compiled: list[_CompiledRule] = []
     terminal_name = _TERMINAL_NAME
     terminal_label = _TERMINAL_LABEL
-    for rule in cfg.PIPELINE_RULES:
+    terminal_card_no = len(cfg.PIPELINE_RULES) + 1
+    for card_no, rule in enumerate(cfg.PIPELINE_RULES, start=1):
         rtype = rule.get("type")
         if rtype == "terminal":
             terminal_name = rule.get("name", terminal_name)
             terminal_label = rule.get("label", terminal_label)
+            terminal_card_no = card_no
             continue
         rule_enabled = bool(rule.get("enabled", True))
 
@@ -303,7 +322,7 @@ def rebuild_caches() -> None:
         if rtype == "regex-list":
             rname = rule.get("name", "?")
             rlabel = rule.get("label", rname)
-            for entry in rule.get("entries", []) or []:
+            for sub_no, entry in enumerate(rule.get("entries", []) or [], start=1):
                 epat = entry.get("pattern", "")
                 if not epat:
                     continue
@@ -313,10 +332,13 @@ def rebuild_caches() -> None:
                     logger.warning("[pipeline] rule %r entry has invalid regex "
                                    "(%s) — skipping entry", rname, e)
                     continue
+                # sub_no is the entry's row in the card editor (the enumerate index
+                # advances across skipped empty/bad entries above), so the trace
+                # number `#card_no.sub_no` lines up with what the admin sees.
                 compiled.append(_CompiledRule(
                     rname, f"{rlabel} · {entry.get('label') or epat}",
                     "regex-list", ecre, entry.get("replacement", "") or "",
-                    rule_enabled))
+                    rule_enabled, card_no, sub_no))
             continue
 
         try:
@@ -355,10 +377,11 @@ def rebuild_caches() -> None:
             continue
         compiled.append(_CompiledRule(rule.get("name", "?"),
                                        rule.get("label", rule.get("name", "?")),
-                                       rtype, cre, payload, rule_enabled))
+                                       rtype, cre, payload, rule_enabled, card_no))
     _COMPILED_RULES = compiled
     _TERMINAL_NAME = terminal_name
     _TERMINAL_LABEL = terminal_label
+    _TERMINAL_CARD_NO = terminal_card_no
 
 
 def _apply_rule(rule: _CompiledRule, text: str) -> str:
@@ -423,7 +446,10 @@ def _postprocess_text(text: str, model_name: "str | None" = None,
                 include = set(inc)
     if extra_excludes:
         exclude = exclude | extra_excludes
-    for ordinal, rule in enumerate(_COMPILED_RULES, start=1):
+    for rule in _COMPILED_RULES:
+        # Step number mirrors the /settings/pipeline card position (`#P` / `#P.S`),
+        # NOT the flat index over the expanded compiled list.
+        ordinal = _rule_ordinal(rule.card_no, rule.sub_no)
         # Force-EXCLUDE wins outright — admin explicitly turned this off.
         if rule.name in exclude:
             if trace is not None:
@@ -453,7 +479,7 @@ def _postprocess_text(text: str, model_name: "str | None" = None,
                 )
             elif before != text:
                 trace.append((f"{ordinal} {rule.label}", before, text))
-    term_ordinal = len(_COMPILED_RULES) + 1
+    term_ordinal = _rule_ordinal(_TERMINAL_CARD_NO)
     if _TERMINAL_NAME in exclude:
         if trace is not None:
             trace.append(
@@ -2243,7 +2269,8 @@ async def transcribe(
                 _wrap_before = full_text_str
                 full_text_str = _output_prefix + full_text_str + _output_suffix
                 if trace is not None and _wrap_before != full_text_str:
-                    trace.append((f"{len(_COMPILED_RULES) + 2} output-wrapper",
+                    # Trailer step — not a rule card, so no `#N` prefix.
+                    trace.append(("output-wrapper",
                                   _wrap_before, full_text_str))
             # Post-wrapper trim — strips whitespace that the wrapper config
             # itself may carry. Runs unconditionally (the per-model exclude
@@ -2254,7 +2281,10 @@ async def transcribe(
             before_trim = full_text_str
             full_text_str = full_text_str.lstrip(" \t\r").rstrip(" \t\r")
             if trace is not None and before_trim != full_text_str:
-                trace.append((f"{len(_COMPILED_RULES) + 3} {_TERMINAL_LABEL}",
+                # Defensive trim AFTER the output wrappers — distinct from the
+                # in-pipeline terminal trim (which already carried `#{card}`),
+                # so use a distinct unnumbered label to avoid a duplicate line.
+                trace.append(("Trim edges (post-wrapper)",
                               before_trim, full_text_str))
 
             # request_id was generated at handler entry (so the outer
