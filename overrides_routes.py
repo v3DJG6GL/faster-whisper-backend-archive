@@ -343,8 +343,8 @@ _OVERRIDES_HTML = r"""<!doctype html>
   :root {
     --bg: #0d1117; --panel: #161b22; --fg: #c9d1d9; --dim: #6e7681;
     --cyan: #79c0ff; --green: #7ee787; --yellow: #f2cc60; --magenta: #d2a8ff;
-    --red: #ff7b72; --bold: #f0f6fc; --border: #30363d; --input-bg: #0d1117;
-    --help: #8b949e;
+    --red: #ff7b72; --bold: #f0f6fc; --border: #30363d; --border2: #3d444d;
+    --input-bg: #0d1117; --help: #8b949e;
   }
   html, body { background: var(--bg); color: var(--fg);
     font-family: var(--font-sans); font-size: var(--fs-base); margin: 0; }
@@ -355,6 +355,20 @@ _OVERRIDES_HTML = r"""<!doctype html>
     cursor: pointer; font: inherit; font-size: var(--fs-sm); }
   header button.primary { color: var(--green); border-color: var(--green); }
   header button:disabled { opacity: 0.45; cursor: default; }
+  /* shared main-area button system (mirrors /settings/api-keys) */
+  main button { font: inherit; font-size: var(--fs-sm); cursor: pointer;
+    line-height: 1.3; white-space: nowrap; border-radius: 6px; padding: 0.3rem 0.65rem;
+    display: inline-flex; align-items: center; gap: 0.35rem; background: #21262d;
+    color: var(--fg); border: 1px solid var(--border);
+    transition: background 120ms ease, border-color 120ms ease, color 120ms ease; }
+  main button:hover:not(:disabled) { background: #30363d; border-color: #484f58; }
+  main button:disabled { opacity: 0.45; cursor: not-allowed; }
+  main button.primary { background: #238636; border-color: #2ea043; color: var(--bold); }
+  main button.primary:hover:not(:disabled) { background: #2ea043; }
+  main button.ghost { background: transparent; color: var(--dim); border-color: transparent; }
+  main button.ghost:hover:not(:disabled) { background: #1f2630; border-color: var(--border2); color: var(--fg); }
+  main button.danger { background: transparent; color: var(--red); border-color: transparent; }
+  main button.danger:hover:not(:disabled) { background: #3a0d0d; border-color: #5a2424; }
   main { padding: 1rem; max-width: 78rem; margin: 0 auto; }
   .hint { color: var(--help); font-size: var(--fs-sm); margin: 0.3rem 0 0; }
   .status { font-size: var(--fs-sm); color: var(--dim); margin-left: 0.5rem; }
@@ -365,71 +379,127 @@ _OVERRIDES_HTML = r"""<!doctype html>
     cursor: pointer; font: inherit; font-size: var(--fs-sm); }
   .ov-tab.active { color: var(--bold); border-color: var(--cyan); }
   /* master-detail */
-  .ov-wrap { display: grid; grid-template-columns: 16rem 1fr; gap: 0.75rem; }
-  .ov-side { display: flex; flex-direction: column; gap: 0.25rem;
-    border: 1px solid var(--border); border-radius: 4px; padding: 0.5rem;
+  .ov-wrap { display: grid; grid-template-columns: 17rem 1fr; gap: 1rem; align-items: start; }
+  .ov-side { display: flex; flex-direction: column; gap: 0.15rem;
+    border: 1px solid var(--border); border-radius: 9px; padding: 0.5rem;
     background: var(--panel); align-self: start; }
-  .ov-item { display: flex; align-items: center; gap: 0.4rem; cursor: pointer;
-    padding: 0.3rem 0.4rem; border-radius: 4px; border: 1px solid transparent; }
+  .ov-side-h { display: flex; align-items: center; justify-content: space-between;
+    padding: 0.1rem 0.35rem 0.4rem; color: var(--dim); font-size: var(--fs-xs);
+    text-transform: uppercase; letter-spacing: 0.04em; }
+  .ov-item { display: flex; align-items: center; gap: 0.5rem; cursor: pointer;
+    padding: 0.4rem 0.5rem; border-radius: 7px; border: 1px solid transparent; }
   .ov-item:hover { background: #1c2230; }
-  .ov-item.active { border-color: var(--cyan); background: #1c2230; }
+  .ov-item.active { border-color: var(--border2); background: #1c2230; }
   .ov-item .nm { flex: 1; font-family: var(--font-mono);
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ov-item.active .nm { color: var(--bold); }
   .ov-dot { width: 0.6rem; flex: 0 0 auto; }
   .ov-dot.on { color: var(--green); } .ov-dot.off { color: var(--dim); }
   .ov-count { font-size: var(--fs-xs); color: var(--dim);
     font-family: var(--font-mono); }
   .ov-usage { font-size: var(--fs-xs); color: var(--dim);
-    padding: 0.2rem 0.4rem; border-top: 1px solid var(--border);
-    margin-top: 0.3rem; }
-  .ov-side-actions { display: flex; gap: 0.3rem; flex-wrap: wrap;
-    margin-top: 0.3rem; }
-  .ov-side-actions button, .ov-new-input { font: inherit;
-    font-size: var(--fs-sm); }
-  .ov-main { border: 1px solid var(--border); border-radius: 4px;
-    background: var(--panel); padding: 0.6rem 0.85rem; min-height: 8rem; }
-  .ov-empty { color: var(--dim); padding: 2rem 1rem; text-align: center; }
-  .ov-sec > h4 { margin: 0.8rem 0 0.3rem; font-size: var(--fs-sm);
-    color: var(--bold); border-bottom: 1px solid var(--border);
-    padding-bottom: 0.2rem; }
-  .ov-sec:first-child > h4 { margin-top: 0.2rem; }
-  /* field row: dot | name | value | lock | ctrl */
+    padding: 0.25rem 0.55rem 0.15rem; margin: 0.1rem 0 0.3rem;
+    border-left: 2px solid var(--border2); }
+  .ov-side-actions { display: flex; gap: 0.2rem; flex-wrap: wrap;
+    padding-top: 0.5rem; margin-top: 0.3rem; border-top: 1px solid var(--border); }
+  .ov-side-actions button { padding: 0.25rem 0.5rem; font-size: var(--fs-xs); }
+  .ov-confirm { display: inline-flex; align-items: center; gap: 0.3rem;
+    font-size: var(--fs-xs); color: var(--red); }
+  /* inline add / rename (replaces prompt) */
+  .ov-inline { display: flex; align-items: center; padding: 0.3rem 0.1rem 0; }
+  .ov-inline-edit { display: flex; align-items: center; gap: 0.25rem; flex: 1; min-width: 0; }
+  .ov-edit-input { flex: 1; min-width: 4rem; box-sizing: border-box;
+    background: var(--input-bg); color: var(--bold); border: 1px solid var(--cyan);
+    border-radius: 6px; padding: 0.25rem 0.45rem; font: inherit;
+    font-size: var(--fs-sm); font-family: var(--font-mono); }
+  .icon-btn { background: none; border: 1px solid transparent; border-radius: 6px;
+    padding: 0.2rem 0.3rem; color: var(--dim); display: inline-flex; align-items: center;
+    cursor: pointer; font-size: var(--fs-sm); line-height: 1; }
+  .icon-btn:hover { background: #1f2630; color: var(--fg); }
+  .icon-btn.ok { color: var(--green); }
+  .ov-main { padding: 0; min-height: 8rem; }
+  .ov-empty { color: var(--dim); padding: 2rem 1rem; text-align: center;
+    border: 1px solid var(--border); border-radius: 9px; background: var(--panel); }
+  .ov-pane-head { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.85rem; }
+  .ov-pane-head .pname { font-family: var(--font-mono); color: var(--bold);
+    font-size: var(--fs-lg); }
+  /* section cards */
+  .ov-sec { border: 1px solid var(--border); border-radius: 9px;
+    background: var(--panel); overflow: hidden; margin-bottom: 0.9rem; }
+  .ov-sec:last-child { margin-bottom: 0; }
+  .ov-sec > h4 { margin: 0; padding: 0.5rem 0.8rem; background: #12171f;
+    border-bottom: 1px solid var(--border); color: var(--bold);
+    font-size: var(--fs-md); font-weight: 600; display: flex;
+    align-items: baseline; gap: 0.5rem; }
+  .ov-sec-sub { color: var(--dim); font-size: var(--fs-xs); font-weight: 400; }
+  .ov-sec-b { padding: 0.2rem 0.8rem 0.45rem; }
+  .ov-help { color: var(--help); font-size: var(--fs-xs); line-height: 1.5;
+    margin-top: 0.15rem; }
+  .ov-access-row { display: flex; align-items: center; gap: 0.6rem; padding: 0.35rem 0 0.2rem; }
+  .ov-access-row label { font-size: var(--fs-sm); color: var(--fg); cursor: pointer; }
+  /* field row: dot | name | value | lock | ctrl — hairline dividers + hover */
   .ov-row { display: grid;
-    grid-template-columns: 0.8rem minmax(11rem, 1fr) minmax(8rem, 1.4fr) 1.6rem 5.2rem;
-    align-items: center; gap: 0.4rem; padding: 0.18rem 0; }
+    grid-template-columns: 0.8rem minmax(11rem, 1fr) minmax(8rem, 1.4fr) 2rem 5.2rem;
+    align-items: center; gap: 0.4rem; padding: 0.32rem 0;
+    border-bottom: 1px solid rgba(255,255,255,0.055); }
+  .ov-row:hover { background: rgba(255,255,255,0.025); }
+  .ov-sec-b > .ov-row:last-child, .ov-sec-b > .ov-rule:last-child { border-bottom: 0; }
   .ov-row .ov-name { font-family: var(--font-mono); font-size: var(--fs-sm);
-    color: var(--fg); overflow: hidden; text-overflow: ellipsis; }
+    color: var(--dim); overflow: hidden; text-overflow: ellipsis; }
   .ov-row.is-set .ov-name { color: var(--bold); }
   .ov-val input[type=text], .ov-val input[type=number], .ov-val select {
     width: 100%; box-sizing: border-box; background: var(--input-bg);
-    color: var(--fg); border: 1px solid var(--border); border-radius: 4px;
-    padding: 0.15rem 0.35rem; font-family: var(--font-mono);
+    color: var(--fg); border: 1px solid var(--border); border-radius: 6px;
+    padding: 0.2rem 0.4rem; font-family: var(--font-mono);
     font-size: var(--fs-sm); }
   .ov-inherits { color: var(--dim); font-size: var(--fs-xs);
-    font-family: var(--font-mono); }
-  .ov-lock { background: none; border: 0; cursor: pointer; font-size: var(--fs-sm);
-    color: var(--dim); padding: 0; }
+    font-family: var(--font-mono); font-style: italic; }
+  .ov-lock { background: none; border: 1px solid transparent; border-radius: 6px;
+    cursor: pointer; color: var(--dim); padding: 0.15rem; font-size: 1rem;
+    display: inline-flex; align-items: center; justify-content: center; }
+  .ov-lock svg { width: 1.1em; height: 1.1em; display: block; }
+  .ov-lock:hover:not(:disabled) { background: #1f2630; }
   .ov-lock.locked { color: var(--yellow); }
   .ov-lock:disabled { opacity: 0.3; cursor: default; }
+  .ov-ctrl { justify-self: end; }
   .ov-ctrl button { background: none; border: 0; cursor: pointer;
-    font-size: var(--fs-xs); color: var(--cyan); padding: 0; }
+    font-size: var(--fs-xs); color: var(--cyan); padding: 0.15rem 0.2rem; border-radius: 0; }
   .ov-ctrl .reset { color: var(--dim); }
   /* pipeline tri-state — label left, shared segmented control (inherit/on/off)
      right; .status-btn-group styling comes from web_common.NAV_CSS. */
   .ov-rule { display: grid; grid-template-columns: 1fr auto; align-items: center;
-    gap: 0.4rem; padding: 0.15rem 0; }
+    gap: 0.4rem; padding: 0.32rem 0; border-bottom: 1px solid rgba(255,255,255,0.055); }
+  .ov-rule:hover { background: rgba(255,255,255,0.025); }
   .ov-rule .rl { font-size: var(--fs-sm); }
   .ov-rule .rl .slug { font-family: var(--font-mono); color: var(--dim);
     font-size: var(--fs-xs); }
-  /* explorer */
-  .ov-expl-bar { display: flex; flex-wrap: wrap; gap: 0.5rem 0.75rem;
-    align-items: center; margin-bottom: 0.6rem; }
-  .ov-expl-bar label { font-size: var(--fs-sm); color: var(--dim); }
-  .ov-expl-bar select, .ov-sim { background: var(--input-bg); color: var(--fg);
-    border: 1px solid var(--border); border-radius: 4px; font: inherit;
-    font-size: var(--fs-sm); padding: 0.15rem 0.35rem; }
-  .ov-sim { font-family: var(--font-mono); width: 22rem; max-width: 100%; }
+  /* explorer — two labelled zones: Identity (who) + What-if (simulate) */
+  .ex-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1rem; }
+  .ex-card { border: 1px solid var(--border); border-radius: 9px; background: var(--panel); }
+  .ex-card.identity { border-left: 3px solid rgba(121,192,255,0.7);
+    background: linear-gradient(90deg, rgba(121,192,255,0.08), rgba(121,192,255,0.015) 55%), var(--panel); }
+  .ex-card.simulate { border-left: 3px solid rgba(210,153,34,0.75);
+    background: linear-gradient(90deg, rgba(210,153,34,0.08), rgba(210,153,34,0.015) 55%), var(--panel); }
+  .ex-card .eh { display: flex; align-items: center; gap: 0.5rem;
+    padding: 0.5rem 0.8rem; border-bottom: 1px solid var(--border); }
+  .ex-card .eh .lab { font-size: var(--fs-xs); text-transform: uppercase;
+    letter-spacing: 0.05em; color: var(--dim); }
+  .ex-card .eh .lab b { color: var(--bold); }
+  .badge-sim { font-size: var(--fs-xs); border: 1px dashed rgba(210,153,34,0.6);
+    color: var(--yellow); border-radius: 999px; padding: 0.02rem 0.45rem;
+    text-transform: uppercase; letter-spacing: 0.05em; margin-left: auto; }
+  .ex-card .eb { padding: 0.6rem 0.8rem 0.7rem; display: flex;
+    flex-direction: column; gap: 0.55rem; }
+  .ex-field { display: flex; flex-direction: column; gap: 0.2rem; }
+  .ex-field label { font-size: var(--fs-xs); color: var(--dim); }
+  .ex-field select, .ex-field input { width: 100%; box-sizing: border-box;
+    background: var(--input-bg); color: var(--fg); border: 1px solid var(--border);
+    border-radius: 6px; padding: 0.28rem 0.45rem; font: inherit; font-size: var(--fs-sm); }
+  .ex-field input.ov-sim { font-family: var(--font-mono); }
+  .ex-field .fhelp { color: var(--help); font-size: var(--fs-xs); line-height: 1.4; }
+  .ex-row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0.55rem; }
   .ov-sim.err { border-color: var(--red); }
+  @media (max-width: 56rem) { .ex-grid { grid-template-columns: 1fr; } }
   /* waterfall */
   .ov-wf { border: 1px solid var(--border); border-radius: 4px;
     margin: 0.4rem 0; background: var(--bg); }
@@ -439,25 +509,28 @@ _OVERRIDES_HTML = r"""<!doctype html>
   .ov-wf-name { font-family: var(--font-mono); color: var(--bold); }
   .ov-wf-win { font-size: var(--fs-sm); color: var(--dim); }
   .ov-wf-win code { color: var(--green); }
-  .ov-wf-lock { color: var(--yellow); }
+  .ov-wf-lock { color: var(--yellow); font-size: var(--fs-xs);
+    display: inline-flex; align-items: center; gap: 0.25rem; }
   .ov-wf-layers { list-style: none; margin: 0; padding: 0.2rem 0.3rem; }
   .ov-wf-layer { display: grid;
-    grid-template-columns: 1rem minmax(9rem, 1fr) minmax(5rem, 1fr) auto;
-    align-items: baseline; gap: 0.4rem; padding: 0.12rem 0.2rem;
-    border-bottom: 1px dashed #21262d; }
+    grid-template-columns: 1.1rem 14rem minmax(0, 1fr) auto;
+    align-items: baseline; gap: 0.5rem; padding: 0.16rem 0.3rem;
+    border-bottom: 1px solid rgba(255,255,255,0.05); }
   .ov-wf-layer:last-child { border-bottom: 0; }
-  .ov-wf-layer .lbl { font-size: var(--fs-sm); }
-  .ov-wf-layer .val { font-family: var(--font-mono); font-size: var(--fs-sm); }
-  .ov-wf-layer .flag { font-size: var(--fs-xs); }
-  .ov-wf-layer.win { border-left: 3px solid var(--green);
-    background: #11271a; padding-left: 0.3rem; }
+  .ov-wf-layer .lbl { font-size: var(--fs-sm); overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  .ov-wf-layer .val { font-family: var(--font-mono); font-size: var(--fs-sm);
+    text-align: left; word-break: break-word; }
+  .ov-wf-layer .flag { font-size: var(--fs-xs); text-align: right; white-space: nowrap; }
+  .ov-wf-layer.win { box-shadow: inset 3px 0 0 var(--green); background: #11271a; }
   .ov-wf-layer.win .lbl { color: var(--bold); } .ov-wf-layer.win .val { color: var(--green); }
   .ov-wf-layer.over .val { opacity: 0.5; text-decoration: line-through; }
   .ov-wf-layer.over .lbl { opacity: 0.6; }
   .ov-wf-layer.unset .val { color: var(--dim); font-style: italic; }
   .ov-wf-layer.sim .lbl { color: var(--cyan); }
   .ov-wf-layer.sim.ignored .flag { color: var(--red); }
-  .ov-wf-layer .flag.locked { color: var(--yellow); }
+  .ov-wf-layer .flag.locked { color: var(--yellow); display: inline-flex;
+    align-items: center; gap: 0.2rem; }
   .ov-wf-tick { color: var(--green); }
   @media (prefers-reduced-motion: no-preference) {
     .ov-wf-layer, .ov-lock { transition: background-color .16s ease, color .16s ease; }
@@ -502,15 +575,35 @@ _OVERRIDES_HTML = r"""<!doctype html>
     </div>
   </section>
   <section id="panel-explorer" hidden>
-    <p class="hint">What-if: pick a user (and optionally one of their keys) and a
-      model to see how every setting resolves &mdash; which layer wins, what is
-      overridden, what is locked, and how a simulated client override fares.</p>
-    <div class="ov-expl-bar">
-      <label>user <select id="ex-user"></select></label>
-      <label>key <select id="ex-key"></select></label>
-      <label>model <select id="ex-model"></select></label>
-      <label>sim client override
-        <input id="ex-sim" class="ov-sim" placeholder='{"beam_size": 8}'></label>
+    <p class="hint">What-if: pick who is resolving and (optionally) a hypothetical
+      client override to see how every setting resolves &mdash; which layer wins,
+      what is overridden, and what is locked.</p>
+    <div class="ex-grid">
+      <div class="ex-card identity">
+        <div class="eh"><span class="lab"><b>Identity</b> &mdash; who is resolving</span></div>
+        <div class="eb">
+          <div class="ex-field"><label for="ex-user">User</label>
+            <select id="ex-user"></select></div>
+          <div class="ex-row2">
+            <div class="ex-field"><label for="ex-key">API key</label>
+              <select id="ex-key"></select></div>
+            <div class="ex-field"><label for="ex-model">Model</label>
+              <select id="ex-model"></select></div>
+          </div>
+        </div>
+      </div>
+      <div class="ex-card simulate">
+        <div class="eh"><span class="lab"><b>What-if</b> &mdash; simulate a client request</span>
+          <span class="badge-sim">simulated</span></div>
+        <div class="eb">
+          <div class="ex-field"><label for="ex-sim">Client-supplied decode override (JSON)</label>
+            <input id="ex-sim" class="ov-sim" placeholder='{"beam_size": 8}'>
+            <span class="fhelp">Hypothetical value a client sends with the request.
+              <b>What-if only &mdash; nothing is saved.</b> It just changes what this
+              Explorer resolves below.</span>
+          </div>
+        </div>
+      </div>
     </div>
     <div id="ex-out"></div>
   </section>
@@ -535,22 +628,30 @@ window._renderWaterfall = (function () {
     if (typeof v === 'object') return JSON.stringify(v);
     return String(v);
   }
+  // Solid padlock at currentColor — same iconography as the field-row locks.
+  var LOCK_SVG = '<svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor"'
+    + ' stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"'
+    + ' style="width:.9em;height:.9em;vertical-align:-.12em">'
+    + '<rect x="5" y="11" width="14" height="9.5" rx="2"/>'
+    + '<path d="M8 11V7.5a4 4 0 0 1 8 0V11" fill="none"/></svg>';
   return function (name, fr) {
     var el = document.createElement('div');
     el.className = 'ov-wf';
     var locked = fr.locked
-      ? ' <span class="ov-wf-lock" title="locked — client cannot override">&#128274;</span>'
+      ? ' <span class="ov-wf-lock" title="locked — client cannot override">' + LOCK_SVG + ' locked</span>'
       : '';
     var rows = (fr.layers || []).map(function (h) {
-      var cls = 'ov-wf-layer';
-      if (h.is_winner) cls += ' win';
-      else if (h.is_set) cls += ' over';
+      var cls = 'ov-wf-layer', label = '';
+      if (h.is_winner) { cls += ' win'; label = 'winner'; }
+      else if (h.is_set) { cls += ' over'; label = 'overridden'; }
       else cls += ' unset';
-      var flag = h.locked ? '<span class="flag locked">&#128274; locked</span>' : '';
+      var flag = h.locked
+        ? '<span class="flag locked">' + LOCK_SVG + ' locked</span>'
+        : '<span class="flag">' + label + '</span>';
       return '<li class="' + cls + '">'
         + '<span class="ov-wf-tick">' + (h.is_winner ? '✓' : '') + '</span>'
         + '<span class="lbl">' + esc(h.label) + '</span>'
-        + '<span class="val">' + esc(fmt(h.is_set ? h.value : undefined)) + '</span>'
+        + '<span class="val">' + esc(h.is_set ? fmt(h.value) : 'not set') + '</span>'
         + flag + '</li>';
     });
     if (fr.client_sim) {
@@ -604,6 +705,11 @@ window._renderWaterfall = (function () {
   var snapshot = '{}';          // JSON snapshot for dirty compare
   var sel = null;               // selected profile name
   var PIPE_FIELDS = ['PIPELINE_RULES_EXCLUDE', 'PIPELINE_RULES_INCLUDE'];
+  var NAME_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+  // inline-UI flags (replace the old prompt/confirm/alert dialogs)
+  var uiAdding = false;         // sidebar "new profile" input showing
+  var uiRenaming = false;       // selected profile in inline-rename mode
+  var uiConfirmDel = false;     // delete confirmation showing
 
   // ---- dom refs ----
   var listEl, mainEl, saveBtn, discardBtn, statusEl;
@@ -635,21 +741,59 @@ window._renderWaterfall = (function () {
   }
 
   // ---- sidebar ----
+  // Inline editor (input + ✓ / ✕) for both create and rename, replacing the old
+  // browser prompt(). Enter commits, Esc cancels; the field auto-focuses.
+  function inlineInput(value, onCommit, onCancel) {
+    var wrap = document.createElement('span'); wrap.className = 'ov-inline-edit';
+    var inp = document.createElement('input'); inp.type = 'text';
+    inp.className = 'ov-edit-input'; inp.value = value || ''; inp.maxLength = 32;
+    inp.setAttribute('aria-label', 'profile name');
+    var ok = document.createElement('button'); ok.type = 'button';
+    ok.className = 'icon-btn ok'; ok.innerHTML = '✓'; ok.title = 'confirm (Enter)';
+    var no = document.createElement('button'); no.type = 'button';
+    no.className = 'icon-btn'; no.innerHTML = '✕'; no.title = 'cancel (Esc)';
+    function commit() { onCommit((inp.value || '').trim().toLowerCase()); }
+    ok.onclick = commit;
+    no.onclick = function () { onCancel(); };
+    inp.onkeydown = function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); commit(); }
+      else if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
+    };
+    wrap.appendChild(inp); wrap.appendChild(ok); wrap.appendChild(no);
+    setTimeout(function () { inp.focus(); inp.select(); }, 0);
+    return wrap;
+  }
+
   function renderSide() {
     listEl.innerHTML = '';
     var names = profileNames();
+    var hdr = document.createElement('div'); hdr.className = 'ov-side-h';
+    hdr.innerHTML = '<span>Profiles</span><span class="ov-count">' + names.length + '</span>';
+    listEl.appendChild(hdr);
     names.forEach(function (name) {
       var p = profiles[name];
-      var item = document.createElement('div');
-      item.className = 'ov-item' + (name === sel ? ' active' : '');
+      var isSel = name === sel;
       var cnt = overrideCount(p);
+      var item = document.createElement('div');
+      item.className = 'ov-item' + (isSel ? ' active' : '');
+      if (isSel && uiRenaming) {
+        item.innerHTML = '<span class="ov-dot ' + (cnt ? 'on' : 'off') + '">'
+          + (cnt ? '●' : '○') + '</span>';
+        item.appendChild(inlineInput(name,
+          function (nn) { commitRename(name, nn); },
+          function () { uiRenaming = false; setStatus(''); render(); }));
+        listEl.appendChild(item);
+        return;
+      }
       item.innerHTML = '<span class="ov-dot ' + (cnt ? 'on' : 'off') + '">'
         + (cnt ? '●' : '○') + '</span>'
         + '<span class="nm">' + esc(name) + '</span>'
         + '<span class="ov-count">' + cnt + '</span>';
-      item.onclick = function () { sel = name; render(); };
+      item.onclick = function () {
+        sel = name; uiRenaming = false; uiConfirmDel = false; setStatus(''); render();
+      };
       listEl.appendChild(item);
-      if (name === sel) {
+      if (isSel) {
         var u = (S.usage || {})[name] || { users: [], keys: [] };
         var us = document.createElement('div');
         us.className = 'ov-usage';
@@ -664,61 +808,76 @@ window._renderWaterfall = (function () {
       e.className = 'ov-usage'; e.textContent = 'no profiles yet';
       listEl.appendChild(e);
     }
+    if (uiAdding) {
+      var addWrap = document.createElement('div'); addWrap.className = 'ov-inline';
+      addWrap.appendChild(inlineInput('', commitNew,
+        function () { uiAdding = false; setStatus(''); render(); }));
+      listEl.appendChild(addWrap);
+    }
     var acts = document.createElement('div');
     acts.className = 'ov-side-actions';
-    var nb = document.createElement('button'); nb.textContent = '+ new';
-    nb.onclick = newProfile;
+    var nb = document.createElement('button'); nb.className = 'ghost'; nb.textContent = '+ New';
+    nb.onclick = function () {
+      uiAdding = true; uiRenaming = false; uiConfirmDel = false; setStatus(''); render();
+    };
     acts.appendChild(nb);
     if (sel) {
-      var rb = document.createElement('button'); rb.textContent = '✎ rename';
-      rb.onclick = renameProfile; acts.appendChild(rb);
-      var db = document.createElement('button'); db.textContent = '⧉ duplicate';
+      var rb = document.createElement('button'); rb.className = 'ghost'; rb.textContent = '✎ Rename';
+      rb.onclick = startRename; acts.appendChild(rb);
+      var db = document.createElement('button'); db.className = 'ghost'; db.textContent = '⧉ Duplicate';
       db.onclick = duplicateProfile; acts.appendChild(db);
-      var xb = document.createElement('button'); xb.textContent = '× delete';
-      xb.onclick = deleteProfile; acts.appendChild(xb);
+      if (uiConfirmDel) {
+        var cf = document.createElement('span'); cf.className = 'ov-confirm';
+        cf.appendChild(document.createTextNode('Delete?'));
+        var yes = document.createElement('button'); yes.className = 'danger'; yes.textContent = '✓ Yes';
+        yes.onclick = confirmDelete; cf.appendChild(yes);
+        var dno = document.createElement('button'); dno.className = 'ghost'; dno.textContent = '✕';
+        dno.onclick = function () { uiConfirmDel = false; render(); };
+        cf.appendChild(dno); acts.appendChild(cf);
+      } else {
+        var xb = document.createElement('button'); xb.className = 'danger'; xb.textContent = '✕ Delete';
+        xb.onclick = startDelete; acts.appendChild(xb);
+      }
     }
     listEl.appendChild(acts);
   }
 
-  function newProfile() {
-    var name = (prompt('New profile name (a-z0-9-, max 32):') || '').trim().toLowerCase();
-    if (!name) return;
-    if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(name)) { alert('invalid profile name'); return; }
-    if (profiles[name]) { alert('profile already exists'); return; }
-    profiles[name] = {}; sel = name; render(); refreshButtons();
+  function commitNew(name) {
+    if (!name) { uiAdding = false; render(); return; }
+    if (!NAME_RE.test(name)) { setStatus('invalid name — use a-z 0-9 - (max 32)', 'err'); return; }
+    if (profiles[name]) { setStatus('profile "' + name + '" already exists', 'err'); return; }
+    uiAdding = false; profiles[name] = {}; sel = name; setStatus(''); render(); refreshButtons();
   }
   function duplicateProfile() {
     if (!sel) return;
     var base = sel + '-copy'; var name = base; var i = 2;
     while (profiles[name]) { name = base + i; i++; }
     profiles[name] = JSON.parse(JSON.stringify(profiles[sel]));
-    sel = name; render(); refreshButtons();
+    sel = name; uiRenaming = false; uiConfirmDel = false; render(); refreshButtons();
   }
-  function renameProfile() {
+  function startRename() {
     if (!sel) return;
-    var cur = sel;
-    var nn = (prompt('Rename profile "' + cur + '" to (a-z0-9-, max 32):', cur)
-              || '').trim().toLowerCase();
-    if (!nn || nn === cur) return;
-    if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(nn)) { alert('invalid profile name'); return; }
-    if (profiles[nn]) { alert('a profile named "' + nn + '" already exists'); return; }
-    // Never-saved profile (created since the last load) → no binding can
-    // reference it yet, so just move the key in the working copy; the rename
-    // rides along on the next Save like any other edit.
+    // A saved profile renames on the server (which reloads), so a dirty working
+    // copy must be saved/discarded first or those edits would be dropped.
+    if ((S.profiles && S.profiles[sel]) && dirty()) {
+      setStatus('Save or discard your changes before renaming "' + sel + '".', 'err');
+      return;
+    }
+    uiRenaming = true; uiAdding = false; uiConfirmDel = false; setStatus(''); render();
+  }
+  function commitRename(cur, nn) {
+    if (!nn || nn === cur) { uiRenaming = false; setStatus(''); render(); return; }
+    if (!NAME_RE.test(nn)) { setStatus('invalid name — use a-z 0-9 - (max 32)', 'err'); return; }
+    if (profiles[nn]) { setStatus('a profile named "' + nn + '" already exists', 'err'); return; }
+    uiRenaming = false;
+    // Never-saved profile → no binding references it; move the key and let the
+    // rename ride along on the next Save like any other edit.
     if (!(S.profiles && S.profiles[cur])) {
       profiles[nn] = profiles[cur]; delete profiles[cur];
-      sel = nn; render(); refreshButtons();
+      sel = nn; setStatus(''); render(); refreshButtons();
       return;
     }
-    // Saved profile → rename on the server, which also cascades the new name
-    // through every binding that references it. That operates on PERSISTED
-    // state and reloads, so require a clean working copy first (else unsaved
-    // edits would be silently dropped by the reload).
-    if (dirty()) {
-      alert('Save or discard your unsaved changes before renaming "' + cur + '".');
-      return;
-    }
-    doRename(cur, nn);
+    doRename(cur, nn);   // saved → server cascade (dirty already guarded in startRename)
   }
   async function doRename(oldName, newName) {
     setStatus('renaming…');
@@ -737,16 +896,19 @@ window._renderWaterfall = (function () {
     setStatus('renamed' + (n ? ' · ' + n + ' binding' + (n === 1 ? '' : 's')
                                   + ' updated' : ''), 'ok');
   }
-  function deleteProfile() {
+  function startDelete() {
     if (!sel) return;
     var u = (S.usage || {})[sel] || { users: [], keys: [] };
     if (u.users.length || u.keys.length) {
-      alert('Profile "' + sel + '" is in use by ' + u.users.length + ' user(s) and '
-        + u.keys.length + ' key(s). Unbind it on the API keys page first.');
+      setStatus('"' + sel + '" is in use by ' + u.users.length + ' user(s) / '
+        + u.keys.length + ' key(s) — unbind it on the API keys page first.', 'err');
       return;
     }
-    if (!confirm('Delete profile "' + sel + '"?')) return;
-    delete profiles[sel]; sel = null; render(); refreshButtons();
+    uiConfirmDel = true; uiRenaming = false; uiAdding = false; setStatus(''); render();
+  }
+  function confirmDelete() {
+    if (!sel) return;
+    delete profiles[sel]; sel = null; uiConfirmDel = false; render(); refreshButtons();
   }
 
   // ---- global gates (read-only echo; edited on /settings) ----
@@ -769,13 +931,28 @@ window._renderWaterfall = (function () {
   // ---- main pane ----
   function render() { renderGlobals(); renderSide(); renderMain(); }
 
+  // A titled section card (header strip + padded body). Returns { sec, body }.
+  function makeSection(title, sub) {
+    var sec = document.createElement('div'); sec.className = 'ov-sec';
+    sec.innerHTML = '<h4>' + esc(title)
+      + (sub ? ' <span class="ov-sec-sub">' + esc(sub) + '</span>' : '') + '</h4>';
+    var body = document.createElement('div'); body.className = 'ov-sec-b';
+    sec.appendChild(body);
+    return { sec: sec, body: body };
+  }
+
   function renderMain() {
     mainEl.innerHTML = '';
     if (!sel) {
-      mainEl.innerHTML = '<div class="ov-empty">Select a profile, or create one with <b>+ new</b>.</div>';
+      mainEl.innerHTML = '<div class="ov-empty">Select a profile, or create one with <b>+ New</b>.</div>';
       return;
     }
     var p = profiles[sel];
+    var cnt = overrideCount(p);
+    var head = document.createElement('div'); head.className = 'ov-pane-head';
+    head.innerHTML = '<span class="ov-dot ' + (cnt ? 'on' : 'off') + '">'
+      + (cnt ? '●' : '○') + '</span><span class="pname">' + esc(sel) + '</span>';
+    mainEl.appendChild(head);
     mainEl.appendChild(accessSection(p));
     (S.groups || []).forEach(function (g) {
       var fields = [];
@@ -783,11 +960,9 @@ window._renderWaterfall = (function () {
         (sg.fields || []).forEach(function (f) { fields.push(f); });
       });
       if (!fields.length) return;
-      var sec = document.createElement('div');
-      sec.className = 'ov-sec';
-      sec.innerHTML = '<h4>' + esc(g.title) + '</h4>';
-      fields.forEach(function (f) { sec.appendChild(fieldRow(p, f)); });
-      mainEl.appendChild(sec);
+      var s = makeSection(g.title);
+      fields.forEach(function (f) { s.body.appendChild(fieldRow(p, f)); });
+      mainEl.appendChild(s.sec);
     });
     mainEl.appendChild(pipelineSection(p));
   }
@@ -795,31 +970,45 @@ window._renderWaterfall = (function () {
   // Profile-level "Access" — whether clients may NAME this profile per request.
   // Default = requestable; storing requestable:false opts it out globally.
   function accessSection(p) {
-    var sec = document.createElement('div');
-    sec.className = 'ov-sec';
-    sec.innerHTML = '<h4>Access</h4>';
-    var lbl = document.createElement('label');
-    lbl.className = 'ov-requestable';
-    lbl.style.cssText = 'display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px';
+    var s = makeSection('Access', 'who may apply this profile');
+    var row = document.createElement('div'); row.className = 'ov-access-row';
     var cb = document.createElement('input');
-    cb.type = 'checkbox';
+    cb.type = 'checkbox'; cb.className = 'switch'; cb.setAttribute('role', 'switch');
+    cb.id = 'ov-requestable';
     cb.checked = p.requestable !== false;       // absent / true = requestable
     cb.onchange = function () {
       if (cb.checked) delete p.requestable; else p.requestable = false;
       refreshButtons(); renderSide();
     };
-    lbl.appendChild(cb);
-    var txt = document.createElement('span');
-    txt.innerHTML = 'Requestable by clients '
-      + '<span style="color:var(--help)">— clients may name this profile in a per-request '
+    var lbl = document.createElement('label');
+    lbl.setAttribute('for', 'ov-requestable');
+    lbl.textContent = 'Requestable by clients';
+    row.appendChild(cb); row.appendChild(lbl);
+    s.body.appendChild(row);
+    var help = document.createElement('div'); help.className = 'ov-help';
+    help.innerHTML = 'Clients may name this profile in a per-request '
       + '<code>override_profile</code> (subject to per-user / per-key allowlists). '
-      + 'Unchecked = admin-applied only.</span>';
-    lbl.appendChild(txt);
-    sec.appendChild(lbl);
-    return sec;
+      + 'Off = admin-applied only.';
+    s.body.appendChild(help);
+    return s.sec;
   }
 
   function isSet(p, f) { return p[f] !== null && p[f] !== undefined; }
+
+  // Line-art padlock at currentColor (matches the key icon on /api-keys).
+  // Locked = solid body + closed shackle; unlocked = outline body + open shackle
+  // — distinct on shape AND fill AND colour, not colour alone (WCAG 1.4.1).
+  function lockSvg(locked) {
+    return locked
+      ? '<svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor"'
+        + ' stroke-width="1.6" stroke-linejoin="round" aria-hidden="true">'
+        + '<rect x="5" y="11" width="14" height="9.5" rx="2"/>'
+        + '<path d="M8 11V7.5a4 4 0 0 1 8 0V11" fill="none"/></svg>'
+      : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+        + ' stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" aria-hidden="true">'
+        + '<rect x="5" y="11" width="14" height="9.5" rx="2"/>'
+        + '<path d="M8 11V7.5a4 4 0 0 1 7-2.4"/></svg>';
+  }
 
   function fieldRow(p, name) {
     var meta = (S.field_meta || {})[name] || { kind: 'str' };
@@ -834,15 +1023,18 @@ window._renderWaterfall = (function () {
 
     var locks = p.locks || [];
     var locked = locks.indexOf(name) >= 0;
-    lockCell.innerHTML = locked ? '\u{1F512}' : '\u{1F513}';
+    lockCell.innerHTML = lockSvg(locked);
     if (locked) lockCell.classList.add('locked');
     lockCell.setAttribute('role', 'switch');
     lockCell.setAttribute('aria-checked', locked ? 'true' : 'false');
     // Available even when the field is unset: a value-less lock pins the
     // inherited (per-model/global) value and still blocks client overrides.
-    lockCell.title = isSet(p, name)
-      ? 'lock — client cannot override this field'
-      : 'lock to inherited — client cannot override this field';
+    var lockWhat = isSet(p, name) ? 'this field' : 'the inherited value';
+    var lockTitle = locked
+      ? 'Locked — clients cannot override ' + lockWhat + ' per request (click to unlock)'
+      : 'Unlocked — clients may override ' + lockWhat + ' per request (click to lock)';
+    lockCell.title = lockTitle;
+    lockCell.setAttribute('aria-label', lockTitle);
     lockCell.onclick = function () { toggleLock(p, name); };
 
     if (isSet(p, name)) {
@@ -919,8 +1111,7 @@ window._renderWaterfall = (function () {
 
   // ---- pipeline tri-state ----
   function pipelineSection(p) {
-    var sec = document.createElement('div'); sec.className = 'ov-sec';
-    sec.innerHTML = '<h4>Pipeline rules</h4>';
+    var s = makeSection('Pipeline rules', 'enable / disable text rules for this profile');
     var exc = p.PIPELINE_RULES_EXCLUDE || [];
     var inc = p.PIPELINE_RULES_INCLUDE || [];
     (S.rules || []).forEach(function (r) {
@@ -948,12 +1139,14 @@ window._renderWaterfall = (function () {
         };
         grp.appendChild(btn);
       });
-      row.appendChild(grp); sec.appendChild(row);
+      row.appendChild(grp); s.body.appendChild(row);
     });
     if (!(S.rules || []).length) {
-      sec.innerHTML += '<p class="hint">No pipeline rules configured.</p>';
+      var none = document.createElement('p'); none.className = 'ov-help';
+      none.textContent = 'No pipeline rules configured.';
+      s.body.appendChild(none);
     }
-    return sec;
+    return s.sec;
   }
   function setRule(p, slug, state) {
     function pull(arr) { var i = arr.indexOf(slug); if (i >= 0) arr.splice(i, 1); }
