@@ -165,3 +165,37 @@ def test_binding_roundtrip_preserves_request_gates(client, make_user_key):
     cfg = r.json()["keys"][0]["config"]
     assert cfg["allow_request_override_profile"] is False
     assert cfg["allowed_override_profiles"] == ["fast"]
+
+
+# --- admin per-key "apply no profiles" force ------------------------------
+
+def test_apply_no_profiles_roundtrip_and_suppresses_user_profile(client, make_user_key):
+    # End-to-end: a profile bound at the USER scope applies, until the per-KEY
+    # apply_no_profiles force flips the key to plain defaults — through the real
+    # PATCH → store → resolve path.
+    _, raw_admin = make_user_key("admin", is_admin=True)
+    h = bearer(raw_admin)
+    _profiles(client, h, {"clinic": {"BEAM_SIZE": 7}})
+    uid, _ = make_user_key("alice")
+    r = client.patch(f"{PERMS}/{uid}/permissions", headers=h, json={
+        "pages": {}, "config": {"overrides": {}, "profiles": ["clinic"], "locks": []}})
+    assert r.status_code == 200, r.text
+    kid = _key_id(client, h, uid)
+
+    # baseline: the user-bound profile applies for this key
+    rj = client.get(f"{OV}/resolve", headers=h, params={
+        "user_id": uid, "key_id": kid, "model": "whisper-1"}).json()
+    assert rj["fields"]["BEAM_SIZE"]["winner_value"] == 7
+    assert "clinic" in rj["profiles_applied"]
+
+    # set the per-key force → stored + re-read carry it
+    stored = _set_key_binding(client, h, uid, kid, apply_no_profiles=True)
+    assert stored["apply_no_profiles"] is True
+    cfg = client.get(f"{PERMS}/{uid}/keys", headers=h).json()["keys"][0]["config"]
+    assert cfg["apply_no_profiles"] is True
+
+    # resolve now ignores the user-bound profile → plain defaults
+    rj = client.get(f"{OV}/resolve", headers=h, params={
+        "user_id": uid, "key_id": kid, "model": "whisper-1"}).json()
+    assert rj["profiles_applied"] == []
+    assert rj["fields"]["BEAM_SIZE"]["winner_layer"] != "user.profile:clinic"

@@ -206,18 +206,27 @@ def _gather_identity_layers(key_binding: dict[str, Any],
     user.profiles…, then the request-named profile (least specific) if any and
     permitted.
 
-    The reserved request name ``config_store.NO_PROFILE_SENTINEL`` ("apply no
-    profile") SUPPRESSES every bound profile layer (key/user ``profiles`` and the
+    Suppression — skip every bound profile layer (key/user ``profiles`` and the
     request layer), leaving only the ``direct`` identity layers + per-model +
-    global — i.e. plain defaults. Suppression is gated by the same global +
-    per-identity switch as a profile *request*, so an admin who forces profiles
-    by turning the gate off is not bypassed; the allowlist doesn't apply, since
-    opting OUT of profiles isn't selecting a named one."""
+    global — i.e. plain defaults — fires on EITHER of two paths:
+
+    1. The reserved request name ``config_store.NO_PROFILE_SENTINEL`` ("apply no
+       profile"), a CLIENT opt-out gated by the same global + per-identity switch
+       as a profile *request*, so an admin who forces profiles by turning the gate
+       off is not bypassed; the allowlist doesn't apply, since opting OUT of
+       profiles isn't selecting a named one.
+    2. The key binding's ``apply_no_profiles`` flag — an ADMIN FORCE set per-key.
+       Unlike (1) it is NOT gated by ALLOW_REQUEST_OVERRIDE_PROFILE (the admin set
+       it directly) and is read off the key binding only."""
     profiles = getattr(cfg, "OVERRIDE_PROFILES", None) or {}
     layers: list[dict[str, Any]] = []
-    suppress = (request_profile == config_store.NO_PROFILE_SENTINEL
-                and getattr(cfg, "ALLOW_REQUEST_OVERRIDE_PROFILE", True)
-                and request_allowed)
+    # Admin force, ungated, key-scoped: this key always resolves to plain defaults.
+    admin_force = bool(key_binding.get("apply_no_profiles")) if isinstance(key_binding, dict) else False
+    # Client opt-out, gated like any profile request.
+    request_none = (request_profile == config_store.NO_PROFILE_SENTINEL
+                    and getattr(cfg, "ALLOW_REQUEST_OVERRIDE_PROFILE", True)
+                    and request_allowed)
+    suppress = admin_force or request_none
 
     def _append_binding(scope: str, binding: Any) -> None:
         if not isinstance(binding, dict):

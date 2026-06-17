@@ -2103,10 +2103,14 @@ def validate_binding(raw: Any) -> dict[str, Any]:
             "locks": [field, …], "profiles": [name, …],
             "allow_request_override_profile": bool|None,
             "allow_request_decode_overrides": bool|None,
-            "allowed_override_profiles": [name…]|["*"]|[]|None}.
+            "allowed_override_profiles": [name…]|["*"]|[]|None,
+            "apply_no_profiles": bool|None}.
     The three request-gate fields are stored only when explicitly set (a bool, or
     a non-None allowlist) — absent = inherit the next scope down → global. They
     can only NARROW the global gates, never widen them (enforced at resolve time).
+    `apply_no_profiles` is a different beast — an ADMIN FORCE, not a request gate:
+    True suppresses every bound/requested profile for the identity (plain
+    defaults); it does NOT inherit and is NOT bound by ALLOW_REQUEST_OVERRIDE_PROFILE.
     Raises ValueError on any invalid field / bound / lock target / unknown
     profile reference / unknown pipeline slug."""
     if not isinstance(raw, dict):
@@ -2148,14 +2152,23 @@ def validate_binding(raw: Any) -> dict[str, Any]:
     allow = raw.get("allowed_override_profiles")
     if allow is not None:
         out["allowed_override_profiles"] = validate_allowed_profiles(allow)
+    # Admin force — NOT a request gate: does not inherit, is not bound by the
+    # override-profile gate. True = suppress every bound/requested profile for
+    # this identity. Stored only when explicitly set.
+    anp = raw.get("apply_no_profiles")
+    if isinstance(anp, bool):
+        out["apply_no_profiles"] = anp
+    elif anp is not None:
+        raise ValueError("apply_no_profiles must be a boolean or null")
     return out
 
 
 def binding_is_empty(binding: Any) -> bool:
-    """True if a stored binding carries no direct override, no profiles, and no
-    request-gate setting — i.e. contributes nothing and need not be persisted.
-    A request gate set to False or an explicit (even empty) allowlist counts as
-    a meaningful setting and keeps the binding alive."""
+    """True if a stored binding carries no direct override, no profiles, no
+    request-gate setting, and no apply-no-profiles force — i.e. contributes
+    nothing and need not be persisted. A request gate set to False, an explicit
+    (even empty) allowlist, or apply_no_profiles set counts as a meaningful
+    setting and keeps the binding alive."""
     if not isinstance(binding, dict):
         return True
     return not (
@@ -2164,4 +2177,5 @@ def binding_is_empty(binding: Any) -> bool:
         or binding.get("allow_request_override_profile") is not None
         or binding.get("allow_request_decode_overrides") is not None
         or binding.get("allowed_override_profiles") is not None
+        or binding.get("apply_no_profiles") is not None
     )

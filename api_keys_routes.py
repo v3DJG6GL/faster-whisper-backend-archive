@@ -73,6 +73,11 @@ class ConfigBindingIn(BaseModel):
     request; `allow_request_decode_overrides` — may it send inline decode
     tweaks; `allowed_override_profiles` — the request allowlist (distinct from
     `profiles`): None = all, ["*"] = all, an explicit list restricts, [] = none.
+
+    `apply_no_profiles` is an ADMIN FORCE, not a request gate (set per-key in the
+    WebUI): True suppresses every bound + requested profile for the identity, so
+    it resolves to plain defaults. It does NOT inherit and is NOT bound by
+    ALLOW_REQUEST_OVERRIDE_PROFILE; None/absent = off.
     """
     model_config = {"extra": "forbid"}
     overrides: dict[str, Any] = Field(default_factory=dict)
@@ -81,6 +86,7 @@ class ConfigBindingIn(BaseModel):
     allow_request_override_profile: bool | None = None
     allow_request_decode_overrides: bool | None = None
     allowed_override_profiles: list[str] | None = None
+    apply_no_profiles: bool | None = None
 
 
 class PatchPermissionsIn(BaseModel):
@@ -735,6 +741,12 @@ _API_KEYS_HTML = r"""<!doctype html>
   .cfg-chip button { background: none; border: 0; color: var(--dim);
     cursor: pointer; font: inherit; padding: 0; }
   .cfg-chip button:hover { color: var(--fg); }
+  /* "Apply no profiles" admin force (per-key only): a switch row above the chip
+     list; when ON the list is dimmed + non-interactive (data kept, not cleared). */
+  .cfg-noprof-row { display: flex; align-items: center; gap: 0.5rem;
+    margin: 0.1rem 0 0.2rem; font-size: var(--fs-sm); }
+  .cfg-noprof-row label { color: var(--fg); cursor: pointer; }
+  .cfg-prof-dim { opacity: 0.45; pointer-events: none; }
   .cfg-ovr-row { display: grid;
     grid-template-columns: minmax(10rem, 1fr) minmax(7rem, 1fr) auto auto;
     gap: 0.4rem; align-items: center; padding: 0.12rem 0; }
@@ -1681,6 +1693,9 @@ _API_KEYS_HTML = r"""<!doctype html>
       allowed_override_profiles:
         Array.isArray(cfg.allowed_override_profiles)
           ? cfg.allowed_override_profiles.slice() : null,
+      apply_no_profiles:
+        typeof cfg.apply_no_profiles === 'boolean'
+          ? cfg.apply_no_profiles : null,
     };
   }
 
@@ -1781,6 +1796,7 @@ _API_KEYS_HTML = r"""<!doctype html>
         ardo: x.allow_request_decode_overrides,
         aop: x.allowed_override_profiles == null
           ? null : x.allowed_override_profiles.slice().sort(),
+        anp: x.apply_no_profiles,
       });
     }
     var _baseline = _sig(b);
@@ -1902,7 +1918,29 @@ _API_KEYS_HTML = r"""<!doctype html>
       // --- Profiles card ---
       var pcard = _ovCard('Profiles', 'ordered · earlier wins',
         'Applied in order, before the direct overrides below.');
-      var chips = document.createElement('div'); chips.className = 'cfg-chips';
+      // Admin force, per-KEY only: suppress all profiles → plain defaults. Not a
+      // request gate (lives here, not in the gates card) and not gated globally.
+      var noProf = (opts.scope === 'key' && b.apply_no_profiles === true);
+      if (opts.scope === 'key') {
+        var npRow = document.createElement('div'); npRow.className = 'cfg-noprof-row';
+        var npCb = document.createElement('input');
+        npCb.type = 'checkbox'; npCb.className = 'switch'; npCb.setAttribute('role', 'switch');
+        npCb.id = 'cfg-apply-no-profiles';
+        npCb.checked = noProf;
+        npCb.onchange = function () { b.apply_no_profiles = npCb.checked ? true : null; rerender(); };
+        var npLbl = document.createElement('label');
+        npLbl.setAttribute('for', 'cfg-apply-no-profiles');
+        npLbl.textContent = 'Apply no profiles';
+        npRow.appendChild(npCb); npRow.appendChild(npLbl);
+        pcard.appendChild(npRow);
+        var npHint = document.createElement('div'); npHint.className = 'ohint';
+        npHint.textContent = noProf
+          ? 'On — this key ignores every profile (key, user-level, and per-request) and resolves to plain defaults.'
+          : 'Force plain defaults for this key: ignore every profile (key, user-level, and per-request).';
+        pcard.appendChild(npHint);
+      }
+      var chips = document.createElement('div');
+      chips.className = noProf ? 'cfg-chips cfg-prof-dim' : 'cfg-chips';
       b.profiles.forEach(function (name, i) {
         var c = document.createElement('span'); c.className = 'cfg-chip';
         c.innerHTML = '<span class="num">' + (i + 1) + '</span>' + escapeHtml(name);
@@ -1971,6 +2009,7 @@ _API_KEYS_HTML = r"""<!doctype html>
           allow_request_override_profile: b.allow_request_override_profile,
           allow_request_decode_overrides: b.allow_request_decode_overrides,
           allowed_override_profiles: b.allowed_override_profiles,
+          apply_no_profiles: b.apply_no_profiles,
         })
           .then(function () { showToast('Overrides saved', 'ok'); load(); })
           .catch(function (er) { showToast(String(er.message || er), 'err'); })

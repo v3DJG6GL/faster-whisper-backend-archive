@@ -450,3 +450,55 @@ def test_none_sentinel_refused_when_gated_off(monkeypatch):
                                 "allow_request_override_profile": False})
     assert ec.resolve("m", key_id="k",
                       request_profile=cs.NO_PROFILE_SENTINEL).values["BEAM_SIZE"] == 7
+
+
+# --- admin per-key apply_no_profiles force --------------------------------
+
+def test_apply_no_profiles_suppresses_user_bound_profile(monkeypatch):
+    # The per-key admin force suppresses profiles bound at the USER scope too.
+    _set_profiles(monkeypatch, {"clinic": {"BEAM_SIZE": 7}})
+    _bindings(monkeypatch, user={"direct": {}, "profiles": ["clinic"]})
+    assert ec.resolve("m", key_id="k", user_id="u").values["BEAM_SIZE"] == 7  # applies
+    _bindings(monkeypatch, key={"direct": {}, "profiles": [], "apply_no_profiles": True},
+              user={"direct": {}, "profiles": ["clinic"]})
+    r = ec.resolve("m", key_id="k", user_id="u")
+    assert "BEAM_SIZE" not in r.values           # user-bound profile suppressed
+    assert r.profiles_applied == []
+
+
+def test_apply_no_profiles_suppresses_key_bound_profile_keeps_direct(monkeypatch):
+    # Suppression drops the key's own bound profile but keeps its direct config.
+    _set_profiles(monkeypatch, {"clinic": {"DEFAULT_LANGUAGE": "de"}})
+    _bindings(monkeypatch, key={"direct": {"BEAM_SIZE": 5}, "profiles": ["clinic"],
+                                "apply_no_profiles": True})
+    r = ec.resolve("m", key_id="k")
+    assert r.values["BEAM_SIZE"] == 5            # direct config retained
+    assert "DEFAULT_LANGUAGE" not in r.values    # bound profile suppressed
+    assert r.profiles_applied == []
+
+
+def test_apply_no_profiles_not_gated_by_global(monkeypatch):
+    # Unlike the client "__none__" opt-out, the admin force is NOT bound by
+    # ALLOW_REQUEST_OVERRIDE_PROFILE: it suppresses even when the gate is off.
+    _set_profiles(monkeypatch, {"clinic": {"BEAM_SIZE": 7}}, allow=False)
+    _bindings(monkeypatch, key={"direct": {}, "profiles": ["clinic"],
+                                "apply_no_profiles": True})
+    assert "BEAM_SIZE" not in ec.resolve("m", key_id="k").values
+
+
+def test_apply_no_profiles_suppresses_requested_profile(monkeypatch):
+    # With the force on, even a permitted per-request profile is suppressed.
+    _set_profiles(monkeypatch, {"fast": {"BEAM_SIZE": 3}})
+    _bindings(monkeypatch, key={"direct": {}, "profiles": [], "apply_no_profiles": True})
+    r = ec.resolve("m", key_id="k", request_profile="fast")
+    assert "BEAM_SIZE" not in r.values
+    assert r.request_profile_applied is None
+
+
+def test_apply_no_profiles_ignored_on_user_binding(monkeypatch):
+    # The force is read off the KEY binding only; set on a user binding it does
+    # nothing (the user-bound profile still applies).
+    _set_profiles(monkeypatch, {"clinic": {"BEAM_SIZE": 7}})
+    _bindings(monkeypatch, user={"direct": {}, "profiles": ["clinic"],
+                                 "apply_no_profiles": True})
+    assert ec.resolve("m", key_id="k", user_id="u").values["BEAM_SIZE"] == 7

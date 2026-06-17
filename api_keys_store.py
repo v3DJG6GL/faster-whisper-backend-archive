@@ -240,9 +240,10 @@ def _parse_binding(raw: "str | dict | None") -> dict[str, Any]:
     """Decode a per-identity config binding (JSON string or already-decoded
     dict) into the canonical shape {"direct": {...}, "profiles": [...]}, plus any
     of the three request-gate keys (allow_request_override_profile,
-    allow_request_decode_overrides, allowed_override_profiles) that are actually
-    set. Unset gate keys are OMITTED — the resolver reads them via .get() so an
-    absent key means "inherit the next scope → global", and the empty binding
+    allow_request_decode_overrides, allowed_override_profiles) and the admin-force
+    apply_no_profiles key that are actually set. Unset keys are OMITTED — the
+    resolver reads them via .get() so an absent gate key means "inherit the next
+    scope → global" (apply_no_profiles simply defaults off), and the empty binding
     stays {"direct": {}, "profiles": []}. Returns the empty binding on null /
     blank / invalid input — a malformed binding must never crash a decode."""
     empty = {"direct": {}, "profiles": []}
@@ -267,6 +268,9 @@ def _parse_binding(raw: "str | dict | None") -> dict[str, Any]:
     allow = v.get("allowed_override_profiles")
     if isinstance(allow, list):
         out["allowed_override_profiles"] = [p for p in allow if isinstance(p, str)]
+    # Admin force (not a request gate): preserved when explicitly set.
+    if isinstance(v.get("apply_no_profiles"), bool):
+        out["apply_no_profiles"] = v["apply_no_profiles"]
     return out
 
 
