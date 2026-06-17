@@ -152,31 +152,6 @@
   "WORD_TIMESTAMPS_ENABLED": true,
   "PIPELINE_RULES": [
     {
-      "name": "ch-symbol-cleanup",
-      "label": "Swiss German symbol cleanup",
-      "enabled": true,
-      "locked": false,
-      "seeded": true,
-      "exposed": false,
-      "tags": [],
-      "note": "Swiss-German eszett normalization. Split out of the former 'German + symbol cleanup' card so this language-specific rule toggles independently of the language-agnostic symbol/format rules that used to share the card.",
-      "type": "regex-list",
-      "entries": [
-        {
-          "pattern": "ß",
-          "replacement": "ss",
-          "label": "replace-szet-lc",
-          "note": "Swiss Standard German drops the eszett entirely — it is always written 'ss'. This rule enforces that for the lowercase form."
-        },
-        {
-          "pattern": "ẞ",
-          "replacement": "SS",
-          "label": "replace-szet-uc",
-          "note": "Uppercase counterpart of replace-szet-lc — the capital eszett 'ẞ' becomes 'SS'."
-        }
-      ]
-    },
-    {
       "name": "strip-stray-symbols",
       "label": "Strip stray symbols",
       "enabled": true,
@@ -184,14 +159,33 @@
       "seeded": true,
       "exposed": false,
       "tags": [],
-      "note": "Language-agnostic. Removes stray, non-linguistic symbols Whisper sometimes emits (quotes, brackets, math/programming glyphs) while keeping the punctuation real text needs. Was the 'strip-non-keep-punct' entry of the former 'German + symbol cleanup' card; renamed for clarity.",
+      "note": "Language-agnostic. Removes stray non-linguistic symbols (quotes, brackets, math/programming glyphs) Whisper emits.",
       "type": "regex-list",
       "entries": [
         {
           "pattern": "[\\\"#$%&'()*+;<=>@\\[\\\\\\]^_`{|}~„]",
           "replacement": "",
           "label": "strip-stray-symbols",
-          "note": "Removes every character in Python's string.punctuation EXCEPT the keep-set ./-:,?! , plus the German low quote „. The keep-set is preserved on purpose so the later digit-protected strip rules (strip-auto-punctuation, normalize-digit-range, digit tidy) can still run."
+          "note": "Removes all string.punctuation except the keep-set .,-/:?! (and „); keep-set kept so the later digit-aware strips still run."
+        }
+      ]
+    },
+    {
+      "name": "strip-trailing-period",
+      "label": "Strip trailing period",
+      "enabled": true,
+      "locked": false,
+      "seeded": true,
+      "exposed": false,
+      "tags": [],
+      "note": "Trims trailing periods; runs just before strip-auto-punctuation.",
+      "type": "regex-list",
+      "entries": [
+        {
+          "pattern": "\\s*\\.+\\s*$",
+          "replacement": "",
+          "label": "trim-trailing-period",
+          "note": "Strips trailing dots, even after a digit (which strip-auto-punctuation's digit guard would keep)."
         }
       ]
     },
@@ -203,26 +197,28 @@
       "seeded": true,
       "exposed": false,
       "tags": [],
-      "note": "Language-agnostic. Split out of the former 'German + symbol cleanup' card.",
+      "note": "Language-agnostic.",
       "type": "regex-list",
       "entries": [
         {
           "pattern": "(\\d)\\s*-\\s*(\\d)",
           "replacement": "\\1/\\2",
           "label": "normalize-digit-range",
-          "note": "A spoken digit range like '10 - 12' is normalized to '10/12' — slash is the house convention for ranges."
+          "note": "'10 - 12' → '10/12' (slash = house range convention)."
         }
       ]
     },
     {
-      "name": "strip-and-lowercase-non-noun",
-      "label": "Strip + lowercase next non-noun",
+      "name": "de-strip-and-lowercase-non-noun",
+      "label": "DE: Strip + lowercase next non-noun",
       "enabled": true,
       "locked": false,
       "seeded": true,
       "exposed": false,
-      "tags": [],
-      "note": "Pass A: paired strip — match a terminator + capitalized word, strip the terminator and lowercase the next word IFF it is in the wordlist. German nouns are always capitalized, so the wordlist holds non-nouns (interrogatives, conjunctions, articles, etc.); matching is case-insensitive.",
+      "tags": [
+        "german"
+      ],
+      "note": "Drops a terminator (.?!, not after a digit) before a capitalized word; also lowercases that word iff it's in the wordlist of German non-nouns (nouns stay capitalized). Case-insensitive.",
       "type": "callback:lowercase-wordlist",
       "pattern": "(?<!\\d)[.?!](\\s*)([A-ZÄÖÜ])(\\w*)",
       "wordlist": [
@@ -329,20 +325,56 @@
       ]
     },
     {
-      "name": "strip-trailing-period",
-      "label": "Strip trailing period",
+      "name": "de-split-punctuation-keywords",
+      "label": "DE: Split merged punctuation keywords",
       "enabled": true,
       "locked": false,
       "seeded": true,
       "exposed": false,
-      "tags": [],
-      "note": "Promoted out of the former 'Strip Whisper punctuation' card so the trailing-period trim toggles on its own, independently of the terminator/comma strip that followed it. Runs just before 'Strip auto-punctuation' (same order as when both shared one card).",
+      "tags": [
+        "german"
+      ],
+      "note": "",
       "type": "regex-list",
       "entries": [
         {
-          "pattern": "\\s*\\.+\\s*$",
-          "replacement": "",
-          "label": "trim-trailing-period"
+          "pattern": "\\b([A-ZÄÖÜ][a-zäöüß]{2,})komm?a\\b",
+          "replacement": "\\1 Komma",
+          "label": "split-merged-komma-off-preceding-noun",
+          "note": "Splits a dictated 'Komma' (also the 'koma' mishearing) glued onto a capitalized word — 'Müllerkomma'→'Müller Komma' — so dictation-map can turn 'Komma'→','. Needs leading capital + 2+ lowercase."
+        },
+        {
+          "pattern": "(?i)\\Bbindestrich|bindestrich\\B",
+          "replacement": " Bindestrich ",
+          "label": "1-2-split-dictation-words-from-german-compounds",
+          "note": "Splits an embedded 'bindestrich' into ' Bindestrich ' — 'Eisenbindestrichinfusion'→'Eisen Bindestrich infusion'; dictation-map then makes it '-' and capitalize-letter-after-hyphen fixes the casing."
+        }
+      ]
+    },
+    {
+      "name": "ch-symbol-cleanup",
+      "label": "Swiss German symbol cleanup",
+      "enabled": true,
+      "locked": false,
+      "seeded": true,
+      "exposed": false,
+      "tags": [
+        "german"
+      ],
+      "note": "Swiss German: drops the eszett — ß→ss, ẞ→SS.",
+      "type": "regex-list",
+      "entries": [
+        {
+          "pattern": "ß",
+          "replacement": "ss",
+          "label": "replace-szet-lc",
+          "note": "ß → ss (Swiss German has no eszett)."
+        },
+        {
+          "pattern": "ẞ",
+          "replacement": "SS",
+          "label": "replace-szet-uc",
+          "note": "ẞ → SS (uppercase form)."
         }
       ]
     },
@@ -356,38 +388,14 @@
       "tags": [
         "manual-punctation"
       ],
-      "note": "Strips the sentence punctuation Whisper auto-adds. Formerly 'strip-whisper-punctuation'; the trailing-period trim was split out into the separate 'strip-trailing-period' card that runs just before this one.",
+      "note": "Strips Whisper's auto-added .?! and commas (digit-protected). Runs right after strip-trailing-period.",
       "type": "regex-list",
       "entries": [
         {
           "pattern": "(?<!\\d)[.?!]|(?<!\\d),|,(?!\\d)",
           "replacement": "",
           "label": "Strip terminators & commas",
-          "note": "Plain strip — catches lone .?! the paired pass missed, plus soft-pause commas. Digit-protected: '1,000' survives; 'Frau, Müller' loses the comma. Replacement is empty; no side effects."
-        }
-      ]
-    },
-    {
-      "name": "de-split-punctuation-keywords",
-      "label": "DE: Split merged punctuation keywords",
-      "enabled": true,
-      "locked": false,
-      "seeded": true,
-      "exposed": false,
-      "tags": [],
-      "note": "",
-      "type": "regex-list",
-      "entries": [
-        {
-          "pattern": "\\b([A-ZÄÖÜ][a-zäöüß]{2,})komm?a\\b",
-          "replacement": "\\1 Komma",
-          "label": "split-merged-komma-off-preceding-noun"
-        },
-        {
-          "pattern": "(?i)\\Bbindestrich|bindestrich\\B",
-          "replacement": " Bindestrich ",
-          "label": "1-2-split-dictation-words-from-german-compounds",
-          "note": "Wörter wie \"Eisenbindestrichinfusion\" auftrennen zu \"Eisen Bindestrich infusion\""
+          "note": "Strips .?! and soft-pause commas not shielded by a digit — '1,000' survives, 'Frau, Müller' loses its comma."
         }
       ]
     },
@@ -485,14 +493,14 @@
       "map_meta": {}
     },
     {
-      "name": "2-2-capitalize-the-letter-after-a-hyphen",
-      "label": "[2/2] Capitalize the letter after a hyphen",
+      "name": "capitalize-letter-after-hyphen",
+      "label": "Capitalize letter after hyphen",
       "enabled": true,
       "locked": false,
       "seeded": true,
       "exposed": false,
       "tags": [],
-      "note": "",
+      "note": "Uppercases a lowercase letter right after a hyphen (letters only). Back half of the compound split: de-split-punctuation-keywords + dictation-map insert the '-', this fixes the casing — 'Eisen-infusion'→'Eisen-Infusion'.",
       "type": "callback:upper",
       "pattern": "(-)([a-zäöüß])"
     },
@@ -504,41 +512,44 @@
       "seeded": true,
       "exposed": false,
       "tags": [],
-      "note": "",
+      "note": "Reassembles spaced digit groups around / , - (entries 1-3), then strips space around punctuation/brackets and collapses double-spaces (4-6).",
       "type": "regex-list",
       "entries": [
         {
           "pattern": "(\\d)\\s*([/,\\-])\\s*(\\d)",
           "replacement": "\\1\\2\\3",
-          "label": "tighten-digit-separators"
+          "label": "tighten-digit-separators",
+          "note": "Strips spaces around a / , or - between two digits: '12 / 5'→'12/5'."
         },
         {
           "pattern": "(?<=\\d) +(?=\\d[/\\-])",
           "replacement": "",
-          "label": "merge-digit-pair-before"
+          "label": "merge-digit-pair-before",
+          "note": "Strips a space between digits when the second starts a /- group: '1 2/3'→'12/3'."
         },
         {
           "pattern": "(?<=[/\\-]\\d) +(?=\\d)",
           "replacement": "",
-          "label": "merge-digit-pair-after"
+          "label": "merge-digit-pair-after",
+          "note": "Strips a space between digits right after a /- + digit: '2/3 4'→'2/34'."
         },
         {
           "pattern": "[ \\t]+([,.:;!?%\\)\\]\\}])",
           "replacement": "\\1",
           "label": "space-before-closing-punct",
-          "note": "Drop whitespace before closing punctuation so ' ,' / ' )' tighten up to ',' / ')'."
+          "note": "Drops space/tab before closing punctuation: , . : ; ! ? % ) ] }."
         },
         {
           "pattern": "([\\(\\[\\{])[ \\t]+",
           "replacement": "\\1",
           "label": "space-after-opening-punct",
-          "note": "Drop whitespace after an opening bracket so '( ' tightens to '('."
+          "note": "Drops space/tab after an opening bracket: ( [ {."
         },
         {
           "pattern": "  +",
           "replacement": " ",
           "label": "collapse-multi-space",
-          "note": "Whisper segments are joined with an empty separator — if both adjacent segments end/start with whitespace the join produces an interior double-space that no other rule cleans (the punctuation-adjacent tidy rules do not match it)."
+          "note": "Collapses 2+ spaces to one."
         }
       ]
     },
@@ -550,7 +561,7 @@
       "seeded": true,
       "exposed": false,
       "tags": [],
-      "note": "Whisper emits its own commas as soft pauses around dictation keywords, so after substitution we get runs like ',.' or ',;'. The user's intended mark wins: prefer any non-comma in the run, and within non-commas prefer the LAST one (the dictation came after the Whisper pause). A pure-comma run collapses to a single comma.",
+      "note": "Collapses a run of 2+ of ,.:;!? to one: the last non-comma in the run, else a single comma.",
       "type": "callback:dedup",
       "pattern": "[,.:;!?]{2,}"
     },
@@ -562,19 +573,20 @@
       "seeded": true,
       "exposed": false,
       "tags": [],
-      "note": "",
+      "note": "Tidies whitespace/commas around newlines (entry 1) + deletes a comma/period glued before a hyphen (entry 2).",
       "type": "regex-list",
       "entries": [
         {
           "pattern": "[ \\t]*,?[ \\t]*(\\n+)[ \\t]*,?[ \\t]*",
           "replacement": "\\1",
           "label": "tidy-newlines",
-          "note": "Around a dictation-emitted newline there is often residue: a Whisper-emitted comma ('Müller, \\n'), a trailing space, or punctuation that leaked through ('\\n , Welt'). Collapse the neighborhood — optional whitespace + optional comma — on each side."
+          "note": "Around a dictated newline, collapses optional whitespace + optional comma each side, keeping the newline."
         },
         {
           "pattern": "(?:,|\\.)(- |-)",
           "replacement": "",
-          "label": "replace-and"
+          "label": "replace-and",
+          "note": "Deletes a comma/period glued before a hyphen, including the hyphen: 'a,-b'→'ab'."
         }
       ]
     },
@@ -586,7 +598,7 @@
       "seeded": true,
       "exposed": false,
       "tags": [],
-      "note": "After dictation inserts '.', '?', '!' or a newline, the following letter starts a new sentence/paragraph. Whisper does not know about our substitution, so it leaves that letter lowercase — fix it here.",
+      "note": "Uppercases the first letter after '.?!'+whitespace or after a newline (whitespace required, so 'x.y' is untouched).",
       "type": "callback:upper",
       "pattern": "([.?!]\\s+|\\n+\\s*)([a-zäöüß])"
     },
@@ -598,7 +610,7 @@
       "seeded": true,
       "exposed": false,
       "tags": [],
-      "note": "Final, hardcoded terminal step — runs after the loop. lstrip + rstrip strip leading and trailing space/tab/CR but NOT '\\n', so a user-dictated leading or trailing 'neue Zeile' at the edges of the utterance survives.",
+      "note": "Terminal step: lstrip/rstrip space, tab, CR — but NOT newline, so a dictated leading/trailing 'neue Zeile' survives.",
       "type": "terminal"
     }
   ]
