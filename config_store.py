@@ -854,6 +854,14 @@ RuleLabel = Annotated[str, Field(min_length=1, max_length=80)]
 # schemas apart.
 TAG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 
+# Reserved override-profile name meaning "apply NO profile — plain server
+# defaults". A client sends this (via override_profile / the WS handshake) to
+# SUPPRESS every identity-bound profile layer and fall straight through to
+# per-model + global config. Underscores can't match TAG_RE, so it can never
+# collide with a real profile name. MUST stay in sync with the frontend constant
+# NO_OVERRIDE_PROFILE (faster-whisper-frontend src/lib/types.ts).
+NO_PROFILE_SENTINEL = "__none__"
+
 
 def normalize_tags(raw: Any) -> list[str]:
     """Canonicalise a raw tag list: trim, lowercase, drop empties, dedup,

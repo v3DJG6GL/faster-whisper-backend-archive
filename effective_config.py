@@ -204,9 +204,20 @@ def _gather_identity_layers(key_binding: dict[str, Any],
     """Build the ordered (most → least specific) identity layer list from the
     already-fetched bindings: key.direct, key.profiles…, user.direct,
     user.profiles…, then the request-named profile (least specific) if any and
-    permitted."""
+    permitted.
+
+    The reserved request name ``config_store.NO_PROFILE_SENTINEL`` ("apply no
+    profile") SUPPRESSES every bound profile layer (key/user ``profiles`` and the
+    request layer), leaving only the ``direct`` identity layers + per-model +
+    global — i.e. plain defaults. Suppression is gated by the same global +
+    per-identity switch as a profile *request*, so an admin who forces profiles
+    by turning the gate off is not bypassed; the allowlist doesn't apply, since
+    opting OUT of profiles isn't selecting a named one."""
     profiles = getattr(cfg, "OVERRIDE_PROFILES", None) or {}
     layers: list[dict[str, Any]] = []
+    suppress = (request_profile == config_store.NO_PROFILE_SENTINEL
+                and getattr(cfg, "ALLOW_REQUEST_OVERRIDE_PROFILE", True)
+                and request_allowed)
 
     def _append_binding(scope: str, binding: Any) -> None:
         if not isinstance(binding, dict):
@@ -215,6 +226,8 @@ def _gather_identity_layers(key_binding: dict[str, Any],
                                 None, binding.get("direct"))
         if direct is not None:
             layers.append(direct)
+        if suppress:
+            return  # "no profile": skip this identity's bound profile layers
         for pname in (binding.get("profiles") or []):
             prof = profiles.get(pname)
             lyr = _blob_to_layer(f"{scope}.profile:{pname}",
@@ -230,11 +243,13 @@ def _gather_identity_layers(key_binding: dict[str, Any],
     _append_binding("user", user_binding)
     # The request-named profile is the LEAST-specific identity layer: appended
     # last, so it fills only fields no key/user layer set and can never override
-    # or unlock an admin-pinned value (first layer with an opinion wins).
-    req_layer = _request_profile_layer(request_profile, allowed=request_allowed,
-                                       allowlist=allowlist)
-    if req_layer is not None:
-        layers.append(req_layer)
+    # or unlock an admin-pinned value (first layer with an opinion wins). The
+    # suppression sentinel adds no layer (it is not a real profile).
+    if not suppress:
+        req_layer = _request_profile_layer(request_profile, allowed=request_allowed,
+                                           allowlist=allowlist)
+        if req_layer is not None:
+            layers.append(req_layer)
     return layers
 
 

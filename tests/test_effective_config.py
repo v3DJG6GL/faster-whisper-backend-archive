@@ -412,3 +412,41 @@ def test_request_profile_cant_escape_lock_via_resolve(monkeypatch):
     assert "BEAM_SIZE" in r.locked                # still locked
     assert "beam_size" in r.dropped               # client override refused
     assert r.request_profile_applied == "fast"    # applied, just shadowed
+
+
+# --- "no profile" suppression sentinel (P27) ------------------------------
+
+def test_none_sentinel_suppresses_bound_profile(monkeypatch):
+    # A profile bound to the identity normally applies; the reserved "__none__"
+    # request name suppresses every bound profile → plain defaults.
+    _set_profiles(monkeypatch, {"clinic": {"BEAM_SIZE": 7}})
+    _bindings(monkeypatch, key={"direct": {}, "profiles": ["clinic"]})
+    assert ec.resolve("m", key_id="k").values["BEAM_SIZE"] == 7   # bound profile applies
+    r = ec.resolve("m", key_id="k", request_profile=cs.NO_PROFILE_SENTINEL)
+    assert "BEAM_SIZE" not in r.values            # bound profile suppressed
+    assert r.request_profile_applied is None       # the sentinel adds no layer
+
+
+def test_none_sentinel_keeps_direct_identity_config(monkeypatch):
+    # Suppression drops bound PROFILE layers but keeps the identity's direct
+    # config (direct isn't a "profile").
+    _set_profiles(monkeypatch, {"clinic": {"DEFAULT_LANGUAGE": "de"}})
+    _bindings(monkeypatch, key={"direct": {"BEAM_SIZE": 5}, "profiles": ["clinic"]})
+    r = ec.resolve("m", key_id="k", request_profile=cs.NO_PROFILE_SENTINEL)
+    assert r.values["BEAM_SIZE"] == 5             # direct config retained
+    assert "DEFAULT_LANGUAGE" not in r.values     # bound profile suppressed
+
+
+def test_none_sentinel_refused_when_gated_off(monkeypatch):
+    # Global gate off → suppression refused; the bound profile still applies (an
+    # admin who forces profiles by turning the gate off is not bypassed).
+    _set_profiles(monkeypatch, {"clinic": {"BEAM_SIZE": 7}}, allow=False)
+    _bindings(monkeypatch, key={"direct": {}, "profiles": ["clinic"]})
+    assert ec.resolve("m", key_id="k",
+                      request_profile=cs.NO_PROFILE_SENTINEL).values["BEAM_SIZE"] == 7
+    # Per-identity gate off (global on) → also refused.
+    _set_profiles(monkeypatch, {"clinic": {"BEAM_SIZE": 7}}, allow=True)
+    _bindings(monkeypatch, key={"direct": {}, "profiles": ["clinic"],
+                                "allow_request_override_profile": False})
+    assert ec.resolve("m", key_id="k",
+                      request_profile=cs.NO_PROFILE_SENTINEL).values["BEAM_SIZE"] == 7
