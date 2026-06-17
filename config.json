@@ -152,14 +152,14 @@
   "WORD_TIMESTAMPS_ENABLED": true,
   "PIPELINE_RULES": [
     {
-      "name": "german-symbol-cleanup",
-      "label": "German + symbol cleanup",
+      "name": "ch-symbol-cleanup",
+      "label": "Swiss German symbol cleanup",
       "enabled": true,
       "locked": false,
       "seeded": true,
       "exposed": false,
       "tags": [],
-      "note": "",
+      "note": "Swiss-German eszett normalization. Split out of the former 'German + symbol cleanup' card so this language-specific rule toggles independently of the language-agnostic symbol/format rules that used to share the card.",
       "type": "regex-list",
       "entries": [
         {
@@ -173,13 +173,39 @@
           "replacement": "SS",
           "label": "replace-szet-uc",
           "note": "Uppercase counterpart of replace-szet-lc — the capital eszett 'ẞ' becomes 'SS'."
-        },
+        }
+      ]
+    },
+    {
+      "name": "strip-stray-symbols",
+      "label": "Strip stray symbols",
+      "enabled": true,
+      "locked": false,
+      "seeded": true,
+      "exposed": false,
+      "tags": [],
+      "note": "Language-agnostic. Removes stray, non-linguistic symbols Whisper sometimes emits (quotes, brackets, math/programming glyphs) while keeping the punctuation real text needs. Was the 'strip-non-keep-punct' entry of the former 'German + symbol cleanup' card; renamed for clarity.",
+      "type": "regex-list",
+      "entries": [
         {
           "pattern": "[\\\"#$%&'()*+;<=>@\\[\\\\\\]^_`{|}~„]",
           "replacement": "",
-          "label": "strip-non-keep-punct",
-          "note": "Anything in string.punctuation NOT in ./-:,?! is removed, plus the German low quote „. The remaining ./-:,?! are kept on purpose so the later strip rules' digit-protected logic can run."
-        },
+          "label": "strip-stray-symbols",
+          "note": "Removes every character in Python's string.punctuation EXCEPT the keep-set ./-:,?! , plus the German low quote „. The keep-set is preserved on purpose so the later digit-protected strip rules (strip-whisper-punctuation, normalize-digit-range, digit tidy) can still run."
+        }
+      ]
+    },
+    {
+      "name": "normalize-digit-range",
+      "label": "Normalize digit range",
+      "enabled": true,
+      "locked": false,
+      "seeded": true,
+      "exposed": false,
+      "tags": [],
+      "note": "Language-agnostic. Split out of the former 'German + symbol cleanup' card.",
+      "type": "regex-list",
+      "entries": [
         {
           "pattern": "(\\d)\\s*-\\s*(\\d)",
           "replacement": "\\1/\\2",
