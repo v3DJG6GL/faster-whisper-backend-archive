@@ -158,6 +158,7 @@
       "locked": false,
       "seeded": true,
       "exposed": false,
+      "color": "",
       "tags": [],
       "note": "Language-agnostic. Removes stray non-linguistic symbols (quotes, brackets, math/programming glyphs) Whisper emits.",
       "type": "regex-list",
@@ -177,6 +178,7 @@
       "locked": false,
       "seeded": true,
       "exposed": false,
+      "color": "",
       "tags": [],
       "note": "Trims trailing periods; runs just before strip-auto-punctuation.",
       "type": "regex-list",
@@ -196,6 +198,7 @@
       "locked": false,
       "seeded": true,
       "exposed": false,
+      "color": "",
       "tags": [],
       "note": "Language-agnostic.",
       "type": "regex-list",
@@ -215,6 +218,7 @@
       "locked": false,
       "seeded": true,
       "exposed": false,
+      "color": "teal",
       "tags": [
         "german"
       ],
@@ -331,10 +335,11 @@
       "locked": false,
       "seeded": true,
       "exposed": false,
+      "color": "teal",
       "tags": [
         "german"
       ],
-      "note": "",
+      "note": "German dictation: splits spoken punctuation keywords (Komma, Bindestrich) glued onto words, so dictation-map can turn them into symbols.",
       "type": "regex-list",
       "entries": [
         {
@@ -358,6 +363,7 @@
       "locked": false,
       "seeded": true,
       "exposed": false,
+      "color": "teal",
       "tags": [
         "german"
       ],
@@ -385,6 +391,7 @@
       "locked": false,
       "seeded": true,
       "exposed": false,
+      "color": "",
       "tags": [
         "manual-punctation"
       ],
@@ -406,8 +413,9 @@
       "locked": true,
       "seeded": true,
       "exposed": false,
+      "color": "green",
       "tags": [],
-      "note": "",
+      "note": "Maps spoken dictation keywords → symbols/punctuation (Komma→',', Bindestrich→'-', Prozent→'%', …); case-insensitive.",
       "type": "callback:map",
       "map": {
         " Binde Strich ": "-",
@@ -499,6 +507,7 @@
       "locked": false,
       "seeded": true,
       "exposed": false,
+      "color": "",
       "tags": [],
       "note": "Uppercases a lowercase letter right after a hyphen (letters only). Back half of the compound split: de-split-punctuation-keywords + dictation-map insert the '-', this fixes the casing — 'Eisen-infusion'→'Eisen-Infusion'.",
       "type": "callback:upper",
@@ -511,6 +520,7 @@
       "locked": true,
       "seeded": true,
       "exposed": false,
+      "color": "",
       "tags": [],
       "note": "Reassembles spaced digit groups around / , - (entries 1-3), then strips space around punctuation/brackets and collapses double-spaces (4-6).",
       "type": "regex-list",
@@ -560,6 +570,7 @@
       "locked": true,
       "seeded": true,
       "exposed": false,
+      "color": "",
       "tags": [],
       "note": "Collapses a run of 2+ of ,.:;!? to one: the last non-comma in the run, else a single comma.",
       "type": "callback:dedup",
@@ -572,6 +583,7 @@
       "locked": true,
       "seeded": true,
       "exposed": false,
+      "color": "",
       "tags": [],
       "note": "Tidies whitespace/commas around newlines (entry 1) + deletes a comma/period glued before a hyphen (entry 2).",
       "type": "regex-list",
@@ -585,7 +597,7 @@
         {
           "pattern": "(?:,|\\.)(- |-)",
           "replacement": "",
-          "label": "replace-and",
+          "label": "delete-punct-before-hyphen",
           "note": "Deletes a comma/period glued before a hyphen, including the hyphen: 'a,-b'→'ab'."
         }
       ]
@@ -597,6 +609,7 @@
       "locked": true,
       "seeded": true,
       "exposed": false,
+      "color": "",
       "tags": [],
       "note": "Uppercases the first letter after '.?!'+whitespace or after a newline (whitespace required, so 'x.y' is untouched).",
       "type": "callback:upper",
@@ -609,6 +622,7 @@
       "locked": true,
       "seeded": true,
       "exposed": false,
+      "color": "",
       "tags": [],
       "note": "Terminal step: lstrip/rstrip space, tab, CR — but NOT newline, so a dictated leading/trailing 'neue Zeile' survives.",
       "type": "terminal"
