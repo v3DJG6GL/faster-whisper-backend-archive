@@ -2784,6 +2784,10 @@ _LOG_VIEWER_HTML = """<!doctype html>
   .line.warning { color: var(--yellow); }
   .line.error   { color: var(--red); }
   .line.info    { color: var(--fg); }
+  /* Dimmed pipeline no-ops — a rule force-EXCLUDED for this model or globally
+     disabled (SKIPPED). Mirrors the /quick-config skipped-step treatment;
+     opacity (not a color) so the label/before/after keep their hue, just faded. */
+  .line.dim     { opacity: 0.55; }
   {{NAV_CSS}}
 </style></head>
 <body>
@@ -2838,13 +2842,34 @@ _LOG_VIEWER_HTML = """<!doctype html>
     if (/\\/v1\\/audio\\/transcriptions/.test(line)) return 'title';
     if (/RAW WHISPER/.test(line)) return 'raw';
     if (/FINAL\\s+'/.test(line)) return 'final';
-    if (/▸\\s+\\d+\\s+/.test(line)) return 'step';
+    // Step label: "▸ #1.1 …" / "▸ #18 …" (the leading # arrived with the
+    // card-position numbering) — and the older bare "▸ 8 …" rotated format.
+    if (/▸\\s+#?\\d/.test(line)) return 'step';
     if (/^\\s*→\\s/.test(line)) return 'after';
     if (/file=|lang=|duration=|segments=|words=|format=/.test(line)) return 'meta';
     if (/(WARNING|WARN)/.test(line)) return 'warning';
     if (/(ERROR|CRITICAL)/.test(line)) return 'error';
     if (/^\\s+'.*'$/.test(line)) return 'before';
     return 'info';
+  }
+  // Pipeline steps that didn't run — force-EXCLUDED for this model, or globally
+  // disabled (SKIPPED) — are logged as a 3-line group: a ▸ label carrying the
+  // marker, then an identical before/after pair. Dim the whole group (same as
+  // the /quick-config + /reports trace viewers) so the eye skips the no-ops.
+  // `st.dimLeft` is threaded per render pass (live stream vs "Load older" batch
+  // each get their own state object) so groups never dim across a boundary.
+  const _SKIP_MARK = /\\[(EXCLUDED|SKIPPED)/;
+  function decorate(line, st) {
+    const cls = classify(line);
+    if (cls === 'step') {
+      if (_SKIP_MARK.test(line)) { st.dimLeft = 2; return cls + ' dim'; }
+      st.dimLeft = 0; return cls;            // a step that ran resets the group
+    }
+    if (cls === 'rule' || cls === 'title' || cls === 'raw' || cls === 'final') {
+      st.dimLeft = 0; return cls;            // section boundary — stop dimming
+    }
+    if (st.dimLeft > 0) { st.dimLeft--; return cls + ' dim'; }
+    return cls;
   }
   function applyFilter(el) {
     if (filterText && !el.textContent.toLowerCase().includes(filterText)) {
@@ -2870,6 +2895,9 @@ _LOG_VIEWER_HTML = """<!doctype html>
   // this so the user can scroll back through arbitrarily many rotated
   // lines without their click silently dropping the freshest content.
   const _LOG_DOM_MAX = {{LOG_VIEWER_DOM_MAX}};
+  // Persists across append() calls so a skipped step's 3 lines (arriving as 3
+  // separate SSE events) dim as one group.
+  const _liveDim = { dimLeft: 0 };
   function append(line) {
     // __LIVE_TAIL__ sentinel marks the boundary between backlog and the
     // live poll loop. After it fires we know the freshest page is in the
@@ -2880,8 +2908,7 @@ _LOG_VIEWER_HTML = """<!doctype html>
       return;
     }
     const el = document.createElement('span');
-    const cls = classify(line);
-    el.className = 'line ' + cls;
+    el.className = 'line ' + decorate(line, _liveDim);
     el.textContent = localizeLogTs(line) + '\\n';
     applyFilter(el);
     log.appendChild(el);
@@ -2936,9 +2963,10 @@ _LOG_VIEWER_HTML = """<!doctype html>
         // sits just above the existing content). Filter is reapplied per
         // line so the new batch honors any active substring search.
         const frag = document.createDocumentFragment();
+        const olderDim = { dimLeft: 0 };   // batch-local; no leak to live tail
         for (const line of lines) {
           const el = document.createElement('span');
-          el.className = 'line ' + classify(line);
+          el.className = 'line ' + decorate(line, olderDim);
           el.textContent = localizeLogTs(line) + '\\n';
           applyFilter(el);
           frag.appendChild(el);
