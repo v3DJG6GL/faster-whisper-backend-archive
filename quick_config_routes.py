@@ -440,6 +440,69 @@ async def v1_get_recent_words(
     return {"words": build_word_suggestions(user, max_words=max_words), "max": cap}
 
 
+@v1_router.get("/usage")
+async def v1_get_my_usage(
+    tz_midnight: float | None = None,
+    days: int = 30,
+    bucket: str = "day",
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    """The caller's OWN transcription usage for the desktop app's Home stats +
+    chip readout: today + lifetime totals, PLUS a self-scoped daily/weekly
+    SERIES for a trend chart — the /v1 analogue of the host-gated
+    /quick-config 'usage' banner. Lives in the /v1 namespace with NO host
+    allowlist, so a remote desktop client isn't 403'd by USER_WEBUI_ALLOWED_HOSTS
+    (unlike the browser /quick-config/usage). User-tier auth (any valid key);
+    403 if the caller's quick_config page scope is 'none'.
+
+    STRICTLY self-scoped: reads only the authenticated user's user_id, so no
+    admin scope is needed and no other user's numbers are ever returned — even
+    an admin sees only their own here (the global view lives on /stats).
+    Best-effort: any failure yields zeros + an empty series so the client just
+    hides the widget instead of erroring.
+
+    'today' resets at the VIEWER's local midnight: the client passes
+    `tz_midnight` (epoch seconds of its local 00:00); absent/invalid falls back
+    to the server's local day. `days` bounds the trend window (clamped 1..366;
+    <= 0 = lifetime/all). The series buckets into SERVER-local days like the
+    admin /stats chart; `bucket` is 'day' or 'week'."""
+    zero = {"requests": 0, "errors": 0, "words": 0, "audio_s": 0.0}
+    uid = user.get("user_id") or ""
+    bucket = "week" if str(bucket or "").lower() == "week" else "day"
+    try:
+        eff_days = int(days)
+    except (TypeError, ValueError):
+        eff_days = 30
+    today = dict(zero)
+    total = dict(zero)
+    series: list[dict[str, Any]] = []
+    if uid:
+        try:
+            import usage_store
+            if tz_midnight and tz_midnight > 0:
+                today_start = usage_store.hour_for_ts(float(tz_midnight))
+            else:
+                today_start = usage_store.local_day_start_hour()
+            total = usage_store.totals_for_user(uid)
+            today = usage_store.totals_for_user(uid, start_hour=today_start)
+            series_start: int | None = None
+            if eff_days > 0:
+                eff_days = min(eff_days, 366)
+                series_start = usage_store.local_day_start_hour(days_ago=eff_days - 1)
+            series = usage_store.series(
+                start_hour=series_start, user_id=uid, bucket=bucket,
+            )
+        except Exception:
+            today, total, series = dict(zero), dict(zero), []
+    return {
+        "username": user.get("username") or "",
+        "today": today,
+        "total": total,
+        "range": {"days": max(0, eff_days), "bucket": bucket},
+        "series": series,
+    }
+
+
 @router.get(
     "",
     # HTML page is host-only — the login modal runs in this page's
