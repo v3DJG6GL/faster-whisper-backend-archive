@@ -1740,6 +1740,21 @@ async function loadState() {
   $('status').textContent = 'loaded ' + Object.keys(state.fields).length + ' fields';
   $('status').className = 'pill ok';
   render();
+  _scrollToHashSection();   // honour /settings#sec-… deep links (e.g. from the pipeline page's section-nav)
+}
+
+// Jump to a section named in location.hash (set by cross-page section-nav chips,
+// e.g. the pipeline page links foreign sections to /settings#sec-…). Sections
+// are rendered async, so the browser's native hash scroll fires too early — we
+// scroll here after render(), deferring a frame so the JS-measured --header-h
+// scroll-margin is settled and the jump lands just below the sticky header.
+function _scrollToHashSection() {
+  const h = (location.hash || '').replace(/^#/, '');
+  if (!h) return;
+  const sec = document.getElementById(h);
+  if (!sec) return;
+  if (typeof expandSectionContaining === 'function') expandSectionContaining(sec);
+  requestAnimationFrame(() => { try { sec.scrollIntoView({ block: 'start' }); } catch (_) {} });
 }
 
 function fieldDef(name) { return state.fields[name]; }
@@ -4827,18 +4842,30 @@ function buildSectionNav() {
   navRow.innerHTML = '';
   for (const g of state.groups) {
     const id = 'sec-' + slug(g.title);
+    // Mirror render()'s view routing: the dedicated /settings/pipeline page
+    // renders ONLY the Pipeline section, so EVERY other section actually lives
+    // on the main /settings page.
+    const onThisPage = !(PIPELINE_ONLY && g.title !== 'Pipeline');
     const chip = document.createElement('a');
     chip.className = 'sec-chip';
-    chip.href = '#' + id;
     chip.dataset.target = id;
     chip.textContent = g.title;
-    chip.addEventListener('click', (e) => {
-      e.preventDefault();
-      const sec = document.getElementById(id);
-      if (!sec) return;
-      expandSectionContaining(sec);
-      sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    });
+    if (onThisPage) {
+      chip.href = '#' + id;
+      chip.addEventListener('click', (e) => {
+        e.preventDefault();
+        const sec = document.getElementById(id);
+        if (!sec) return;
+        expandSectionContaining(sec);
+        sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    } else {
+      // Section lives on /settings — make this a REAL cross-page link. Without
+      // it the pipeline page showed the full section list but every foreign chip
+      // silently did nothing (its target section isn't in this page's DOM). The
+      // /settings page scrolls to the hash on load (see _scrollToHashSection).
+      chip.href = '/settings#' + id;
+    }
     navRow.appendChild(chip);
   }
   refreshSectionToggleAllLabel();
