@@ -121,16 +121,28 @@ def _build_rules() -> list[dict[str, Any]]:
 
 def _build_usage() -> dict[str, dict[str, list[str]]]:
     """Reverse index: profile name → {users:[id…], keys:[id…]} that reference
-    it. Powers the sidebar usage counts and the usage-aware delete guard."""
+    it, either FORCED (the binding `profiles` list, auto-applied) or merely
+    REQUESTABLE (the `allowed_override_profiles` allowlist). Both fields count
+    so the delete guard refuses ANY referenced profile — an allowlist-only name
+    would otherwise look unused and delete silently, stranding a dangling
+    reference that the binding's next save then rejects. Mirrors rename, which
+    also follows both fields. Powers the sidebar usage counts and the
+    usage-aware delete guard."""
     usage: dict[str, dict[str, list[str]]] = {
         name: {"users": [], "keys": []} for name in (getattr(cfg, "OVERRIDE_PROFILES", None) or {})
     }
+
+    def _refs(binding: "dict[str, Any] | None") -> set[str]:
+        b = binding or {}
+        return {p for field in ("profiles", "allowed_override_profiles")
+                for p in (b.get(field) or []) if isinstance(p, str)}
+
     for u in api_keys_store.list_users():
         uid = u["id"]
-        for p in api_keys_store.get_user_config(uid).get("profiles", []):
+        for p in _refs(api_keys_store.get_user_config(uid)):
             usage.setdefault(p, {"users": [], "keys": []})["users"].append(uid)
         for k in api_keys_store.list_keys(uid):
-            for p in (k.get("config") or {}).get("profiles", []):
+            for p in _refs(k.get("config")):
                 usage.setdefault(p, {"users": [], "keys": []})["keys"].append(k["id"])
     return usage
 

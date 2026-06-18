@@ -84,6 +84,26 @@ def test_create_profile_roundtrip_and_usage(client, make_user_key):
     assert "clinic-de" in j["usage"]
 
 
+def test_delete_guard_counts_allowlist_only_reference(client, make_user_key):
+    # A profile referenced ONLY in a key's requestable allowlist (not forced in
+    # `profiles`) must still appear in usage, so the WebUI delete guard refuses
+    # it instead of allowing a silent delete that strands a dangling allowlist
+    # name — which that binding's next save would then reject.
+    _, _, h = _admin(make_user_key)
+    _make_profile(client, h, "clinic-de", DEFAULT_LANGUAGE="de")
+    uid, _ = make_user_key("alice", is_admin=False)
+    kid = client.get(f"{PERMS}/{uid}/keys", headers=h).json()["keys"][0]["id"]
+    # bind the profile ONLY via the allowlist — NOT forced in `profiles`
+    r = client.patch(f"{PERMS}/{uid}/keys/{kid}/config", headers=h, json={
+        "overrides": {}, "profiles": [], "locks": [],
+        "allowed_override_profiles": ["clinic-de"]})
+    assert r.status_code == 200, r.text
+
+    usage = client.get(f"{OV}/state", headers=h).json()["usage"]["clinic-de"]
+    assert kid in usage["keys"]          # allowlist-only ref now counted
+    assert usage["users"] == []          # not forced/allowed on any user
+
+
 def test_bad_profile_value_422(client, make_user_key):
     _, _, h = _admin(make_user_key)
     r = client.post(f"{OV}/state", headers=h,
