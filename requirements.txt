@@ -16,7 +16,7 @@
 #   # GPU (NVIDIA, Windows or Linux):  pip install -r requirements-gpu.txt
 #   # Running the tests:               pip install -r requirements-dev.txt
 
-fastapi>=0.137.1
+fastapi>=0.137.2
 uvicorn[standard]>=0.49.0
 python-multipart>=0.0.32
 faster-whisper>=1.2.1
