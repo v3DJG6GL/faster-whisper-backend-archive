@@ -1230,6 +1230,24 @@ _SETTINGS_VIEWER_HTML = r"""<!doctype html>
     font-size: var(--fs-sm); min-width: 1.6rem; height: 1.6rem; display: flex;
     align-items: center; justify-content: center; background: var(--bg);
     border: 1px solid var(--border); border-radius: 7px; }
+  /* Rank stepper — the ord chip grown into ▲/number/▼. The stepper IS the chip
+     (border + bg + rounded); the ord loses its own chrome and becomes the middle
+     segment with hairline dividers; ▲/▼ nudge one position without dragging
+     (drag the grip for big jumps). Direction maps to position: ▲ = toward top. */
+  .rule-rail .rank-stepper { display: flex; flex-direction: column; align-items: stretch;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
+  .rule-rail .rank-stepper .ordinal { border: 0; border-radius: 0; background: none;
+    height: auto; min-width: 1.6rem; padding: 0.12rem 0.3rem;
+    border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+  .rule-rail .move-btn { background: none; border: 0; cursor: pointer; color: var(--dim);
+    padding: 0.1rem 0.3rem; line-height: 0; display: flex; align-items: center;
+    justify-content: center; transition: color .12s ease, background .12s ease, transform .08s ease; }
+  .rule-rail .move-btn svg { width: 0.72rem; height: 0.72rem; display: block; }
+  .rule-rail .move-btn:hover:not(:disabled) { color: var(--fg); background: var(--panel); }
+  .rule-rail .move-up:active:not(:disabled) { transform: translateY(-1px); color: var(--cyan); }
+  .rule-rail .move-down:active:not(:disabled) { transform: translateY(1px); color: var(--cyan); }
+  .rule-rail .move-btn:focus-visible { outline: 2px solid var(--cyan); outline-offset: -2px; color: var(--fg); }
+  .rule-rail .move-btn:disabled { opacity: 0.25; cursor: default; }
   /* Lock toggle — asymmetric so "locked" reads at a glance independent of the
      padlock glyph: unlocked = faint open lock (brightens on hover); locked =
      filled dark glyph on a solid YELLOW chip. The chip carries the state even
@@ -2954,6 +2972,7 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
     if (!dragSrcEl) return;
     e.preventDefault();                          // required for drop to fire
     e.dataTransfer.dropEffect = 'move';
+    DRAG_AUTOSCROLL.move(e.clientY);             // keep scrolling near an edge
   });
   list.addEventListener('dragenter', (e) => {
     if (!dragSrcEl) return;
@@ -2971,6 +2990,7 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
   list.addEventListener('drop', (e) => {
     if (!dragSrcEl) return;
     e.preventDefault();
+    DRAG_AUTOSCROLL.stop();
     // Convert placeholder DOM position → rules-array index by counting
     // visible .rule-row siblings before it (source is hidden, excluded).
     let newIdx = 0;
@@ -3385,6 +3405,7 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
       drag.addEventListener('dragstart', (e) => {
         dragSrcIdx = idx;
         dragSrcEl = row;
+        DRAG_AUTOSCROLL.begin(list);   // resolve scroll target for edge auto-scroll
         // Firefox requires setData() — without it, the drag never fires.
         try { e.dataTransfer.setData('text/plain', String(idx)); } catch (_) {}
         e.dataTransfer.effectAllowed = 'move';
@@ -3406,6 +3427,7 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
       });
       drag.addEventListener('dragend', () => {
         // Always cleanup here — fires even on cancelled drops (Esc, off-screen).
+        DRAG_AUTOSCROLL.stop();
         row.style.display = '';
         row.classList.remove('dragging');
         if (placeholder.parentNode) placeholder.remove();
@@ -3442,10 +3464,49 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
     }
     _syncUntaggedBadge();
 
+    // Rank stepper — the rank chip grown into a number-stepper: ▲ above, rank
+    // in the middle, ▼ below. One-position nudges without dragging (drag the
+    // grip for big jumps). Direction maps to position: ▲ moves toward the top.
+    // upBtn/downBtn are hoisted so _applyLockState() can disable them when the
+    // rule is locked, alongside the drag grip.
+    let upBtn = null, downBtn = null;
+    const _hasTerminal = rules.some(r => r.type === 'terminal');
+    const _lastMovable = _hasTerminal ? rules.length - 2 : rules.length - 1;
+    function _moveRuleBy(delta) {
+      if (rule.type === 'terminal') return;
+      const from = idx, to = from + delta;
+      if (to < 0 || to >= rules.length) return;
+      const [moved] = rules.splice(from, 1);
+      rules.splice(to, 0, moved);
+      // Defensive: keep terminal last (mirrors the drop handler).
+      const tIdx = rules.findIndex(r => r.type === 'terminal');
+      if (tIdx >= 0 && tIdx !== rules.length - 1) {
+        const [tr] = rules.splice(tIdx, 1);
+        rules.push(tr);
+      }
+      commitFull();
+    }
+    const rankStepper = document.createElement('div');
+    rankStepper.className = 'rank-stepper';
+    upBtn = document.createElement('button');
+    upBtn.type = 'button'; upBtn.className = 'move-btn move-up';
+    upBtn.innerHTML = MOVE_CHEV_UP;
+    upBtn.title = 'Move up one position'; upBtn.setAttribute('aria-label', upBtn.title);
+    if (rule.type === 'terminal' || idx <= 0) upBtn.disabled = true;
+    upBtn.addEventListener('click', () => { if (!upBtn.disabled) _moveRuleBy(-1); });
     const ord = document.createElement('span');
     ord.className = 'ordinal';
     ord.textContent = String(idx + 1);
-    rail.appendChild(ord);
+    downBtn = document.createElement('button');
+    downBtn.type = 'button'; downBtn.className = 'move-btn move-down';
+    downBtn.innerHTML = MOVE_CHEV_DOWN;
+    downBtn.title = 'Move down one position'; downBtn.setAttribute('aria-label', downBtn.title);
+    if (rule.type === 'terminal' || idx >= _lastMovable) downBtn.disabled = true;
+    downBtn.addEventListener('click', () => { if (!downBtn.disabled) _moveRuleBy(1); });
+    rankStepper.appendChild(upBtn);
+    rankStepper.appendChild(ord);
+    rankStepper.appendChild(downBtn);
+    rail.appendChild(rankStepper);
 
     // Lock padlock — toggles rule.locked. Locked = enforced read-only (the
     // whole body + header toggles + drag are disabled) at FULL contrast, not
@@ -3882,6 +3943,10 @@ function makeRuleListEditor(name, initialRules, mode, opts) {
       headLine1.querySelectorAll('.switch').forEach(el => { el.disabled = true; });
       headLine2.querySelectorAll('input, button, .switch').forEach(el => { el.disabled = true; });
       drag.draggable = false;
+      // Locked = "protect from edits + reorder": kill the ↑/↓ nudges too, not
+      // just the drag grip (a locked rule must not move by any affordance).
+      if (upBtn) upBtn.disabled = true;
+      if (downBtn) downBtn.disabled = true;
     }
     _applyLockState();
     return row;

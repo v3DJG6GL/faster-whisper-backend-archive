@@ -767,19 +767,33 @@ input[type="checkbox"].switch:focus-visible {
    against `.rule-editor input` / `.card .rule-editor input`. All sizing in
    rem/em + --fs-* tokens; --font-mono for the find/replace code inputs. */
 .rule-editor .rl-entries { display: flex; flex-direction: column; gap: 0.3rem; margin-top: 0.4rem; }
-.rule-editor .rl-entry { display: grid; grid-template-columns: 1.6rem 1fr; align-items: start;
+.rule-editor .rl-entry { display: grid; grid-template-columns: 1.75rem 1fr; align-items: start;
   background: #12171f; border: 1px solid var(--border, #30363d); border-radius: 5px; }
 .rule-editor .rl-entry.rl-dragging { opacity: 0.35; outline: 2px dashed var(--cyan, #79c0ff); }
-.rule-editor .rl-rail { display: flex; flex-direction: column; align-items: center; gap: 0.25rem;
-  padding: 0.45rem 0; border-right: 1px solid var(--border, #30363d); background: #0f141b;
+.rule-editor .rl-rail { display: flex; flex-direction: column; align-items: center; gap: 0.3rem;
+  padding: 0.4rem 0; border-right: 1px solid var(--border, #30363d); background: #0f141b;
   border-radius: 5px 0 0 5px; }
-.rule-editor .rl-ord { font-family: var(--font-mono); font-size: var(--fs-xs); font-weight: 700;
-  color: var(--cyan, #79c0ff); width: 1.25rem; height: 1.25rem; display: flex;
-  align-items: center; justify-content: center; background: #10202e;
-  border: 1px solid #1f4d63; border-radius: 50%; }
 .rule-editor .rl-grip { cursor: grab; font-size: 0.95rem; line-height: 1;
   color: var(--dim, #6e7681); user-select: none; }
 .rule-editor .rl-grip:active { cursor: grabbing; }
+/* Rank stepper — ▲ / number / ▼ in one chip: nudge an entry one slot without
+   dragging (drag the grip for big jumps). Direction maps to position: ▲ moves
+   the entry toward the top. */
+.rule-editor .rl-stepper { display: flex; flex-direction: column; align-items: stretch;
+  background: #10202e; border: 1px solid #1f4d63; border-radius: 6px; overflow: hidden; }
+.rule-editor .rl-ord { font-family: var(--font-mono); font-size: var(--fs-xs); font-weight: 700;
+  color: var(--cyan, #79c0ff); text-align: center; padding: 0.05rem 0.25rem; min-width: 1.1rem;
+  border-top: 1px solid #1f4d63; border-bottom: 1px solid #1f4d63; }
+.rule-editor .rl-move { background: none; border: 0; cursor: pointer; color: var(--dim, #6e7681);
+  padding: 0.08rem 0.2rem; line-height: 0; display: flex; align-items: center; justify-content: center;
+  transition: color .12s ease, background .12s ease, transform .08s ease; }
+.rule-editor .rl-move svg { width: 0.62rem; height: 0.62rem; display: block; }
+.rule-editor .rl-move:hover:not(:disabled) { color: var(--fg, #e6edf3); background: #163243; }
+.rule-editor .rl-move-up:active:not(:disabled) { transform: translateY(-1px); color: var(--cyan, #79c0ff); }
+.rule-editor .rl-move-down:active:not(:disabled) { transform: translateY(1px); color: var(--cyan, #79c0ff); }
+.rule-editor .rl-move:focus-visible { outline: 2px solid var(--cyan, #79c0ff); outline-offset: -2px;
+  color: var(--fg, #e6edf3); }
+.rule-editor .rl-move:disabled { opacity: 0.25; cursor: default; }
 .rule-editor .rl-ebody { padding: 0.45rem 0.55rem; min-width: 0; }
 .rule-editor .rl-erow1 { display: flex; align-items: center; gap: 0.4rem; margin-bottom: 0.35rem; }
 .rule-editor .rl-elabelwrap { flex: 1; min-width: 0; }
@@ -1981,6 +1995,60 @@ function _makeMapRow(rule, key, val, commitData, datalistId, onEnter, ts, showDa
 // scoping; _esc/_unesc handle \n etc. in the single-line pattern/replacement.
 let _rlDragSrc = null;
 
+// ---- Shared reorder affordances (used by THIS regex-list editor AND the
+// admin pipeline-rule list, which is a sibling <script> parsed after this one
+// so it inherits these globals) -------------------------------------------
+// Edge auto-scroll for native-DnD reorder lists. The browser's built-in drag
+// auto-scroll only fires in a sliver at the very viewport edge, crawls at a
+// fixed speed, and stalls the instant the pointer holds still. This drives a
+// requestAnimationFrame loop from the LAST pointer Y, so parking near an edge
+// keeps scrolling, with speed ramping by how deep into the hot-zone the pointer
+// sits. begin(listEl) resolves the scroll target (nearest scrollable ancestor,
+// else the window) once per drag; feed move(clientY) from dragover; stop() on
+// dragend/drop. One native drag at a time per tab, so a single shared instance
+// (DRAG_AUTOSCROLL) serves every reorder list on the page.
+function makeDragAutoScroll() {
+  let raf = null, lastY = 0, scroller = null;   // scroller === null → window
+  function resolve(listEl) {
+    let el = listEl && listEl.parentElement;
+    while (el) {
+      const oy = getComputedStyle(el).overflowY;
+      if ((oy === 'auto' || oy === 'scroll') && el.scrollHeight > el.clientHeight + 1) {
+        scroller = el; return;
+      }
+      el = el.parentElement;
+    }
+    scroller = null;
+  }
+  function tick() {
+    let top, bottom;
+    if (scroller) { const r = scroller.getBoundingClientRect(); top = r.top; bottom = r.bottom; }
+    else { top = 0; bottom = window.innerHeight; }
+    const zone = Math.max(48, Math.min((bottom - top) * 0.18, 140));   // hot-zone px
+    let m = 0;                                    // -1..1, sign = scroll direction
+    if (lastY < top + zone) m = -Math.min(1, (top + zone - lastY) / zone);
+    else if (lastY > bottom - zone) m = Math.min(1, (lastY - (bottom - zone)) / zone);
+    if (m) {
+      const step = Math.sign(m) * Math.ceil(Math.pow(Math.abs(m), 1.5) * 24);  // ease-in, cap 24px/frame
+      if (scroller) scroller.scrollTop += step;
+      else window.scrollBy(0, step);
+    }
+    raf = requestAnimationFrame(tick);
+  }
+  return {
+    begin(listEl) { resolve(listEl); },
+    move(y) { lastY = y; if (raf === null) raf = requestAnimationFrame(tick); },
+    stop() { if (raf !== null) cancelAnimationFrame(raf); raf = null; scroller = null; },
+  };
+}
+const DRAG_AUTOSCROLL = makeDragAutoScroll();
+
+// Thin stroke chevrons for the ↑/↓ one-position "move" buttons (the keyboard /
+// no-drag path that complements drag-to-reorder). Stroke (not filled triangle)
+// to read light at rail size and sit consistently beside the inline-SVG lock.
+const MOVE_CHEV_UP = '<svg viewBox="0 0 16 16" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3.5 10.5 8 6l4.5 4.5"/></svg>';
+const MOVE_CHEV_DOWN = '<svg viewBox="0 0 16 16" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3.5 5.5 8 10l4.5-4.5"/></svg>';
+
 function _readEntries(parent) {
   const out = [];
   parent.querySelectorAll('.rl-entry').forEach((en) => {
@@ -2001,10 +2069,17 @@ function _readEntries(parent) {
 }
 
 function _renumberEntries(parent) {
-  let i = 0;
-  parent.querySelectorAll('.rl-entry').forEach((en) => {
+  // Renumber ords AND refresh ↑/↓ disabled state — first row can't go up, last
+  // can't go down. Runs after every add / delete / drag / button-move, so the
+  // end-stops stay correct without each row tracking its own neighbours.
+  const rows = parent.querySelectorAll('.rl-entry');
+  rows.forEach((en, i) => {
     const o = en.querySelector('.rl-ord');
-    if (o) o.textContent = String(++i);
+    if (o) o.textContent = String(i + 1);
+    const up = en.querySelector('.rl-move-up');
+    const dn = en.querySelector('.rl-move-down');
+    if (up) up.disabled = (i === 0);
+    if (dn) dn.disabled = (i === rows.length - 1);
   });
 }
 
@@ -2018,11 +2093,11 @@ function _makeEntryRow(rule, entry, commitData, onEnter) {
     rule.entries = _readEntries(parent);
     commitData();
   }
-  // rail: ordinal (set by _renumberEntries) + drag handle
+  // rail: drag grip (top) + a "rank stepper" — ▲ / ordinal / ▼ — for one-
+  // position nudges without dragging. The ordinal + end-stops are maintained
+  // by _renumberEntries; drag the grip for big jumps (now with edge auto-scroll).
   const rail = document.createElement('div');
   rail.className = 'rl-rail';
-  const ord = document.createElement('span');
-  ord.className = 'rl-ord'; ord.textContent = '0';
   const grip = document.createElement('span');
   grip.className = 'rl-grip'; grip.textContent = '⠿';
   grip.title = 'drag to reorder'; grip.draggable = true;
@@ -2030,10 +2105,12 @@ function _makeEntryRow(rule, entry, commitData, onEnter) {
     _rlDragSrc = row;
     e.dataTransfer.effectAllowed = 'move';
     try { e.dataTransfer.setData('text/plain', 'x'); } catch (_) {}
+    DRAG_AUTOSCROLL.begin(row.parentNode);
     setTimeout(() => row.classList.add('rl-dragging'), 0);
   });
   grip.addEventListener('dragend', () => {
     row.classList.remove('rl-dragging'); _rlDragSrc = null;
+    DRAG_AUTOSCROLL.stop();
     // A drop OUTSIDE entriesBox fires no 'drop', so the live-reordered DOM
     // (moved during dragover) would stay out of sync with rule.entries and
     // Save would persist the OLD order. dragend always fires — sync here too
@@ -2041,7 +2118,39 @@ function _makeEntryRow(rule, entry, commitData, onEnter) {
     const parent = row.parentNode;
     if (parent) { rule.entries = _readEntries(parent); _renumberEntries(parent); commitData(); }
   });
-  rail.appendChild(ord); rail.appendChild(grip);
+  const ord = document.createElement('span');
+  ord.className = 'rl-ord'; ord.textContent = '0';
+  // ↑/↓ move this entry one position. The DOM is the source of truth, so a move
+  // is just "reinsert the row, then _readEntries + renumber + commit" — exactly
+  // what a drop does. nextElementSibling.nextElementSibling → null appends (last).
+  function _rlMove(delta) {
+    const parent = row.parentNode;
+    if (!parent) return;
+    if (delta < 0) {
+      const prev = row.previousElementSibling;
+      if (prev) parent.insertBefore(row, prev);
+    } else {
+      const next = row.nextElementSibling;
+      if (next) parent.insertBefore(row, next.nextElementSibling);
+    }
+    rule.entries = _readEntries(parent);
+    _renumberEntries(parent);
+    commitData();
+  }
+  const stepper = document.createElement('div');
+  stepper.className = 'rl-stepper';
+  const upBtn = document.createElement('button');
+  upBtn.type = 'button'; upBtn.className = 'rl-move rl-move-up';
+  upBtn.innerHTML = MOVE_CHEV_UP; upBtn.title = 'Move up one position';
+  upBtn.setAttribute('aria-label', upBtn.title);
+  upBtn.addEventListener('click', () => { if (!upBtn.disabled) _rlMove(-1); });
+  const dnBtn = document.createElement('button');
+  dnBtn.type = 'button'; dnBtn.className = 'rl-move rl-move-down';
+  dnBtn.innerHTML = MOVE_CHEV_DOWN; dnBtn.title = 'Move down one position';
+  dnBtn.setAttribute('aria-label', dnBtn.title);
+  dnBtn.addEventListener('click', () => { if (!dnBtn.disabled) _rlMove(1); });
+  stepper.appendChild(upBtn); stepper.appendChild(ord); stepper.appendChild(dnBtn);
+  rail.appendChild(grip); rail.appendChild(stepper);
   // body
   const body = document.createElement('div');
   body.className = 'rl-ebody';
@@ -2186,6 +2295,7 @@ function renderTypeEditor(rule, commitData, opts) {
     entriesBox.addEventListener('dragover', (e) => {
       if (!_rlDragSrc || _rlDragSrc.parentNode !== entriesBox) return;
       e.preventDefault();
+      DRAG_AUTOSCROLL.move(e.clientY);
       const after = Array.from(
         entriesBox.querySelectorAll('.rl-entry:not(.rl-dragging)')
       ).find((en) => {
@@ -2199,6 +2309,7 @@ function renderTypeEditor(rule, commitData, opts) {
     entriesBox.addEventListener('drop', (e) => {
       if (!_rlDragSrc || _rlDragSrc.parentNode !== entriesBox) return;
       e.preventDefault();
+      DRAG_AUTOSCROLL.stop();
       rule.entries = _readEntries(entriesBox);
       _renumberEntries(entriesBox);
       commitData();
