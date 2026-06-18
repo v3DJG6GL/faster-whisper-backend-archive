@@ -237,3 +237,28 @@ def test_rename_profile_bad_name_and_noop_400(client, make_user_key):
     # renaming to the current name is a no-op error
     assert client.post(f"{OV}/profiles/rename", headers=h,
                        json={"old": "good", "new": "good"}).status_code == 400
+
+
+def test_rename_profile_old_name_case_insensitive(client, make_user_key):
+    """Profile keys are always stored lowercase, so the endpoint lowercases `old`
+    before both the lookup and the binding cascade. A direct API caller passing
+    `old` in mixed case must still match (200, not a spurious 404) and the same
+    lowercased name must flow to the reference cascade."""
+    import api_keys_store
+    _, _, h = _admin(make_user_key)
+    _make_profile(client, h, "clinic-de", DEFAULT_LANGUAGE="de")
+    uid, _ = make_user_key("alice", is_admin=False)
+    r = client.patch(f"{PERMS}/{uid}/permissions", headers=h, json={
+        "pages": {}, "config": {"overrides": {}, "profiles": ["clinic-de"],
+                                "locks": [], "allowed_override_profiles": []}})
+    assert r.status_code == 200, r.text
+    # `old` sent upper-case; stored key is lowercase "clinic-de".
+    r = client.post(f"{OV}/profiles/rename", headers=h,
+                    json={"old": "CLINIC-DE", "new": "clinic-deutsch"})
+    assert r.status_code == 200, r.text
+    # The lowercased `old` also reached the cascade (the binding ref matched).
+    assert r.json()["bindings_updated"] == 1
+    j = client.get(f"{OV}/state", headers=h).json()
+    assert "clinic-de" not in j["profiles"]
+    assert "clinic-deutsch" in j["profiles"]
+    assert api_keys_store.get_user_config(uid)["profiles"] == ["clinic-deutsch"]
