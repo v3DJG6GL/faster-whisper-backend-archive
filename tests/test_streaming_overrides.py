@@ -240,3 +240,32 @@ def test_setup_window_error_delivers_internal_error_and_closes(
     # carry filesystem/internal detail) — it is logged server-side instead.
     assert "kaboom" not in errors[0]["message"]
     assert errors[0]["message"] == "internal error"
+
+
+def test_model_load_failure_delivers_generic_error_and_closes(
+        client, make_user_key, app_module, monkeypatch):
+    """A model-load failure during the handshake must deliver a
+    `model_load_failed` frame and close — without leaking the raw exception
+    text (it can carry the model dir / filesystem path); the detail is logged
+    server-side instead. Mirrors the internal-error guard above for the other
+    client-facing error reply touched by the same security fix."""
+    _, raw_alice = make_user_key("alice")
+
+    async def _boom(name):
+        raise RuntimeError("/srv/models/secret-path missing")
+
+    monkeypatch.setattr(app_module, "_get_or_load_model", _boom)
+
+    with client.websocket_connect(
+            f"/v1/audio/transcriptions/stream?key={raw_alice}") as ws:
+        ws.send_json({"type": "config", "model": "whisper-1",
+                      "audio": {"format": "pcm_s16le", "sample_rate": 16000}})
+        msgs = _drain(ws)
+
+    errors = [m for m in msgs if m.get("type") == "error"]
+    assert errors, f"expected a model_load_failed frame, got {msgs!r}"
+    assert errors[0]["code"] == "model_load_failed"
+    # Security: the raw exception text (filesystem / model-dir paths) must not
+    # reach the client; it is logged server-side instead.
+    assert "secret-path" not in errors[0]["message"]
+    assert errors[0]["message"] == "model could not be loaded"
