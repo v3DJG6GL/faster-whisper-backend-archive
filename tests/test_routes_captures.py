@@ -5,6 +5,9 @@ tests focus on the read/list/route-ordering/auth surface that works without
 fabricating audio blobs.
 """
 
+import os
+
+import pytest
 from starlette.testclient import TestClient
 
 from conftest import bearer
@@ -100,3 +103,63 @@ def test_clear_requires_admin_when_locked(client, make_user_key):
     _uid, raw = make_user_key("alice", pages={"captures": "own"})
     r = client.post("/captures/api/clear", headers=bearer(raw))
     assert r.status_code == 403
+
+
+def test_merge_member_scope_guard_precedes_state_checks(
+        captures_store_db, monkeypatch, tmp_path):
+    """A scope=own caller probing ANOTHER user's capture id must get a uniform
+    404 from the ownership guard — not a 400/410 that would leak the capture's
+    existence + state. Regression guard for _validate_merge_payload: the
+    per-member scope check must run BEFORE the already-in-sample / audio-missing
+    checks."""
+    import wave
+
+    import audio_transcode
+    import auth
+    import captures_routes
+    from fastapi import HTTPException
+
+    cs = captures_store_db
+
+    def _fake_transcode(src_path, dst_path):
+        with wave.open(dst_path, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(16000)
+            w.writeframes(b"\x00\x00" * 100)
+        return 1234
+
+    monkeypatch.setattr(
+        audio_transcode, "transcode_to_wav_16k_mono", _fake_transcode)
+
+    src = tmp_path / "src.bin"
+    src.write_bytes(b"junk")
+    cid = cs.create_capture(
+        audio_src_path=str(src), request_id="r1", model="small",
+        language="de", duration_seconds=1.0, raw="r", final="f",
+        words=[], segments=[], user_id="alice",
+    )
+    # Delete the audio so the OLD ordering would raise 410 ("audio is missing"),
+    # leaking that the row exists; the fix must 404 for a non-owner first.
+    os.unlink(cs.abs_audio_path(cs.get_capture(cid)["audio_relpath"]))
+
+    # bob: scope=own captures user, NOT the owner and NOT admin → uniform 404.
+    bob = {
+        "user_id": "bob",
+        "permissions": auth.Permissions(
+            {"pages": {"captures": "own"}}, is_admin=False),
+    }
+    with pytest.raises(HTTPException) as ei:
+        captures_routes._validate_merge_payload([cid], 0, bob)
+    assert ei.value.status_code == 404
+
+    # The OWNER still reaches the real state check (410), proving the guard
+    # blocks only cross-user probes — not the owner's own legitimate errors.
+    alice = {
+        "user_id": "alice",
+        "permissions": auth.Permissions(
+            {"pages": {"captures": "own"}}, is_admin=False),
+    }
+    with pytest.raises(HTTPException) as ei2:
+        captures_routes._validate_merge_payload([cid], 0, alice)
+    assert ei2.value.status_code == 410

@@ -928,6 +928,15 @@ def _validate_merge_payload(
             raise HTTPException(
                 status.HTTP_404_NOT_FOUND, f"capture {mid} not found",
             )
+        # Enforce the scope guard per-member BEFORE revealing any state
+        # (already-in-sample / audio-missing) — otherwise a scope=own caller
+        # could probe another user's capture id for existence + state. scope=all
+        # (incl. admin) bypasses; scope=own requires the caller to BE the owner.
+        # 404 (not 403) matches the captures detail endpoints — don't leak
+        # existence.
+        user["permissions"].assert_can_read_row(
+            cap, "captures", user.get("user_id") or "",
+        )
         if cap.get("sample_id"):
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST,
@@ -947,9 +956,9 @@ def _validate_merge_payload(
             "members must all belong to the same user",
         )
     owner_user_id = next(iter(user_ids))
-    # Scope guard via the policy object. scope=all (incl. admin) bypasses;
-    # scope=own requires the caller to BE the owner. 404 (not 403) matches
-    # the captures detail endpoints — don't leak existence.
+    # Re-assert at the resolved owner (defense-in-depth; the per-member guard in
+    # the loop above already enforced this for every member). scope=all (incl.
+    # admin) bypasses; scope=own requires the caller to BE the owner.
     user["permissions"].assert_can_read_row(
         {"user_id": owner_user_id}, "captures", user.get("user_id") or "",
     )
