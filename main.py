@@ -2447,10 +2447,20 @@ async def transcribe(
 
             return {"text": full_text_str}
 
+        except HTTPException:
+            # Preserve curated HTTP errors (e.g. an allowed-models 400) with
+            # their status + message intact — only unexpected errors below are
+            # genericised.
+            _status = "error"
+            raise
         except Exception as e:
             _status = "error"
+            # Log the raw exception server-side, but return a GENERIC detail to
+            # the client: str(e) here can carry model-dir / filesystem (temp)
+            # paths (av/ffmpeg decode + model-load errors). Mirrors the
+            # streaming WS hardening — never forward raw str(exc) to a caller.
             logger.error("Transcription error: %s", e)
-            raise HTTPException(status_code=500, detail=str(e))
+            raise HTTPException(status_code=500, detail="transcription failed")
 
         finally:
             if tmp_path:
