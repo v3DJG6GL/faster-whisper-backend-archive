@@ -330,9 +330,12 @@ async def apply_rules_patch(
         }
     except OSError as e:
         logger.error("[pipeline-rules] save failed: %s", e)
+        # Generic client detail — the OSError text embeds the absolute
+        # config.local.json path, and this patch endpoint is reachable by a
+        # non-admin user (exposed-rule edits). Full detail is logged above.
         raise HTTPException(
             status.HTTP_500_INTERNAL_SERVER_ERROR,
-            f"could not write config.local.json: {e}",
+            "could not save configuration",
         )
 
     applied = await _apply_hot_changes(written)
