@@ -15,7 +15,7 @@ accelerate>=1.14.0
 
 # huggingface_hub is already a transitive dep of faster-whisper, but listed
 # explicitly so the version pin is auditable here.
-huggingface_hub>=1.21.0
+huggingface_hub>=1.22.0
 
 # filelock is also already a transitive (via huggingface_hub); listed for
 # the same reason — we use it directly for cross-worker conversion locking.
