@@ -20,8 +20,8 @@ Security model:
                         against `{"locked": false}`-style bypass attempts —
                         the filter runs BEFORE the merge into PIPELINE_RULES.
 
-The recent-traces ring buffer holds literal patient dictation snippets on
-a medical deployment. RAM-only, capped, lost on restart. Don't log
+The recent-traces ring buffer holds literal dictation snippets, which
+can be sensitive. RAM-only, capped, lost on restart. Don't log
 buffer contents and don't persist them.
 """
 
@@ -706,7 +706,7 @@ async def get_reapply_rules_status(
 # The ring buffer lives in quick_config_state. main.py's transcribe handler
 # appends an entry per completed transcription. Both endpoints below are
 # token-gated so end-users without a valid token can't enumerate recent
-# patient dictation snippets.
+# dictation snippets.
 
 @router.get(
     "/recent",

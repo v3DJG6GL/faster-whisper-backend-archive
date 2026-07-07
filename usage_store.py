@@ -38,8 +38,8 @@ join to the api-keys DB.
 Module-level connection: WAL mode lets us share one connection across
 threads (check_same_thread=False); _lock serialises writers.
 
-Do not log row content — this is a medical deployment. Module log lines
-carry only counts and id prefixes.
+Do not log row content — dictation data can be sensitive. Module log
+lines carry only counts and id prefixes.
 """
 from __future__ import annotations
 

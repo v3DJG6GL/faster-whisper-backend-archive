@@ -9,12 +9,7 @@ services:
     container_name: faster-whisper-backend
     # Runs as a non-root user. Set PUID/PGID (e.g. in .env next to this file)
     # to pick the user/group — no rebuild needed; the image ships /data and
-    # /models writable by any UID, so a FRESH volume just works.
-    # UPGRADING an existing deployment whose volumes were created by an older
-    # (root-running) image: the state files inside are owned by root — re-own
-    # them once (with your PUID:PGID), then `up -d` as usual:
-    #   docker compose run --rm --user root faster-whisper-backend \
-    #     chown -R 1000:1000 /data /models
+    # /models writable by any UID.
     user: "${PUID:-1000}:${PGID:-1000}"
     # To build the image locally instead of pulling from GHCR, uncomment:
     # build: .

@@ -7,14 +7,14 @@
 
 # faster-whisper-backend
 
-Self-hosted [faster-whisper](https://github.com/SYSTRAN/faster-whisper) API for **German-language medical/clinical dictation**, with a Swiss-German (CH-DE) orthography + dictation post-processing layer. Exposes an **OpenAI-compatible** `/v1/audio/transcriptions` endpoint for use with [vowen.ai](https://vowen.ai) and other Whisper clients.
+Self-hosted [faster-whisper](https://github.com/SYSTRAN/faster-whisper) transcription API with a fully configurable dictation post-processing pipeline (find→replace rules, word maps, spoken punctuation, casing). Exposes an **OpenAI-compatible** `/v1/audio/transcriptions` endpoint for any Whisper client.
 
 ## Features
 
 - OpenAI-compatible API — drop-in replacement for `client.audio.transcriptions.create(...)`
 - **Live streaming dictation** — WebSocket endpoint `/v1/audio/transcriptions/stream` that emits
   flicker-free partial text *while you speak* (LocalAgreement-2 stabilization) and **append-only,
-  post-processed** final text per utterance. Reuses the same models, VAD, and CH-DE dictation
+  post-processed** final text per utterance. Reuses the same models, VAD, and post-processing
   pipeline as the batch route (which is unchanged); accepts raw 16 kHz PCM **or** browser Opus/WebM
   (decoded server-side via a bundled `ffmpeg` — `imageio-ffmpeg`, no system install needed; a
   system `ffmpeg` on PATH is used when present); two-tier Silero/energy endpointing. Try it in the browser at `/dictate`.
@@ -22,8 +22,7 @@ Self-hosted [faster-whisper](https://github.com/SYSTRAN/faster-whisper) API for 
   `INFERENCE_CONCURRENCY` limiter governs streaming **and** batch so they don't oversubscribe the GPU.
 - GPU-accelerated (CUDA) via faster-whisper + CTranslate2, with **automatic CPU fallback** when no GPU is available
 - **Per-request model selection** — clients pass `model="large-v3"` / `"large-v3-turbo"` / any HF repo id; LRU-cached in VRAM
-- **CH-DE locale**: ß → ss, Swiss medical vocabulary in default prompt (Spital, Krankenkasse, FMH, CHF)
-- **German dictation map**: `"Punkt"` → `.`, `"Komma"` → `,`, `"neue Zeile"` → `\n`, `"Klammer auf"` → `(`, ~60 phrases total
+- **Dictation phrase map**: `"Punkt"` → `.`, `"Komma"` → `,`, `"neue Zeile"` → `\n`, `"Klammer auf"` → `(`, ~60 phrases total — every rule editable/replaceable in the WebUI
 - Auto-capitalize after sentence ends; strips Whisper noise commas; lowercases mid-sentence non-nouns after stripped Whisper terminators
 - Live HTML log viewer at `/logs` (Server-Sent Events, color-coded pipeline trace per request)
 - Live system overview at `/stats` (loaded models + VRAM, GPU/CPU/RAM, request latency, recent transcriptions, sparklines — works fully offline, no CDN)
@@ -90,14 +89,7 @@ package is private, `docker login ghcr.io` first.
 
 The container runs as a **non-root user** (default `1000:1000`); set `PUID` /
 `PGID` in `.env` (or the environment) to run as a different user/group — no
-rebuild needed. Fresh volumes work with any UID out of the box. **Upgrading an
-existing deployment** whose volumes were created by an older (root-running)
-image needs a one-time re-own of the state volumes (use your `PUID:PGID`, and
-`-f docker-compose.gpu.yml` for the GPU stack):
-
-```bash
-docker compose run --rm --user root faster-whisper-backend chown -R 1000:1000 /data /models
-```
+rebuild needed, volumes work with any UID out of the box.
 
 ### Windows (production, service)
 
@@ -277,7 +269,7 @@ A single ordered list of rules — `cfg.PIPELINE_RULES` — is applied to each t
 - `callback:upper` — capitalize after sentence terminator
 - `terminal` — final `lstrip(" \t\r") + rstrip(" \t\r")`; always last (preserves leading/trailing `\n`)
 
-The 13 seeded defaults handle Swiss German orthography (`ß`→`ss`), Whisper noise stripping, dictation (`Punkt`→`.`, `neue Zeile`→`\n`, …), and tidy spacing/newlines/capitalization. They live in the committed **`config.json`** (`{"schema_version": 1, "PIPELINE_RULES": [...]}`); `config.py` loads that file at startup. Each rule carries an optional `note` field documenting its rationale.
+The 13 seeded defaults handle orthography normalization (`ß`→`ss`), Whisper noise stripping, dictation (`Punkt`→`.`, `neue Zeile`→`\n`, …), and tidy spacing/newlines/capitalization. They live in the committed **`config.json`** (`{"schema_version": 1, "PIPELINE_RULES": [...]}`); `config.py` loads that file at startup. Each rule carries an optional `note` field documenting its rationale.
 
 **Ordering invariants:** `dictation-map` multi-word phrases must precede their single-word components (the alternation regex is rebuilt longest-first, so the longest phrase wins); the `terminal` trim rule is always last.
 
@@ -338,7 +330,7 @@ The transcription endpoint and every WebUI page are gated by **per-user API keys
 
 Once at least one active admin key exists, the OPEN-mode banner disappears and 401 is returned to unauthenticated callers.
 
-**Using a key.** Clients (Vowen, curl, the WebUI login modal) send `Authorization: Bearer wk_…`. The WebUI stores it in `sessionStorage` (`whisper_api_key`) until tab close. On any 401 the modal re-prompts.
+**Using a key.** Clients (API clients, curl, the WebUI login modal) send `Authorization: Bearer wk_…`. The WebUI stores it in `sessionStorage` (`whisper_api_key`) until tab close. On any 401 the modal re-prompts.
 
 **Lockout protection.** Revoking the last active admin key (or the last admin user) returns 409. Generate a second admin key first.
 
@@ -413,7 +405,7 @@ reports_store.py / reports_routes.py
 config.local.json          Runtime overrides written by the admin UI (gitignored, optional)
 config.local.example.json  Example overrides file
 .env.example               Documented list of every WHISPER_* env var + defaults (copy to .env)
-test.py                    Manual test client (vowen.ai compatibility)
+test.py                    Manual test client (OpenAI SDK compatibility)
 install-service.ps1        Windows Service installer (WinSW-based, self-elevating, auto-bootstraps venv)
 uninstall-service.ps1      Windows Service uninstaller
 install-service.sh         Linux systemd installer (self-elevating, auto-bootstraps venv); --gpu adds CUDA wheels

@@ -3,10 +3,11 @@
 SQLite (stdlib) in WAL mode — single-file, crash-safe, indexed. Lives at
 cfg.REPORTS_DB (defaults to reports.local.sqlite3 alongside config.local.json).
 
-This is the only structured, query-able, end-user-editable durable PHI
-surface produced by this app. The rotating text logger is also durable
-PHI but format-locked; reports are user-curated for triage. Plaintext
-on disk; whole-disk encryption is the deployment's responsibility.
+This is the only structured, query-able, end-user-editable durable
+dictation-content surface produced by this app. The rotating text logger
+is also durable content but format-locked; reports are user-curated for
+triage. Plaintext on disk; whole-disk encryption is the deployment's
+responsibility.
 
 Do not log report content. The module's INFO/WARNING lines carry only
 counts and report-id prefixes for forensics.

@@ -2,8 +2,8 @@
 
 The WebUI exchanges a pasted API key at /auth/login for an HttpOnly session
 cookie. This module persists those sessions so they survive a browser/computer
-restart (unlike the old tab-scoped sessionStorage). Non-browser clients (Vowen,
-curl) never touch this — they keep sending `Authorization: Bearer`.
+restart (unlike the old tab-scoped sessionStorage). Non-browser clients (curl,
+SDKs) never touch this — they keep sending `Authorization: Bearer`.
 
 Storage layout:
 

@@ -563,8 +563,8 @@ FIELD_DESCRIPTIONS: dict[str, str] = {
     # --- Reports store ---
     "REPORTS_DB":
         "Path to the SQLite file holding transcription error reports. "
-        "Contains plaintext PHI on a medical deployment — keep on an "
-        "encrypted volume.",
+        "Contains plaintext dictation content — keep on an encrypted "
+        "volume if sensitive.",
     "REPORTS_MAX":
         "Soft cap on the report count. On overflow, oldest closed reports "
         "(resolved/dismissed) are evicted first, then oldest open.",
@@ -581,8 +581,8 @@ FIELD_DESCRIPTIONS: dict[str, str] = {
     "RECENT_TRANSCRIPTIONS_DB":
         "Path to the SQLite file holding the persistent /quick-config "
         "trace panel + /stats \"Recent transcriptions\" widget data. "
-        "Plaintext PHI on a medical deployment — keep on an encrypted "
-        "volume.",
+        "Plaintext dictation content — keep on an encrypted volume if "
+        "sensitive.",
     "RECENT_TRANSCRIPTIONS_MAX":
         "Hard row-count cap. 0 = unbounded (TTL-only pruning). Lazy "
         "pruning runs every RECENT_TRANSCRIPTIONS_PRUNE_EVERY inserts, "
@@ -618,8 +618,8 @@ FIELD_DESCRIPTIONS: dict[str, str] = {
     "CAPTURE_RECORDINGS_ENABLED":
         "Master switch for capturing audio + word-timestamps next to each "
         "transcription, for use as Whisper fine-tuning training data. "
-        "Default OFF — recordings are biometric-grade PHI and persist on "
-        "disk in plaintext (encrypt the volume). Per-model "
+        "Default OFF — voice recordings are biometric-grade personal data "
+        "and persist on disk in plaintext (encrypt the volume). Per-model "
         "WORD_TIMESTAMPS_ENABLED=False overrides this for that model: "
         "capture is skipped to avoid corrupting alignment data on models "
         "(e.g. primeline / tnfru) where DTW is broken.",
@@ -630,7 +630,8 @@ FIELD_DESCRIPTIONS: dict[str, str] = {
     "CAPTURES_DIR":
         "Filesystem root for captured audio files. Files use a 4-char "
         "fanout (<dir>/<id[0:2]>/<id[2:4]>/<id>.<ext>) to keep directory "
-        "sizes modest. PHI on disk — encrypt the volume.",
+        "sizes modest. Raw voice audio on disk — encrypt the volume if "
+        "sensitive.",
     "CAPTURES_MAX":
         "Soft cap on capture row count. On overflow, oldest rows are "
         "evicted in priority order: dismissed → audio_missing → reviewed "

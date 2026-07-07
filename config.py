@@ -110,8 +110,7 @@ DEFAULT_MODEL = _D("DEFAULT_MODEL")
 # Restrict which models clients are allowed to load. An empty set means "any
 # model name passes through" — convenient on a private LAN, but lets a client
 # trigger a multi-GB download by sending an unknown name. Add entries to
-# enforce a known list. Curated CH-DE / German starter set; uncomment to
-# enable.
+# enforce a known list. Curated starter set; uncomment to enable.
 ALLOWED_MODELS: "set[str]" = _D("ALLOWED_MODELS")
 
 # Number of models to keep hot in VRAM. LRU eviction beyond this. Each
@@ -144,20 +143,19 @@ MODEL_COMPUTE_TYPE_FALLBACK = _D("MODEL_COMPUTE_TYPE_FALLBACK")
 
 
 # =============================================================================
-# Locale (Swiss German / CH-DE)
+# Locale
 # =============================================================================
 
-# Whisper accepts only ISO-639-1 codes (no "de-CH"); we use "de" and rely on
-# the Swiss-flavored vocabulary in the prompt + the PIPELINE_RULES below to
-# push output toward Swiss-German orthography (ß → ss).
+# Whisper accepts only ISO-639-1 codes (no regional variants like "de-CH");
+# regional orthography (e.g. ß → ss) comes from the prompt vocabulary +
+# the PIPELINE_RULES defaults instead — all replaceable per deployment.
 DEFAULT_LANGUAGE = _D("DEFAULT_LANGUAGE")
 
 # Server-side default initial_prompt, used when a request omits `prompt`.
-# Vocabulary cloud (no framing words like "Brief"/"Bericht"/"Notiz") so it
-# biases medical-jargon spelling without pushing short CMS-field inputs
-# toward letter-style salutations or sign-offs. Includes Swiss-specific
-# terms (Spital, Krankenkasse, FMH, CHF) to bias toward CH-DE rather than
-# DE-DE conventions.
+# Keep it a vocabulary cloud (no framing words like "Brief"/"Bericht"/
+# "Notiz") so it biases domain-term spelling without pushing short
+# CMS-field inputs toward letter-style salutations or sign-offs. Set
+# your own domain terms or clear it.
 DEFAULT_PROMPT: "str | None" = _D("DEFAULT_PROMPT")
 
 
@@ -489,7 +487,7 @@ CORS_ALLOW_ORIGINS: "list[str]" = _D("CORS_ALLOW_ORIGINS")
 # Browser sessions (HttpOnly cookie auth for the WebUI)
 # =============================================================================
 # The WebUI exchanges a pasted API key at /auth/login for an HttpOnly session
-# cookie (server-side store in SESSIONS_DB). Non-browser clients (Vowen, curl)
+# cookie (server-side store in SESSIONS_DB). Non-browser clients (curl, SDKs)
 # keep using `Authorization: Bearer` and never touch any of this.
 
 # Mark the session/CSRF cookies `Secure` (browser only sends them over HTTPS).
@@ -512,8 +510,8 @@ SESSION_CSRF_COOKIE_NAME = _D("SESSION_CSRF_COOKIE_NAME")
 # Transcription error reports
 # =============================================================================
 # Users can flag a wrong transcription from /quick-config; admins triage on
-# /reports. The store is durable PHI: plaintext SQLite next to
-# config.local.json. Whole-disk encryption is the deployment's responsibility.
+# /reports. The store holds durable dictation content: plaintext SQLite next
+# to config.local.json. Whole-disk encryption is the deployment's responsibility.
 
 # DB file path. Default sits next to config.local.json. SQLite uses three
 # files at runtime (.sqlite3, -wal, -shm); .gitignore matches all three.
@@ -624,7 +622,7 @@ USAGE_RETENTION_DAYS = _D("USAGE_RETENTION_DAYS")
 #
 # Optional shortcut: setting WHISPER_BOOTSTRAP_ADMIN_KEY at startup creates
 # (if needed) a `bootstrap-admin` user holding that exact key, so the
-# operator can paste it into Vowen / curl immediately. The variable is read
+# operator can paste it into a client / curl immediately. The variable is read
 # once and never persisted in plaintext; only the SHA-256 hash hits disk.
 
 API_KEYS_DB = _D("API_KEYS_DB")
@@ -647,8 +645,8 @@ BOOTSTRAP_ADMIN_KEY: "str | None" = _D("BOOTSTRAP_ADMIN_KEY")
 # Optional pipeline that persists the original audio + word-level timestamps
 # next to the model's raw/final transcription so an admin can review each
 # clip karaoke-style on /captures and produce ground-truth text for Whisper
-# fine-tuning. Default OFF — audio is biometric-grade PHI; the master
-# switch demands an explicit opt-in.
+# fine-tuning. Default OFF — voice audio is biometric-grade personal data;
+# the master switch demands an explicit opt-in.
 #
 # Storage layout:
 #   CAPTURES_DB  — SQLite (WAL), metadata + word timestamps + corrections

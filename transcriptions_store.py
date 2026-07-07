@@ -26,8 +26,8 @@ single DELETE statement enforces both the row cap and the TTL. A cap of
 Module-level connection: SQLite's WAL mode lets us share one connection
 across threads (`check_same_thread=False`). `_lock` serialises writers.
 
-Do not log row content — entries carry literal patient dictation on a
-medical deployment. Module log lines carry only counts and request_id
+Do not log row content — entries carry literal dictation text, which
+can be sensitive. Module log lines carry only counts and request_id
 prefixes.
 """
 from __future__ import annotations

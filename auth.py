@@ -196,7 +196,7 @@ def get_current_user(
     down) or returns the synthetic admin (open mode).
 
     Two credential carriers in locked-down mode, tried in order:
-      1. `Authorization: Bearer <api_key>` — API clients (Vowen, curl)
+      1. `Authorization: Bearer <api_key>` — API clients (curl, SDKs)
          and any direct API use.
       2. The HttpOnly session cookie issued by /auth/login — the WebUI.
     Bearer wins when present so API clients stay deterministic.

@@ -15,8 +15,8 @@ The bigram pass exists for the common "whisper split a compound" case
 should offer both single-word and two-word completions so the user
 can pick the phrase as a cb:map key in one step.
 
-The trace + tokens carry literal patient dictation snippets on a
-medical-deployment host — DO NOT log buffer contents. The on-disk log
+The trace + tokens carry literal dictation snippets, which can be
+sensitive personal data — DO NOT log buffer contents. The on-disk log
 file already holds the same trace via main._format_request_block; the
 new SQLite store is the canonical structured durable record.
 """
@@ -32,8 +32,8 @@ logger = logging.getLogger("whisper-api")
 
 # Token shape: at least one letter, then word-chars (letters/digits/-),
 # 2 to 64 chars. Drops single-char punctuation noise without aggressively
-# splitting compound German medical terms (which is the whole point —
-# the user's mis-recognition target IS the compound).
+# splitting compound words (which is the whole point — the user's
+# mis-recognition target IS the compound).
 _TOKEN_MIN_LEN = 2
 _TOKEN_MAX_LEN = 64
 _TOKEN_RE = re.compile(r"[A-Za-zÄÖÜäöüß][\w\-äöüÄÖÜß]*")

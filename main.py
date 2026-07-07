@@ -1793,9 +1793,9 @@ async def lifespan(app: FastAPI):
     except Exception as _se:
         logger.error("Failed to initialize session store: %s", _se)
 
-    # Open the reports SQLite store (durable, plaintext PHI on disk) and
-    # run an immediate retention sweep before serving traffic. Failure
-    # here is non-fatal: the rest of the app must keep working even if
+    # Open the reports SQLite store (durable, plaintext dictation content
+    # on disk) and run an immediate retention sweep before serving traffic.
+    # Failure here is non-fatal: the rest of the app must keep working even if
     # the reports surface is broken, but the /reports page will error.
     reports_sweep_task = None
     try:
@@ -1965,7 +1965,7 @@ async def _csrf_mw(request: Request, call_next):
     Cookies are auto-sent by the browser, so a cross-site POST would ride
     the session cookie — hence we require an X-CSRF-Token header matching
     the session's stored token on unsafe methods. Requests WITHOUT a
-    session cookie (Authorization: Bearer API clients — Vowen, curl) are
+    session cookie (Authorization: Bearer API clients — curl, SDKs) are
     untouched: they can't be CSRF'd and must keep working without a token.
     """
     if (

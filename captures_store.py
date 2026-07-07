@@ -16,9 +16,10 @@ write path uses .tmp + os.replace so a successful insert implies a
 complete file, and reconcile_on_startup() handles drift from crashes /
 manual cleanup.
 
-PHI hygiene: audio is biometric-grade PHI. The disk format is plaintext;
-whole-disk encryption is the deployment's responsibility. INFO/WARNING
-log lines carry only counts + id prefixes, never content.
+Privacy hygiene: voice audio is biometric-grade personal data. The disk
+format is plaintext; whole-disk encryption is the deployment's
+responsibility. INFO/WARNING log lines carry only counts + id prefixes,
+never content.
 
 The route layer must NOT trust audio_format from a row directly when
 serving — paths must be re-resolved against CAPTURES_DIR and rejected
