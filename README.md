@@ -88,6 +88,17 @@ auto-falls back to CPU/int8. To build locally instead of pulling, uncomment
 `build:` in the compose file (the GPU build uses `Dockerfile.gpu`). If the GHCR
 package is private, `docker login ghcr.io` first.
 
+The container runs as a **non-root user** (default `1000:1000`); set `PUID` /
+`PGID` in `.env` (or the environment) to run as a different user/group — no
+rebuild needed. Fresh volumes work with any UID out of the box. **Upgrading an
+existing deployment** whose volumes were created by an older (root-running)
+image needs a one-time re-own of the state volumes (use your `PUID:PGID`, and
+`-f docker-compose.gpu.yml` for the GPU stack):
+
+```bash
+docker compose run --rm --user root faster-whisper-backend chown -R 1000:1000 /data /models
+```
+
 ### Windows (production, service)
 
 ```powershell

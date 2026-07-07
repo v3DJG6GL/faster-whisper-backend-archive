@@ -8,7 +8,12 @@
 #
 # Build/run:
 #   docker compose -f docker-compose.gpu.yml up -d   (standalone GPU compose file)
-FROM python:3.14-slim
+#
+# Base pinned by digest (supply chain: a retagged or tampered upstream image
+# can't slip in unnoticed). Digest = the multi-arch index of python:3.14-slim
+# (Python 3.14.6, Debian 13). To bump:
+#   docker buildx imagetools inspect python:3.14-slim
+FROM python:3.14-slim@sha256:b877e50bd90de10af8d82c57a022fc2e0dc731c5320d762a27986facfc3355c1
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
@@ -26,9 +31,21 @@ RUN pip install --upgrade pip \
 # python:3.14-slim base; update the "python3.14" segment if you bump the base.
 ENV LD_LIBRARY_PATH=/usr/local/lib/python3.14/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.14/site-packages/nvidia/cudnn/lib
 
+# Non-root runtime user — mirrors Dockerfile (see the comments there). The
+# compose `user:` line (PUID/PGID) overrides the runtime UID/GID at run time.
+ARG PUID=1000
+ARG PGID=1000
+RUN groupadd -g "${PGID}" app \
+ && useradd -u "${PUID}" -g "${PGID}" -M -s /usr/sbin/nologin app \
+ && mkdir -p /data /models \
+ && chmod 0777 /data /models
+
 # App code. Runtime state lives on mounted volumes — see docker-compose.yml.
 COPY . .
 
 EXPOSE 8000
+
+USER ${PUID}:${PGID}
+ENV HOME=/tmp
 
 CMD ["python", "main.py"]

@@ -7,6 +7,15 @@ services:
   faster-whisper-backend:
     image: ghcr.io/v3djg6gl/faster-whisper-backend:latest
     container_name: faster-whisper-backend
+    # Runs as a non-root user. Set PUID/PGID (e.g. in .env next to this file)
+    # to pick the user/group — no rebuild needed; the image ships /data and
+    # /models writable by any UID, so a FRESH volume just works.
+    # UPGRADING an existing deployment whose volumes were created by an older
+    # (root-running) image: the state files inside are owned by root — re-own
+    # them once (with your PUID:PGID), then `up -d` as usual:
+    #   docker compose run --rm --user root faster-whisper-backend \
+    #     chown -R 1000:1000 /data /models
+    user: "${PUID:-1000}:${PGID:-1000}"
     # To build the image locally instead of pulling from GHCR, uncomment:
     # build: .
     ports:
@@ -31,6 +40,9 @@ services:
       WHISPER_CAPTURES_DIR: /data/captures
       WHISPER_LOG_FILE: /data/logs/whisper.log
       WHISPER_DOWNLOAD_ROOT: /models
+      # Auto-converted CT2 models (if AUTO_CONVERT_HF_MODELS is enabled) land
+      # on the persistent models volume instead of the ephemeral ~/.cache.
+      WHISPER_CONVERTED_MODELS_DIR: /models/converted
       # HF download backend (hf_xet) writes its cache + logs under HF_HOME;
       # unset it defaults to ~/.cache, which fails ("Permission denied") when
       # the platform runs the container as a non-root UID with HOME=/. Point it
