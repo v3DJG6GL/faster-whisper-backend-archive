@@ -1413,10 +1413,14 @@ async def _ensure_ct2_model(name: str) -> str:
                     None, _convert_blocking, name, output_dir, quantization,
                 )
         except FileLockTimeout:
+            logger.warning(
+                "[convert] auto-convert of %r timed out waiting for a peer "
+                "worker (>10 min); lock file: %s", name, lock_path,
+            )
             raise HTTPException(
                 status_code=503,
                 detail=f"Auto-convert of {name!r} timed out waiting for "
-                       f"a peer worker (>10 min). Check the lock file: {lock_path}",
+                       f"a peer worker (>10 min).",
             )
     return output_dir
 
