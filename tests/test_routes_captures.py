@@ -163,3 +163,68 @@ def test_merge_member_scope_guard_precedes_state_checks(
     with pytest.raises(HTTPException) as ei2:
         captures_routes._validate_merge_payload([cid], 0, alice)
     assert ei2.value.status_code == 410
+
+
+def test_member_delete_respects_sample_lock(captures_store_db, groups_store_db):
+    """A non-admin cannot mutate/delete a capture that is a member of a LOCKED
+    sample — deleting it would auto-dissolve (and destroy the merged WAV of) an
+    admin-locked sample, bypassing the same guard dissolve_sample_api enforces.
+    Regression guard for _assert_member_sample_not_locked."""
+    import auth
+    import captures_routes
+    from fastapi import HTTPException
+
+    cs = captures_store_db
+    gs = groups_store_db
+    conn = cs._require_conn()
+
+    def _mk_sample(sid, *, locked):
+        conn.execute(
+            "INSERT INTO capture_samples (id, user_id, created_ts,"
+            " merged_wav_relpath, merged_duration_ms, transcript,"
+            " transcript_join_strategy, member_hashes_json,"
+            " inter_segment_silence_ms, is_stale, is_locked, status,"
+            " admin_notes, language, member_trims_json)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (sid, "alice", 1.0, gs._relpath_for(sid), 5000, "t", "space",
+             "{}", 300, 0, 1 if locked else 0, "new", "", "de", "{}"),
+        )
+
+    def _mk_member(cid, sid):
+        rel = os.path.join(cid[0:2], cid[2:4], f"{cid}.wav")
+        conn.execute(
+            "INSERT INTO captures (id, created_ts, request_id, model, language,"
+            " duration_seconds, audio_relpath, audio_format, raw, final,"
+            " words_json, segments_json, corrections_json, status, user_id,"
+            " sample_id, sample_order)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (cid, 1.0, None, "m", "de", 2.0, rel, "wav", "r", "f", "[]", "[]",
+             "[]", "new", "alice", sid, 0),
+        )
+
+    _mk_sample("locked00sid", locked=True)
+    _mk_member("locked00cid", "locked00sid")
+    _mk_sample("open000sid", locked=False)
+    _mk_member("open000cid", "open000sid")
+    _mk_member("free0000cid", None)  # no parent sample
+
+    def _user(is_admin):
+        return {
+            "user_id": "alice",
+            "is_admin": is_admin,
+            "permissions": auth.Permissions(
+                {"pages": {"captures": "own"}}, is_admin=is_admin),
+        }
+
+    locked_row = cs.get_capture("locked00cid")
+    # Non-admin (even the owner) is refused on a locked sample's member.
+    with pytest.raises(HTTPException) as ei:
+        captures_routes._assert_member_sample_not_locked(locked_row, _user(False))
+    assert ei.value.status_code == 409
+    # Admin passes through.
+    captures_routes._assert_member_sample_not_locked(locked_row, _user(True))
+    # A member of an UNLOCKED sample, and a member of NO sample, pass through.
+    captures_routes._assert_member_sample_not_locked(
+        cs.get_capture("open000cid"), _user(False))
+    captures_routes._assert_member_sample_not_locked(
+        cs.get_capture("free0000cid"), _user(False))

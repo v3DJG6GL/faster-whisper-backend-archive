@@ -119,6 +119,25 @@ def _audit_cross_user_read(
     )
 
 
+def _assert_member_sample_not_locked(
+    row: dict[str, Any], user: dict[str, Any],
+) -> None:
+    """Reject a non-admin mutate/delete of a capture that is a member of a
+    LOCKED sample. Mirrors dissolve_sample_api's `is_locked and not is_admin
+    → 409` guard so the member surface can't bypass the sample lock: deleting
+    a member auto-dissolves (and destroys the merged WAV of) its parent
+    sample, and editing/reprocessing a member rewrites the text the locked
+    sample derives at read time. Admins are exempt; captures with no parent
+    sample pass through unchanged."""
+    sid = row.get("sample_id")
+    if not sid or user.get("is_admin"):
+        return
+    import capture_samples_store
+    sample = capture_samples_store.get_sample(sid)
+    if sample is not None and sample.get("is_locked"):
+        raise HTTPException(status.HTTP_409_CONFLICT, "sample is locked")
+
+
 # ---------------------------------------------------------------------
 # Schemas
 # ---------------------------------------------------------------------
@@ -502,6 +521,7 @@ async def patch_capture_api(
         row, "captures", user.get("user_id") or "",
     )
     _audit_cross_user_read(user, row, "capture-patch", cid)
+    _assert_member_sample_not_locked(row, user)
     patch: dict[str, Any] = {}
     if payload.status is not None:
         patch["status"] = payload.status
@@ -549,6 +569,7 @@ async def delete_capture_api(
         row, "captures", user.get("user_id") or "",
     )
     _audit_cross_user_read(user, row, "capture-delete", cid)
+    _assert_member_sample_not_locked(row, user)
     if not captures_store.delete_capture(cid):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "capture not found")
     return JSONResponse({"ok": True})
@@ -602,6 +623,7 @@ async def reprocess_capture_api(
         row, "captures", user.get("user_id") or "",
     )
     _audit_cross_user_read(user, row, "capture-reprocess", cid)
+    _assert_member_sample_not_locked(row, user)
     import main
     raw = row.get("raw") or ""
     captures_excludes = getattr(cfg, "CAPTURES_PIPELINE_RULES_EXCLUDE", None)
