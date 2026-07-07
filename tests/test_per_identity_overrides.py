@@ -69,6 +69,39 @@ def test_me_explicit_allowlist(client, make_user_key):
     assert j["allowed_override_profiles"] == ["fast"]
 
 
+def test_per_key_gate_follows_session_login(client, make_user_key):
+    """A per-key restriction must still apply after the key holder logs into the
+    WebUI (cookie auth), not only when the key is sent as a bearer token.
+    Regression guard: the session now stamps the login key_id so per-key
+    overrides/locks bind on cookie-authed requests (previously the '(session)'
+    sentinel shed them)."""
+    _, raw_admin = make_user_key("admin", is_admin=True)
+    h = bearer(raw_admin)
+    _profiles(client, h, {"fast": {"BEAM_SIZE": 3}})
+    uid, raw_alice = make_user_key("alice")
+    kid = _key_id(client, h, uid)
+    _set_key_binding(client, h, uid, kid,
+                     allow_request_decode_overrides=False,
+                     allow_request_override_profile=False,
+                     allowed_override_profiles=["fast"])
+    # Baseline: as a bearer token, the restriction applies.
+    jb = client.get("/v1/me", headers=bearer(raw_alice)).json()
+    assert jb["can_request_decode_overrides"] is False
+    assert jb["can_request_override_profile"] is False
+
+    # Log in with the SAME key → HttpOnly session cookie (kept by the client).
+    r = client.post("/auth/login", json={"key": raw_alice})
+    assert r.status_code == 200, r.text
+    assert r.json().get("open_mode") is False
+    # Cookie-authed /v1/me (no bearer header): the per-key gate must still apply.
+    jc = client.get("/v1/me").json()
+    assert jc["can_request_decode_overrides"] is False
+    assert jc["can_request_override_profile"] is False
+    assert jc["allowed_override_profiles"] == []  # gate off ⇒ no names
+    # Clear the session cookie so it can't leak into later tests on this client.
+    client.cookies.clear()
+
+
 # --- GET /v1/override-profiles (caller-filtered) --------------------------
 
 def test_override_profiles_filtered_by_allowlist(client, make_user_key):

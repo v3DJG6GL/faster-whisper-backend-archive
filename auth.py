@@ -175,6 +175,15 @@ def user_from_session_cookie(request: Request) -> dict[str, Any] | None:
     rec = api_keys_store.get_user_record(sess["user_id"])
     if rec is None:
         return None
+    # If this session was created from a specific API key, carry that key_id so
+    # per-key overrides/locks bind on cookie-authenticated requests exactly as
+    # they do for the bearer key. A pre-migration session (no stamped key) keeps
+    # get_user_record's "(session)" sentinel — i.e. the prior no-key-layer
+    # behaviour — until the user next logs in. is_admin / permissions still come
+    # from the LIVE user row above, never from the key (no privilege change).
+    stamped_key = sess.get("key_id")
+    if stamped_key:
+        rec["key_id"] = stamped_key
     request.state.session_csrf = sess["csrf_token"]
     return rec
 

@@ -3217,7 +3217,7 @@ async def login(request: Request, response: Response):
             401, "invalid API key", headers={"WWW-Authenticate": "Bearer"},
         )
     raw_token, csrf_token = sessions_store.create_session(
-        rec["user_id"], cfg.SESSION_TTL_SECONDS,
+        rec["user_id"], cfg.SESSION_TTL_SECONDS, key_id=rec.get("key_id"),
     )
     ttl = int(cfg.SESSION_TTL_SECONDS)
     secure = bool(cfg.SESSION_COOKIE_SECURE)

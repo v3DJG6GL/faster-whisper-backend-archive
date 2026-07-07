@@ -54,6 +54,7 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
   token_hash  TEXT PRIMARY KEY,
   user_id     TEXT NOT NULL,
+  key_id      TEXT,
   csrf_token  TEXT NOT NULL,
   created_ts  REAL NOT NULL,
   expires_ts  REAL NOT NULL,
@@ -78,9 +79,23 @@ def init_db(db_path: str) -> None:
     _conn.execute("PRAGMA journal_mode=WAL;")
     _conn.execute("PRAGMA synchronous=NORMAL;")
     _conn.executescript(_SCHEMA)
+    _migrate_add_key_id(_conn)
     with _lock:
         _purge_expired_locked()
         _rebuild_index_locked()
+
+
+def _migrate_add_key_id(conn: sqlite3.Connection) -> None:
+    """Add the `key_id` column to a sessions table created before login began
+    stamping the key. Pre-migration sessions keep `key_id` NULL, so they resolve
+    to the `(session)` sentinel (no key layer) — the prior behaviour — until the
+    user next logs in and a fresh, key-stamped session is issued."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(sessions)")}
+    if "key_id" not in cols:
+        try:
+            conn.execute("ALTER TABLE sessions ADD COLUMN key_id TEXT")
+        except sqlite3.Error:
+            pass  # best-effort; a fresh DB already has the column
 
 
 def _require_conn() -> sqlite3.Connection:
@@ -105,13 +120,14 @@ def _rebuild_index_locked() -> None:
     conn = _require_conn()
     now = time.time()
     rows = conn.execute(
-        "SELECT token_hash, user_id, csrf_token, created_ts, expires_ts"
+        "SELECT token_hash, user_id, key_id, csrf_token, created_ts, expires_ts"
         " FROM sessions WHERE revoked_ts IS NULL AND expires_ts > ?",
         (now,),
     ).fetchall()
     _SESSION_INDEX = {
         r["token_hash"]: {
             "user_id": r["user_id"],
+            "key_id": r["key_id"],
             "csrf_token": r["csrf_token"],
             "created_ts": float(r["created_ts"]),
             "expires_ts": float(r["expires_ts"]),
@@ -136,10 +152,16 @@ def _purge_expired_locked() -> None:
 # Public API
 # ---------------------------------------------------------------------
 
-def create_session(user_id: str, ttl_s: float) -> tuple[str, str]:
+def create_session(user_id: str, ttl_s: float,
+                   key_id: str | None = None) -> tuple[str, str]:
     """Create a session for `user_id` valid for `ttl_s` seconds. Returns
     `(raw_token, csrf_token)`. The raw token is the ONLY way the caller
-    will see it — set it in the HttpOnly cookie and discard."""
+    will see it — set it in the HttpOnly cookie and discard.
+
+    `key_id` is the API key exchanged at login. Stamping it lets per-key
+    overrides/locks bind on the resulting cookie-authenticated requests too
+    (without it the session resolves to the `(session)` sentinel = no key
+    layer, so per-key restrictions would silently stop applying)."""
     raw_token = secrets.token_urlsafe(_TOKEN_BYTES)
     csrf_token = secrets.token_urlsafe(_TOKEN_BYTES)
     th = hash_token(raw_token)
@@ -149,9 +171,10 @@ def create_session(user_id: str, ttl_s: float) -> tuple[str, str]:
     with _lock:
         conn.execute(
             "INSERT INTO sessions"
-            " (token_hash, user_id, csrf_token, created_ts, expires_ts, revoked_ts)"
-            " VALUES (?,?,?,?,?,NULL)",
-            (th, user_id, csrf_token, now, expires),
+            " (token_hash, user_id, key_id, csrf_token, created_ts,"
+            " expires_ts, revoked_ts)"
+            " VALUES (?,?,?,?,?,?,NULL)",
+            (th, user_id, key_id, csrf_token, now, expires),
         )
         _rebuild_index_locked()
     logger.info("[auth] session created user=%s ttl=%.0fs", user_id[:8], ttl_s)
@@ -160,8 +183,9 @@ def create_session(user_id: str, ttl_s: float) -> tuple[str, str]:
 
 def lookup_session(raw_token: str) -> dict[str, Any] | None:
     """Resolve a raw session token to its active record. Returns
-    `{user_id, csrf_token, created_ts, expires_ts}` or None if missing /
-    revoked / expired. On a hit, slides the expiry forward (debounced).
+    `{user_id, key_id, csrf_token, created_ts, expires_ts}` (key_id may be
+    None for pre-migration sessions) or None if missing / revoked / expired.
+    On a hit, slides the expiry forward (debounced).
 
     Sliding window: each successful lookup extends expires_ts to
     now + (original lifetime), so an actively-used session never lapses.
