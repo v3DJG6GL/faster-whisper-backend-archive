@@ -20,3 +20,10 @@ WhisperAPI.wrapper.log
 nssm.exe
 # Editor / preview cruft.
 *-preview.html
+# Review ledgers + local test cruft (gitignored; keep them out of LOCAL builds
+# too — CI builds from a clean checkout and never sees them).
+SECURITY-REVIEW_NOTES.md
+CODE-REVIEW_NOTES.md
+.coverage
+.pytest_cache/
+xet_*.log
