@@ -13,8 +13,9 @@ Self-hosted [faster-whisper](https://github.com/SYSTRAN/faster-whisper) transcri
 
 - OpenAI-compatible API — drop-in replacement for `client.audio.transcriptions.create(...)`
 - **Live streaming dictation** — WebSocket endpoint `/v1/audio/transcriptions/stream` that emits
-  flicker-free partial text *while you speak* (LocalAgreement-2 stabilization) and **append-only,
-  post-processed** final text per utterance. Reuses the same models, VAD, and post-processing
+  flicker-free partial text *while you speak* (LocalAgreement-2 stabilization) and **post-processed**
+  final text per utterance (a locked, append-only `committed` prefix plus a revisable `tail` —
+  both sent as full strings the client replaces). Reuses the same models, VAD, and post-processing
   pipeline as the batch route (which is unchanged); accepts raw 16 kHz PCM **or** browser Opus/WebM
   (decoded server-side via a bundled `ffmpeg` — `imageio-ffmpeg`, no system install needed; a
   system `ffmpeg` on PATH is used when present); two-tier Silero/energy endpointing. Try it in the browser at `/dictate`.
@@ -22,13 +23,13 @@ Self-hosted [faster-whisper](https://github.com/SYSTRAN/faster-whisper) transcri
   `INFERENCE_CONCURRENCY` limiter governs streaming **and** batch so they don't oversubscribe the GPU.
 - GPU-accelerated (CUDA) via faster-whisper + CTranslate2, with **automatic CPU fallback** when no GPU is available
 - **Per-request model selection** — clients pass `model="large-v3"` / `"large-v3-turbo"` / any HF repo id; LRU-cached in VRAM
-- **Dictation phrase map**: `"Punkt"` → `.`, `"Komma"` → `,`, `"neue Zeile"` → `\n`, `"Klammer auf"` → `(`, ~60 phrases total — every rule editable/replaceable in the WebUI
+- **Dictation phrase map**: `"Punkt"` → `.`, `"Komma"` → `,`, `"neue Zeile"` → `\n`, `"Klammer auf"` → `(`, ~80 phrases total — every rule editable/replaceable in the WebUI
 - Auto-capitalize after sentence ends; strips Whisper noise commas; lowercases mid-sentence non-nouns after stripped Whisper terminators
 - Live HTML log viewer at `/logs` (Server-Sent Events, color-coded pipeline trace per request)
 - Live system overview at `/stats` (loaded models + VRAM, GPU/CPU/RAM, request latency, recent transcriptions, sparklines — works fully offline, no CDN)
 - Admin WebUI at `/settings` for editing every setting without redeploying (on by default; allowlist + bearer-token gated)
 - **Configure everything via environment** — every setting has a `WHISPER_*` variable; pin them via `.env`, docker-compose, or the service env. Env-pinned settings are shown read-only in the admin WebUI.
-- Cross-page nav with severity pills (WARN/ERR/CRIT in the last 60 s) on every page
+- Cross-page nav with severity pills (WARN/ERR/CRIT counts since process start) on every page
 - Runs anywhere: Windows Service, Linux systemd, Docker, or bare `python main.py`
 
 ## Requirements
@@ -101,9 +102,8 @@ rebuild needed, volumes work with any UID out of the box.
 ```
 
 First server start eagerly preloads the models in `PRELOAD_MODELS` (by default
-three: `large-v2`, `large-v3`, and the German finetune
-`GalaktischeGurke/primeline-whisper-large-v3-german-ct2` — several GB total) into
-the HuggingFace cache (`~/.cache/huggingface/hub/`, or
+two: `Systran/faster-whisper-large-v2` and `Systran/faster-whisper-large-v3` —
+several GB total) into the HuggingFace cache (`~/.cache/huggingface/hub/`, or
 `%USERPROFILE%\.cache\huggingface\hub\` on Windows; override with
 `WHISPER_DOWNLOAD_ROOT`). Set `WHISPER_PRELOAD_MODELS=large-v2` (or empty) to
 download/warm fewer models at startup.
@@ -133,11 +133,11 @@ print(r.text)
 
 ## Configuration
 
-Most knobs live in **`config.py`** at the repo root — models, default prompt, server host/port, log paths, faster-whisper transcribe defaults. The **text post-processing pipeline rules** (dictation map, German non-noun list, regex tidy rules) live in a separate committed file, **`config.json`** — see [Post-processing pipeline](#post-processing-pipeline). Edit either file directly to change behavior, then restart the service (`systemctl restart whisper-api` / `Restart-Service WhisperAPI` / the `/settings` restart button) to pick up the changes. The algorithm code in `main.py` doesn't need to be touched.
+**Every** factory default — models, default prompt, server host/port, log paths, faster-whisper transcribe defaults, **and** the post-processing pipeline rules — lives in the committed **`config.json`** at the repo root (single source of truth; `config.py` only loads it and layers the overrides below on top). Edit it directly to change a default for every deployment, then restart the service (`systemctl restart whisper-api` / `Restart-Service WhisperAPI` / the `/settings` restart button) to pick up the changes. The algorithm code in `main.py` doesn't need to be touched.
 
 Layers of overrides, **env wins over file wins over in-repo default**:
 
-1. **`config.py`** / **`config.json`** — committed in-repo defaults (scalar settings / pipeline rules respectively).
+1. **`config.json`** — committed in-repo defaults (all scalar settings + pipeline rules).
 2. **`config.local.json`** (gitignored) — runtime overrides written by the admin WebUI; or hand-edited (see `config.local.example.json`). Validated against `config_store.AdminConfig`; unknown keys are rejected. Defaults next to the code; set **`WHISPER_CONFIG_LOCAL`** to relocate it (e.g. `/data/config.local.json`) when `/app` is a read-only image dir — otherwise the WebUI save fails with `Permission denied`.
 3. **`WHISPER_*` env vars** — per-machine deployment pins; always win. Source them from a `.env` file (auto-loaded at startup), docker-compose `environment:` / `env_file:`, or the service env (`<env>` elements in `WhisperAPI.xml`, regenerated by `install-service.ps1`).
 
@@ -167,48 +167,74 @@ Notes:
 
 A few of the most common variables:
 
-| Env var | Maps to `config.py` | Effect |
+| Env var | Maps to setting | Effect |
 |---|---|---|
 | `WHISPER_DEFAULT_MODEL` | `DEFAULT_MODEL` | Model used when request sends `whisper-1` or omits `model` |
-| `WHISPER_ALLOWED_MODELS` | `ALLOWED_MODELS` | Comma-separated allowlist (default: a curated 3-model set); empty = any model passes |
+| `WHISPER_ALLOWED_MODELS` | `ALLOWED_MODELS` | Comma-separated allowlist (default: the two official Systran large-v2/large-v3 builds); empty = any model passes |
 | `WHISPER_MODEL_DEVICE` | `MODEL_DEVICE` | `cuda` (default) or `cpu` |
 | `WHISPER_PRELOAD_MODELS` | `PRELOAD_MODELS` | Comma-separated list to load eagerly at startup (no first-request warm-up) |
 | `WHISPER_SERVER_PORT` | `SERVER_PORT` | Listen port (also update the Docker `ports:` mapping) |
 | `WHISPER_DEFAULT_PROMPT` | `DEFAULT_PROMPT` | Initial prompt when request omits `prompt` (empty string disables) |
-| `WHISPER_ADMIN_UI` | `ADMIN_UI_ENABLED` | `0` unregisters `/settings*` (on by default) |
+| `WHISPER_ADMIN_UI` | `ADMIN_UI_ENABLED` | `0` unregisters `/settings*` + `/quick-config`, `/captures`, `/reports` (on by default) |
 | `WHISPER_ADMIN_WEBUI_ALLOWED_HOSTS` | `ADMIN_WEBUI_ALLOWED_HOSTS` | Comma-separated IPs/CIDRs allowed to reach the **admin** pages — `/settings`, `/settings/api-keys`, `/docs` (loopback always implicit; default loopback only) |
-| `WHISPER_USER_WEBUI_ALLOWED_HOSTS` | `USER_WEBUI_ALLOWED_HOSTS` | Comma-separated IPs/CIDRs allowed to reach the **user** pages — `/quick-config`, `/captures`, `/reports`, `/stats`, `/logs`, `/sev` (loopback always implicit; default open `0.0.0.0/0, ::/0`) |
+| `WHISPER_USER_WEBUI_ALLOWED_HOSTS` | `USER_WEBUI_ALLOWED_HOSTS` | Comma-separated IPs/CIDRs allowed to reach the **user** pages — `/quick-config`, `/captures`, `/reports`, `/stats`, `/logs`, `/dictate`, `/sev` (loopback always implicit; default open `0.0.0.0/0, ::/0`) |
 
 ### Allowed hosts
 
 WebUI access is gated by two IP/CIDR allowlists, bucketed by **privilege tier** — each is the outer (host) layer; an API key is still required on the data layer.
 
 - **`ADMIN_WEBUI_ALLOWED_HOSTS`** — admin pages (`/settings`, `/settings/api-keys`, `/docs`). Default `["127.0.0.1", "::1"]` (loopback only); data also requires an **admin** key.
-- **`USER_WEBUI_ALLOWED_HOSTS`** — user pages (`/quick-config`, `/captures`, `/reports`, `/stats`, `/logs`, `/sev`). Default `["0.0.0.0/0", "::/0"]` (**open**) — the per-page API key is the real gate; narrow this to restrict which networks may even reach the pages.
+- **`USER_WEBUI_ALLOWED_HOSTS`** — user pages (`/quick-config`, `/captures`, `/reports`, `/stats`, `/logs`, `/dictate`, `/sev`). Default `["0.0.0.0/0", "::/0"]` (**open**) — the per-page API key is the real gate; narrow this to restrict which networks may even reach the pages.
 
 Loopback is *always* implicitly allowed regardless of the configured list, so a typo can never lock you out from the box itself.
 
-```python
-# Lock the admin pages to loopback, let any network reach the user pages
-# (the API key still gates the data); or narrow the user list to your LAN:
-ADMIN_WEBUI_ALLOWED_HOSTS = ["127.0.0.1", "::1"]
-USER_WEBUI_ALLOWED_HOSTS = ["127.0.0.1", "::1", "192.168.1.0/24"]
+```bash
+# Lock the admin pages to loopback, narrow the user pages to your LAN
+# (the API key still gates the data). Set via env, or edit the same
+# fields in the /settings UI (→ config.local.json):
+WHISPER_ADMIN_WEBUI_ALLOWED_HOSTS=127.0.0.1,::1
+WHISPER_USER_WEBUI_ALLOWED_HOSTS=127.0.0.1,::1,192.168.1.0/24
 ```
 
 CIDR is accepted (`192.168.0.0/16`) and so are bare IPs (`10.0.0.5`). For a dual-stack "any host" allowlist you need both `0.0.0.0/0` (IPv4) and `::/0` (IPv6).
 
 ## Endpoints
 
+**Core API** (`/v1`, bearer API-key auth, no host allowlist — always registered):
+
 - `POST /v1/audio/transcriptions` — OpenAI-compatible transcription. Pass `model=<name>` to pick a specific model (any faster-whisper short name or HF repo id).
+- `WS   /v1/audio/transcriptions/stream` — live streaming dictation (raw 16 kHz PCM or browser WebM/Opus); see the Features section.
 - `GET  /v1/models` — list currently-loaded models, the configured default, and the allowlist (if set).
-- `GET  /logs` — live log viewer (browser).
-- `GET  /logs/stream` — raw SSE feed.
-- `GET  /stats` — system overview dashboard. User-tier allowlist-gated (`USER_WEBUI_ALLOWED_HOSTS`; loopback always allowed) plus a `stats` API key on the data endpoints.
-- `GET  /stats/snapshot`, `GET /stats/stream` — JSON snapshot + SSE stream of the same data (~1 Hz).
-- `GET  /settings` — admin WebUI (registered by default; set `WHISPER_ADMIN_UI=0` to disable). Admin-tier allowlist-gated (`ADMIN_WEBUI_ALLOWED_HOSTS`; loopback always allowed) plus admin API-key auth.
-- `GET  /settings/api-keys` — admin UI for per-user API key management.
-- `GET/POST /settings/state`, `POST /settings/restart` — admin JSON endpoints; require `Authorization: Bearer <api_key>` resolving to a user with `is_admin=True`.
-- `GET  /auth/whoami` — resolve the current bearer to `{open_mode, user_id, username, is_admin}`. WebUI uses this to render the login modal and the OPEN-mode banner.
+- `GET  /v1/me` — the caller's effective request-override capabilities (drives client UI).
+- `GET  /v1/override-profiles` (+ `/{name}`) — the override profiles this caller may request per-request; name list / single-profile preview.
+- `GET/PATCH /v1/pipeline-rules` — the exposed post-processing rules this caller may view/edit (same gating + semantics as `/quick-config`, for API clients).
+- `GET  /v1/recent-words` — recently-transcribed word/phrase suggestions (for rule-editor autocomplete).
+- `GET  /v1/usage` — the caller's own transcription usage rollup.
+
+**User pages** (host-gated by `USER_WEBUI_ALLOWED_HOSTS`, loopback always allowed; data endpoints additionally need an API key with the page permission):
+
+- `GET  /logs` — live log viewer; `GET /logs/stream` (SSE feed), `GET /logs/older` (pagination).
+- `GET  /stats` — system overview dashboard; `GET /stats/snapshot` + `GET /stats/stream` (JSON one-shot + ~1 Hz SSE), `GET /stats/usage` (per-user/key usage chart data).
+- `GET  /quick-config` — end-user rule editor (state/recent/stream/usage/reapply-rules sub-endpoints, incl. error-report submission).
+- `GET  /captures` — training-data curation UI (`/captures/api/*`: list/export, per-capture CRUD + audio, samples + merge/preview, reprocess jobs).
+- `GET  /reports` — error-report triage UI (`/reports/api/*`).
+- `GET  /dictate` — browser demo for the streaming endpoint.
+- `GET  /sev` — tiny JSON severity counts powering the nav pills.
+
+**Admin pages** (host-gated by `ADMIN_WEBUI_ALLOWED_HOSTS`, loopback always allowed; data endpoints require an **admin** key):
+
+- `GET  /settings` — admin WebUI; `GET/POST /settings/state`, `POST /settings/restart`.
+- `GET  /settings/pipeline` — pipeline-rule editor; `GET/POST /settings/factory-rules` (+ `/clear-local-override`), `POST /settings/test-pipeline`.
+- `GET  /settings/api-keys` — per-user API key management (`/settings/api-keys/api/*`).
+- `GET  /settings/overrides` — per-identity override editor (`state`, `resolve` explorer, profile rename).
+- `GET  /docs`, `GET /redoc`, `GET /openapi.json` — interactive API docs (always registered; `/openapi.json` additionally requires an admin key).
+
+`WHISPER_ADMIN_UI=0` unregisters `/settings*` **and** the WebUI pages that ride the same switch (`/quick-config`, `/captures`, `/reports`); the core API, `/logs`, `/stats`, `/dictate`, `/sev`, and `/docs` stay up.
+
+**Auth** (user-tier host gate):
+
+- `GET  /auth/whoami` — resolve the current credentials to `{open_mode, user_id, username, is_admin}`. The WebUI uses this to render the login modal and the OPEN-mode banner.
+- `POST /auth/login`, `POST /auth/logout` — exchange an API key for a browser session cookie / end the session.
 
 ### Model selection examples
 
@@ -223,8 +249,8 @@ client.audio.transcriptions.create(model="large-v3-turbo", file=f)
 client.audio.transcriptions.create(model="primeline/whisper-large-v3-turbo-german", file=f)
 ```
 
-> **Note:** `ALLOWED_MODELS` ships as a curated 3-model set
-> (`large-v2`, `large-v3`, `GalaktischeGurke/primeline-whisper-large-v3-german-ct2`),
+> **Note:** `ALLOWED_MODELS` ships as a curated 2-model set
+> (`Systran/faster-whisper-large-v2`, `Systran/faster-whisper-large-v3`),
 > so requests for other ids (e.g. `large-v3-turbo`, `primeline/whisper-large-v3-turbo-german`)
 > are rejected until you add them to the allowlist (`WHISPER_ALLOWED_MODELS=...`)
 > or clear it (`WHISPER_ALLOWED_MODELS=` → any model passes).
@@ -262,18 +288,19 @@ on Linux/macOS and uses WinSW on Windows.
 
 A single ordered list of rules — `cfg.PIPELINE_RULES` — is applied to each transcript's joined text. Each row is one of:
 
-- `regex` — pattern + replacement (`re.sub`)
+- `regex-list` — an ordered batch of find→replace entries (each one `re.sub`), edited as a single card
 - `callback:lowercase-wordlist` — strip terminator and lowercase next word if it's in the wordlist
 - `callback:map` — auto-built alternation of map keys (longest-first, case-insensitive); look up replacement
 - `callback:dedup` — collapse adjacent punctuation runs (last non-comma wins; pure-comma run → single comma)
 - `callback:upper` — capitalize after sentence terminator
 - `terminal` — final `lstrip(" \t\r") + rstrip(" \t\r")`; always last (preserves leading/trailing `\n`)
 
-The 13 seeded defaults handle orthography normalization (`ß`→`ss`), Whisper noise stripping, dictation (`Punkt`→`.`, `neue Zeile`→`\n`, …), and tidy spacing/newlines/capitalization. They live in the committed **`config.json`** (`{"schema_version": 1, "PIPELINE_RULES": [...]}`); `config.py` loads that file at startup. Each rule carries an optional `note` field documenting its rationale.
+The 14 seeded defaults handle orthography normalization (`ß`→`ss`), Whisper noise stripping, dictation (`Punkt`→`.`, `neue Zeile`→`\n`, …), and tidy spacing/newlines/capitalization. They live in the committed **`config.json`** (the `PIPELINE_RULES` array, next to all the scalar defaults); `config.py` loads that file at startup. Each rule carries an optional `note` field documenting its rationale.
 
 **Ordering invariants:** `dictation-map` multi-word phrases must precede their single-word components (the alternation regex is rebuilt longest-first, so the longest phrase wins); the `terminal` trim rule is always last.
 
-**Editing — the unified editor at `/settings`** (Pipeline section). One rule list
+**Editing — the dedicated editor at `/settings/pipeline`** (`/settings` keeps every
+other section and links there in its place). One rule list
 shows the **effective** pipeline (config.json overlaid by config.local.json). Edits
 save to `config.local.json` via the page Save (gitignored, per-deployment). Each
 rule carries an **origin badge**:
@@ -306,18 +333,19 @@ JSON response notes: `text` is the post-processed joined transcript. `segments[]
 - **Loaded models** with per-model VRAM (NVML delta sample taken at construction time), warm/cold badge, and the cold-load history.
 - **Request metrics**: in-flight transcriptions, p50/p95/p99 latency, endpoint counters, 5xx counts in 1m/5m/15m windows.
 - **Recent transcriptions** ring (last 20) with model, audio length, wall-clock, real-time-factor, words emitted.
+- **Usage history** (`/stats/usage`): throughput over time plus a per-user / per-key leaderboard.
 
 Sparklines are rendered with [uPlot](https://github.com/leeoniya/uPlot), vendored under `static/` so the page works **fully offline** — no CDN fetch at page-load. To update the bundled version, see `static/VENDOR.md`.
 
 The `/stats` endpoint is user-tier allowlist-gated (`USER_WEBUI_ALLOWED_HOSTS`) plus a `stats` API key on the data endpoints. On a host without an NVIDIA GPU or with `nvidia-ml-py` missing, the GPU panel hides and the rest of the dashboard still works.
 
-The nav row at the top of every page (logs ↔ stats ↔ config) also surfaces three severity pills counting `WARNING` / `ERROR` / `CRITICAL` records in the last 60 s; clicking any pill jumps to `/logs` with that filter prefilled.
+The nav row at the top of every page (logs ↔ stats ↔ quick-config ↔ captures ↔ reports ↔ settings) also surfaces three severity pills counting `WARNING` / `ERROR` / `CRITICAL` records since process start (bounded by a 2000-entry ring; restart resets to zero); clicking any pill jumps to `/logs` with that filter prefilled.
 
 ## Admin WebUI (optional)
 
-A second WebUI at `/settings` lets you edit any setting from `config.py` from the browser, with hot-reload for safe knobs (transcribe params, dictation map, prompt) and an automatic service restart for cold ones (server port, log file, preload list).
+A second WebUI at `/settings` lets you edit every setting from the browser, with hot-reload for safe knobs (transcribe params, dictation map, prompt) and an automatic service restart for cold ones (server port, log file, preload list).
 
-**On by default** (`ADMIN_UI_ENABLED = True`). Set `ADMIN_UI_ENABLED = False` in `config.py` (or `WHISPER_ADMIN_UI=0`) and restart to unregister `/settings*`. The page opens at `http://localhost:8000/settings` from the server itself or any host in `ADMIN_WEBUI_ALLOWED_HOSTS`. Settings pinned by a `WHISPER_*` env var appear **read-only** (greyed out, badged with the variable name) since the environment takes precedence.
+**On by default** (`ADMIN_UI_ENABLED = true`). Set `WHISPER_ADMIN_UI=0` (or flip `ADMIN_UI_ENABLED` in `config.json` / `config.local.json`) and restart to unregister `/settings*` (plus `/quick-config`, `/captures`, `/reports`, which ride the same switch). The page opens at `http://localhost:8000/settings` from the server itself or any host in `ADMIN_WEBUI_ALLOWED_HOSTS`. Settings pinned by a `WHISPER_*` env var appear **read-only** (greyed out, badged with the variable name) since the environment takes precedence.
 
 ### Authentication: per-user API keys
 
@@ -330,14 +358,14 @@ The transcription endpoint and every WebUI page are gated by **per-user API keys
 
 Once at least one active admin key exists, the OPEN-mode banner disappears and 401 is returned to unauthenticated callers.
 
-**Using a key.** Clients (API clients, curl, the WebUI login modal) send `Authorization: Bearer wk_…`. The WebUI stores it in `sessionStorage` (`whisper_api_key`) until tab close. On any 401 the modal re-prompts.
+**Using a key.** API clients and curl send `Authorization: Bearer wk_…` on every request. The WebUI instead exchanges the key **once** for an HttpOnly session cookie via `POST /auth/login` (server-side session rows, 30-day TTL by default — `SESSION_TTL_SECONDS`; CSRF double-submit cookie on mutating requests). On any 401 the full-page login gate re-prompts; `POST /auth/logout` ends the session.
 
 **Lockout protection.** Revoking the last active admin key (or the last admin user) returns 409. Generate a second admin key first.
 
-**Multi-user.** Each capture is tagged with the originating `user_id`. Non-admin users see only their own captures in `/captures`; admins see all and can filter by user. Group merging is locked to a single speaker — the server rejects any merge whose members span more than one user.
+**Multi-user.** Each capture is tagged with the originating `user_id`. Non-admin users see only their own captures in `/captures`; admins see all and can filter by user. Merging captures into a training sample is locked to a single speaker — the server rejects any merge whose members span more than one user.
 
 Other layers:
-- **Feature flag**: `ADMIN_UI_ENABLED = True` (the default; or `WHISPER_ADMIN_UI=1`) registers the routes. Set it `False` / `WHISPER_ADMIN_UI=0` and `/settings*` returns 404.
+- **Feature flag**: `ADMIN_UI_ENABLED` (on by default; pin with `WHISPER_ADMIN_UI=1`) registers the routes. Set `WHISPER_ADMIN_UI=0` and `/settings*` returns 404.
 - **Host allowlist**: `ADMIN_WEBUI_ALLOWED_HOSTS` keeps the admin endpoints reachable only from the configured CIDRs (loopback always implicit). User pages use the separate `USER_WEBUI_ALLOWED_HOSTS` (default open).
 - **Server-side validation**: every payload is validated against `config_store.AdminConfig` (Pydantic v2).
 - **Auto-restart**: when a "cold" setting changes (server port, log file, preload list, …), a confirmation modal asks whether to restart the service. WinSW relaunches the wrapper; the page polls `/v1/models` until back up.
@@ -346,9 +374,9 @@ Edits land in **`config.local.json`** at the repo root (gitignored). See `config
 
 ### Per-identity config overrides
 
-Beyond the global and per-model layers, decode / streaming / output / pipeline-rule settings can be overridden **per user, per API key, and per reusable profile** — so 20 clinicians can share one config without re-flashing every device. Managed on the dedicated **`/settings/overrides`** page; bound to users & keys in-context on **`/settings/api-keys`** (a `⚙ overrides` / `⚙ config` drawer per user / key). Load-time model fields (device, compute type, workers…) are **never** per-identity — a model is loaded once for everyone.
+Beyond the global and per-model layers, decode / streaming / output / pipeline-rule settings can be overridden **per user, per API key, and per reusable profile** — so many users can share one deployment without re-flashing every device. Managed on the dedicated **`/settings/overrides`** page; bound to users & keys in-context on **`/settings/api-keys`** (a `⚙ overrides` / `⚙ config` drawer per user / key). Load-time model fields (device, compute type, workers…) are **never** per-identity — a model is loaded once for everyone.
 
-- **Profiles** — named, reusable override bundles (e.g. `clinic-de`). Assign an *ordered* list to a user or key; **earlier wins** on a conflicting field.
+- **Profiles** — named, reusable override bundles (e.g. `low-latency`). Assign an *ordered* list to a user or key; **earlier wins** on a conflicting field.
 - **Direct overrides** — a per-user or per-key blob layered on top of its profiles for one-offs.
 - **Precedence** (most → least specific): `per-key direct → per-key profiles → per-user direct → per-user profiles → per-model → global → library`. The first identity layer that sets a field owns its value **and** its lock.
 - **Per-field locking** — mark a field 🔒 to forbid the client's per-request `decode_overrides` (and `language`/`prompt`) from changing it; the dropped keys are surfaced in `verbose_json.overrides_ignored` (batch) / the `ready` frame (streaming), never silently ignored. A useful compute cap on a shared server (e.g. lock `BEAM_SIZE`).
@@ -384,24 +412,43 @@ Assets (`static/`):
 
 ```
 main.py                    FastAPI app + post-processing pipeline + log viewer
-config.py                  User-tunable scalar settings (models, prompt, server, logging, ...)
-config.json                Committed factory pipeline rules (PIPELINE_RULES); editable via /settings
+config.py                  Loads config.json factory defaults, layers config.local.json + WHISPER_* env on top
+config.json                Committed factory defaults for EVERY setting + the pipeline rules (single source of truth)
 config_store.py            Admin-WebUI persistence layer (Pydantic schema, atomic writes)
-admin_routes.py            Admin /settings endpoints + HTML page (on by default; disable with WHISPER_ADMIN_UI=0)
+effective_config.py        Layered per-identity config resolution (key/user/profile overrides, locks)
+admin_routes.py            Admin /settings + /settings/pipeline pages & endpoints (disable with WHISPER_ADMIN_UI=0)
+overrides_routes.py        /settings/overrides admin page & API (profiles, explorer/resolve)
+api_keys_store.py          users + api_keys SQLite store (SHA-256 hash, soft revoke, O(1) lookup)
+api_keys_routes.py         /settings/api-keys admin UI for per-user key management
+sessions_store.py          Durable browser-session store — the cookie layer on top of api_keys_store
+auth.py                    Auth deps — get_current_user / require_admin / require_page + OPEN-mode loop
+quick_config_routes.py     /quick-config end-user rule editor + the /v1/pipeline-rules client API
+quick_config_state.py      Tokenization + SSE broadcast layer for /quick-config recent transcriptions
 stats_routes.py            /stats dashboard endpoints + HTML page (always on, allowlist-gated)
 metrics.py                 In-process request metrics (counters, latency ring, recent transcriptions)
 system_stats.py            GPU + host snapshot (pynvml + psutil; degrades gracefully if NVML missing)
-web_common.py              Shared helpers: allowlist gate, nav HTML, severity counts
-restart_service.py         Detached self-restart helper (Windows-only)
-auth.py                    HTTPBearer dep — get_current_user / require_admin + OPEN-mode loop
-api_keys_store.py          users + api_keys SQLite store (SHA-256 hash, soft revoke, O(1) lookup)
-api_keys_routes.py         /settings/api-keys admin UI for per-user key management
+usage_store.py             Durable per-key / per-user usage rollup (/v1/usage, /stats/usage)
+transcriptions_store.py    Durable store for recent transcription traces (/quick-config recent)
+web_common.py              Shared helpers: allowlist gate, nav HTML + severity pills, login gate / OPEN-mode banner
+restart_service.py         Detached self-restart helper (os.execv re-exec on Linux/macOS, WinSW on Windows)
+streaming_routes.py        WebSocket /v1/audio/transcriptions/stream + /dictate demo page
+streaming_session.py       Per-connection streaming dictation state machine
+streaming_transport.py     Streaming audio decoders (raw PCM passthrough, ffmpeg WebM/Opus)
+streaming_vad.py           Streaming endpointing (two-tier Silero/energy VAD)
+streaming_localagreement.py LocalAgreement-2 hypothesis stabilization
+audio_transcode.py         In-process audio transcoder (PyAV — no ffmpeg-on-PATH needed)
+audio_vad_trim.py          Silence-trim WAVs with the bundled Silero VAD
 audio_merge.py             stdlib-wave PCM splicer for ≤28 s training-sample packing
-capture_groups_store.py    capture_groups table + dissolve / stale / regenerate helpers
 captures_store.py          Capture rows + audio fanout, retention, eviction
-captures_routes.py         /captures admin page + merge/dissolve/regenerate API
+capture_samples_store.py   Packed ≤28 s training samples built from consecutive same-speaker captures
+captures_routes.py         /captures page + samples/merge/reprocess API
+captures_merge_proposer.py Auto-merge proposer for /captures curation
+captures_reapply.py        Background job: re-run current pipeline rules over existing captures
+captures_vad_reprocess.py  Background job: re-merge sample audio with current silence settings
 reports_store.py / reports_routes.py
                            User-submitted transcription error reports + admin triage
+regex_guard.py             Out-of-process guard for user-authored pipeline regexes
+text_corrections.py        Shared schema for word-correction chips
 config.local.json          Runtime overrides written by the admin UI (gitignored, optional)
 config.local.example.json  Example overrides file
 .env.example               Documented list of every WHISPER_* env var + defaults (copy to .env)
@@ -418,7 +465,7 @@ requirements-gpu.txt       NVIDIA CUDA wheels (opt-in, additive)
 requirements-dev.txt       Test deps (pytest)
 requirements-convert.txt   Deps for converting HF models to CTranslate2 (opt-in)
 pytest.ini                 Test discovery config (pytest -q from repo root)
-.github/workflows/ci.yml   CI: runs the test suite on Linux + Windows
+.github/workflows/ci.yml   CI: test suite on Linux + Windows, then publishes the GHCR images
 static/                    Brand assets (logo.svg, favicon.*) + vendored uPlot/GridStack (offline /stats)
 .gitignore / .gitattributes
 logs/                      Created at first run; rotates at 10 MB × 10 files

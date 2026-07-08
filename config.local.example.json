@@ -1,11 +1,11 @@
 {
-  "DEFAULT_MODEL": "large-v2",
+  "DEFAULT_MODEL": "Systran/faster-whisper-large-v2",
   "MAX_LOADED_MODELS": 3,
-  "PRELOAD_MODELS": ["large-v2", "large-v3"],
+  "PRELOAD_MODELS": ["Systran/faster-whisper-large-v2", "Systran/faster-whisper-large-v3"],
   "BEAM_SIZE": 10,
   "BEST_OF": 5,
   "VAD_FILTER": true,
-  "DICTATION_ENABLED": true,
+  "STREAMING_ENABLED": true,
   "TRACE_ENABLED": true,
   "DEFAULT_LANGUAGE": "de"
 }

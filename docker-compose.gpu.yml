@@ -62,7 +62,7 @@ services:
       # which is slower but reliable. Remove this to re-enable Xet if your egress
       # to cas-bridge/transfer.xethub.hf.co is unrestricted.
       HF_HUB_DISABLE_XET: "1"
-      # GPU: MODEL_DEVICE already defaults to "cuda" + float16 (config.py), so no
+      # GPU: MODEL_DEVICE already defaults to "cuda" + bfloat16 (config.json), so no
       # extra env is needed. To pin a specific GPU on a multi-GPU host, uncomment:
       # WHISPER_DEVICE_INDEX: "0"
       # --- Behind a reverse proxy (remote access) ---------------------------
