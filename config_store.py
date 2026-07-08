@@ -1495,15 +1495,16 @@ class AdminConfig(BaseModel):
              probe runs in a killable subprocess (see regex_guard) because
              CPython's re engine can't be interrupted in-process. (Empty
              patterns/entries are OK — just a no-op.)
-          2. On save, each regex-list entry's replacement string survives
-             `re.sub` with its pattern (catches bad backrefs like `\\3` when only
-             2 groups exist).
+          2. Every regex-list entry's replacement TEMPLATE parses against its
+             pattern (always, in-process — catches bad backrefs like `\\3` when
+             only 2 groups exist; CPython parses templates eagerly, so this is
+             cheap and has no backtracking risk).
           3. Slug uniqueness across the list.
           4. Exactly one terminal rule, and it must be the last entry.
 
         The load/startup/diff paths validate WITHOUT the `guard_regex` context,
-        so a normal config load only compiles patterns (fast) and never spawns
-        the helper subprocess.
+        so a normal config load runs only the compile + template checks (fast)
+        and never spawns the helper subprocess.
         """
         if v is None:
             return v
