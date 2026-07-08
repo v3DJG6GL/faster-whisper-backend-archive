@@ -1561,9 +1561,24 @@ class AdminConfig(BaseModel):
                 f"terminal rule must be the last entry "
                 f"(found at index {terminal_idx}, list has {len(v)} rules)"
             )
-        # Out-of-process backtracking + replacement-backref guard. Runs ONLY on
-        # an explicit save of user/admin-submitted rules (guard_regex context),
-        # so load/startup/diff validations never spawn the helper subprocess.
+        # Replacement-template sanity runs IN-PROCESS on every path: CPython
+        # parses the template eagerly (before any matching), so a bad backref
+        # (`\3` with two groups) is caught cheaply with zero backtracking
+        # risk. This must not be save-only — a bad backref in a hand-edited
+        # config.local.json has to keep failing validation at LOAD (the
+        # documented fail-safe whole-file drop) instead of loading cleanly
+        # and raising re.error on every request at match time.
+        for where, pat, repl in checks:
+            if not repl:
+                continue
+            try:
+                re.compile(pat).sub(repl, "")
+            except re.error as e:
+                raise ValueError(f"{where}: regex test failed: {e}")
+        # Out-of-process catastrophic-backtracking guard (a real .sub run
+        # against the 1 KB fixture). Runs ONLY on an explicit save of
+        # user/admin-submitted rules (guard_regex context), so load/startup/
+        # diff validations never spawn the helper subprocess.
         if checks and (info.context or {}).get("guard_regex"):
             import regex_guard
             regex_guard.validate(checks)

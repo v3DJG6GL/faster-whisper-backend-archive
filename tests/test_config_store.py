@@ -299,7 +299,8 @@ def test_pipeline_catastrophic_regex_rejected_on_save(monkeypatch):
 def test_pipeline_regex_guard_skipped_without_save_context(monkeypatch):
     # Load / diff validations (no guard_regex context) must NOT run the probe —
     # so a normal config load never spawns the helper and never hangs on a
-    # stored pattern. A pattern that WOULD be flagged on save validates cleanly.
+    # stored pattern. A pattern that only the BACKTRACKING probe would flag
+    # (compiles fine; pathological only against real input) validates cleanly.
     import regex_guard
     calls = {"n": 0}
 
@@ -307,8 +308,25 @@ def test_pipeline_regex_guard_skipped_without_save_context(monkeypatch):
         calls["n"] += 1
 
     monkeypatch.setattr(regex_guard, "validate", _spy)
-    _ok(PIPELINE_RULES=[_regex("b", pattern="(a)", replacement=r"\3"), _terminal()])
+    _ok(PIPELINE_RULES=[_regex("b", pattern="(.*a)+$", replacement="x"), _terminal()])
     assert calls["n"] == 0
+
+
+def test_pipeline_bad_backref_rejected_on_load_without_subprocess(monkeypatch):
+    # A bad replacement backref must keep failing on EVERY path (the eager
+    # in-process template parse) — a hand-edited config.local.json with \3
+    # against one group has to fail-safe at LOAD, not load cleanly and then
+    # raise re.error on every request at match time. And detecting it must
+    # not need the subprocess helper.
+    import regex_guard
+
+    def _boom(*a, **k):
+        raise AssertionError("subprocess guard must not run on load")
+
+    monkeypatch.setattr(regex_guard, "validate", _boom)
+    with pytest.raises(ValidationError) as ei:
+        _ok(PIPELINE_RULES=[_regex("b", pattern="(a)", replacement=r"\3"), _terminal()])
+    assert "regex test failed" in str(ei.value)
 
 
 def test_pipeline_duplicate_slug():
