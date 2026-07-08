@@ -165,6 +165,34 @@ def test_merge_member_scope_guard_precedes_state_checks(
     assert ei2.value.status_code == 410
 
 
+def _insert_sample(conn, gs, sid, *, locked, user_id="alice"):
+    """Insert a capture_samples row directly (no audio merge needed)."""
+    conn.execute(
+        "INSERT INTO capture_samples (id, user_id, created_ts,"
+        " merged_wav_relpath, merged_duration_ms, transcript,"
+        " transcript_join_strategy, member_hashes_json,"
+        " inter_segment_silence_ms, is_stale, is_locked, status,"
+        " admin_notes, language, member_trims_json)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (sid, user_id, 1.0, gs._relpath_for(sid), 5000, "t", "space",
+         "{}", 300, 0, 1 if locked else 0, "new", "", "de", "{}"),
+    )
+
+
+def _insert_member(conn, cid, sid, user_id="alice"):
+    """Insert a captures row (optionally a member of sample `sid`) directly."""
+    rel = os.path.join(cid[0:2], cid[2:4], f"{cid}.wav")
+    conn.execute(
+        "INSERT INTO captures (id, created_ts, request_id, model, language,"
+        " duration_seconds, audio_relpath, audio_format, raw, final,"
+        " words_json, segments_json, corrections_json, status, user_id,"
+        " sample_id, sample_order)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (cid, 1.0, None, "m", "de", 2.0, rel, "wav", "r", "f", "[]", "[]",
+         "[]", "new", user_id, sid, 0),
+    )
+
+
 def test_member_delete_respects_sample_lock(captures_store_db, groups_store_db):
     """A non-admin cannot mutate/delete a capture that is a member of a LOCKED
     sample — deleting it would auto-dissolve (and destroy the merged WAV of) an
@@ -178,35 +206,11 @@ def test_member_delete_respects_sample_lock(captures_store_db, groups_store_db):
     gs = groups_store_db
     conn = cs._require_conn()
 
-    def _mk_sample(sid, *, locked):
-        conn.execute(
-            "INSERT INTO capture_samples (id, user_id, created_ts,"
-            " merged_wav_relpath, merged_duration_ms, transcript,"
-            " transcript_join_strategy, member_hashes_json,"
-            " inter_segment_silence_ms, is_stale, is_locked, status,"
-            " admin_notes, language, member_trims_json)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (sid, "alice", 1.0, gs._relpath_for(sid), 5000, "t", "space",
-             "{}", 300, 0, 1 if locked else 0, "new", "", "de", "{}"),
-        )
-
-    def _mk_member(cid, sid):
-        rel = os.path.join(cid[0:2], cid[2:4], f"{cid}.wav")
-        conn.execute(
-            "INSERT INTO captures (id, created_ts, request_id, model, language,"
-            " duration_seconds, audio_relpath, audio_format, raw, final,"
-            " words_json, segments_json, corrections_json, status, user_id,"
-            " sample_id, sample_order)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (cid, 1.0, None, "m", "de", 2.0, rel, "wav", "r", "f", "[]", "[]",
-             "[]", "new", "alice", sid, 0),
-        )
-
-    _mk_sample("locked00sid", locked=True)
-    _mk_member("locked00cid", "locked00sid")
-    _mk_sample("open000sid", locked=False)
-    _mk_member("open000cid", "open000sid")
-    _mk_member("free0000cid", None)  # no parent sample
+    _insert_sample(conn, gs, "locked00sid", locked=True)
+    _insert_member(conn, "locked00cid", "locked00sid")
+    _insert_sample(conn, gs, "open000sid", locked=False)
+    _insert_member(conn, "open000cid", "open000sid")
+    _insert_member(conn, "free0000cid", None)  # no parent sample
 
     def _user(is_admin):
         return {
@@ -307,3 +311,66 @@ def test_capture_404_body_uniform_missing_vs_foreign(
     r_foreign = client.get(f"/captures/api/{cid}", headers=bearer(raw_bob))
     assert r_missing.status_code == r_foreign.status_code == 404
     assert r_missing.json() == r_foreign.json()
+
+
+def test_locked_member_mutations_blocked_at_endpoints(client, make_user_key):
+    """The sample lock must hold on the LIVE routes, not only in the helper:
+    PATCH, DELETE and reprocess on a locked sample's member all 409 for the
+    non-admin owner. (Removing the _assert_member_sample_not_locked call
+    sites would pass the helper test but fail this one.)"""
+    import capture_samples_store as gs
+    import captures_store as cs
+
+    make_user_key("root", is_admin=True)
+    uid, raw = make_user_key("alice", pages={"captures": "own"})
+    conn = cs._require_conn()
+    _insert_sample(conn, gs, "locked01sid", locked=True, user_id=uid)
+    _insert_member(conn, "locked01cid", "locked01sid", user_id=uid)
+
+    h = bearer(raw)
+    assert client.patch(
+        "/captures/api/locked01cid", json={"status": "reviewed"}, headers=h,
+    ).status_code == 409
+    assert client.delete(
+        "/captures/api/locked01cid", headers=h,
+    ).status_code == 409
+    assert client.post(
+        "/captures/api/locked01cid/reprocess", headers=h,
+    ).status_code == 409
+    # Row untouched and still present.
+    row = cs.get_capture("locked01cid")
+    assert row is not None and row["status"] == "new"
+
+
+def test_locked_member_view_does_not_rewrite_text(
+        client, make_user_key, app_module, monkeypatch):
+    """Viewing a locked sample's member — or the sample itself — must not
+    self-heal-rewrite the member's stored text: the lock freezes what was
+    curated. An UNLOCKED member still self-heals on view (contrast case)."""
+    import capture_samples_store as gs
+    import captures_store as cs
+
+    make_user_key("root", is_admin=True)
+    uid, raw = make_user_key("alice", pages={"captures": "own"})
+    conn = cs._require_conn()
+    _insert_sample(conn, gs, "locked02sid", locked=True, user_id=uid)
+    _insert_member(conn, "locked02cid", "locked02sid", user_id=uid)
+    _insert_sample(conn, gs, "open0002sid", locked=False, user_id=uid)
+    _insert_member(conn, "open0002cid", "open0002sid", user_id=uid)
+
+    def _pp(raw_text, **kw):
+        return "REWRITTEN"
+
+    monkeypatch.setattr(app_module, "_postprocess_text", _pp)
+
+    h = bearer(raw)
+    # Locked member: the GET succeeds but the stored text stays frozen.
+    assert client.get("/captures/api/locked02cid", headers=h).status_code == 200
+    assert cs.get_capture("locked02cid")["final"] == "f"
+    # Locked sample view (the _enrich_sample member loop): still frozen.
+    assert client.get(
+        "/captures/api/samples/locked02sid", headers=h).status_code == 200
+    assert cs.get_capture("locked02cid")["final"] == "f"
+    # Contrast: an unlocked member self-heals to the current pipeline output.
+    assert client.get("/captures/api/open0002cid", headers=h).status_code == 200
+    assert cs.get_capture("open0002cid")["final"] == "REWRITTEN"

@@ -1605,7 +1605,7 @@ def _enrich_sample(g: dict[str, Any]) -> dict[str, Any]:
     )
     member_trims = g.get("member_trims") or {}
     for m in members:
-        _refresh_final_if_stale(m)
+        _refresh_final_if_stale(m, parent_locked=bool(g.get("is_locked")))
         m["username"] = usernames.get(m.get("user_id"))
         # Per-member trimmed duration so the expanded member list shows the
         # length each clip actually contributes to the merged WAV (mirrors the
@@ -1636,7 +1636,9 @@ def _enrich_sample(g: dict[str, Any]) -> dict[str, Any]:
     return g
 
 
-def _refresh_final_if_stale(row: dict[str, Any]) -> None:
+def _refresh_final_if_stale(
+    row: dict[str, Any], *, parent_locked: bool | None = None,
+) -> None:
     """Recompute `final` AND `text_for_training` from `raw` via the
     current pipeline. If either differs from what's stored, write it
     back and update the row in place.
@@ -1649,7 +1651,22 @@ def _refresh_final_if_stale(row: dict[str, Any]) -> None:
     `text_for_training` is the canonical /captures display text — it
     must reflect current PIPELINE_RULES (minus the captures-specific
     excludes) so reviewers see what the export will emit and chips
-    apply against the same text the trainer will consume."""
+    apply against the same text the trainer will consume.
+
+    Members of a LOCKED sample are left untouched: the lock guard
+    (_assert_member_sample_not_locked) blocks explicit member rewrites
+    and the admin-only bulk reapply preserves a locked sample's
+    transcript snapshot — a mere page view must not rewrite the text
+    both of those freeze. `parent_locked` skips the per-row sample
+    lookup when the caller (e.g. _enrich_sample) already has the parent."""
+    if parent_locked is None:
+        sid = row.get("sample_id")
+        if sid:
+            import capture_samples_store
+            s = capture_samples_store.get_sample(sid)
+            parent_locked = bool(s and s.get("is_locked"))
+    if parent_locked:
+        return
     raw = row.get("raw") or ""
     stored_training = row.get("text_for_training") or ""
     if not raw:
