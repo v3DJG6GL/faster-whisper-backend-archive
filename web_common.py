@@ -287,12 +287,12 @@ header .header-inner { display: flex; align-items: center; gap: 0.75rem;
 header .title { display: inline-flex; align-items: center; gap: 0.5rem;
   font-weight: 600; color: var(--bold); white-space: nowrap;
   flex-shrink: 1; min-width: 0; max-width: 22rem; overflow: hidden; }
-header .brand-mark { width: 1.6em; height: 1.6em; flex-shrink: 0; display: block; }
+header .brand-mark { width: 2.2rem; height: 2.2rem; flex-shrink: 0; display: block; }
 /* Brand-family wordmark grammar (shared with faster-whisper-frontend): light
    "faster" in ink + bold "whisper" in the product accent (green here), then the
    accent ">" prompt and the tracked-caps role label. The mark stays untouched. */
 header .brand-word { font-family: "Hubot Sans", var(--font-sans); font-weight: 430;
-  letter-spacing: -0.02em; white-space: nowrap; }
+  font-size: 1.3rem; letter-spacing: -0.02em; white-space: nowrap; }
 header .brand-word .bw-a { color: var(--bold);  font-weight: 430; }
 header .brand-word .bw-b { color: var(--green); font-weight: 730; }
 header .brand-word .bw-sep { color: var(--green); font-weight: 700; margin: 0 0.3em;
