@@ -13,6 +13,8 @@
   "automerge": true,
   "automergeStrategy": "squash",
   "platformAutomerge": true,
+  "minimumReleaseAge": "3 days",
+  "internalChecksFilter": "strict",
   "packageRules": [
     {
       "description": "Group all GitHub Actions bumps into one PR.",
@@ -40,6 +42,7 @@
   ],
   "vulnerabilityAlerts": {
     "labels": ["security"],
-    "automerge": false
+    "automerge": false,
+    "minimumReleaseAge": null
   }
 }
