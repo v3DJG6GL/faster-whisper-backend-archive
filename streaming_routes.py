@@ -527,16 +527,7 @@ async def transcribe_stream(ws: WebSocket) -> None:
             # route's per-request side-effects (rich log block, durable trace for
             # /quick-config + /reports, capture, metrics) so streaming has parity.
             rid = uuid.uuid4().hex
-            # Real spoken length (incl. audio the buffer trim cut away) for the
-            # log label + usage metrics. info["audio_dur"] stays buffer-only —
-            # it pairs with the capture's stored audio.
-            utt_dur = float(info.get("utterance_dur", info["audio_dur"]))
             raw_text = info["raw_text"] or ""
-            # Capture pair: `audio` no longer holds the audio of trim-banked words
-            # (a >BUFFER_TRIM_SEC continuous utterance), so the capture must store
-            # the buffer-aligned text, not the full document-contributing raw.
-            audio_text = info.get("audio_text")
-            audio_text = raw_text if audio_text is None else (audio_text or "")
             words = info.get("words") or []
             dec = last_decode
             fw_info = dec.get("info")
@@ -545,19 +536,20 @@ async def transcribe_stream(ws: WebSocket) -> None:
 
             steps: "list | None" = [] if getattr(cfg, "TRACE_ENABLED", False) else None
             final_text = main._postprocess_text(raw_text, model_name=final_model, trace=steps, ident=ident)
-            if audio_text != raw_text:
+            if info.get("trimmed_sec"):
+                # The session banked the trimmed audio + committed words, so
+                # raw_text / words / info["audio"] all span the WHOLE utterance;
+                # only the final DECODE ran on the shortened buffer.
                 logger.info(
-                    "[stream %s] utt#%s: buffer was trimmed mid-utterance — prepended "
-                    "%d banked committed word(s) to the final decode's text",
+                    "[stream %s] utt#%s: buffer was trimmed mid-utterance — final "
+                    "decode heard the last %.2fs; the first %.2fs carry the "
+                    "partial-committed text",
                     session_id[:8], info["utterance"],
-                    len(raw_text[:len(raw_text) - len(audio_text)].split()))
+                    info["audio_dur"] - info["trimmed_sec"], info["trimmed_sec"])
 
             captured_id = None
-            if cap_enabled and audio_text.strip():
-                cap_final = (final_text if audio_text == raw_text
-                             else main._postprocess_text(audio_text, model_name=final_model,
-                                                         trace=None, ident=ident))
-                captured_id = _maybe_capture(rid, info, audio_text, cap_final, words, fw_info)
+            if cap_enabled and raw_text.strip():
+                captured_id = _maybe_capture(rid, info, raw_text, final_text, words, fw_info)
 
             # Rich diagnostic block — same formatter the batch route uses, so the
             # VAD-ate-audio / empty-output / pipeline-step diagnostics show up for
@@ -565,7 +557,7 @@ async def transcribe_stream(ws: WebSocket) -> None:
             try:
                 logger.info(main._format_request_block(
                     file_label=f"stream {session_id[:8]} utt#{info['utterance']}  "
-                               f"({utt_dur:.2f}s, {response_format})",
+                               f"({info['audio_dur']:.2f}s, {response_format})",
                     model_name=final_model, info=fw_info, kwargs=kwargs,
                     seg_diag=seg_diag, raw=raw_text, final=final_text,
                     steps=steps, request_id=rid, captured_id=captured_id,
@@ -592,7 +584,7 @@ async def transcribe_stream(ws: WebSocket) -> None:
 
             # Timing/usage half — UPSERTs onto the same request_id row as record_trace.
             metrics.record_transcription(
-                model=final_model, audio_dur=utt_dur,
+                model=final_model, audio_dur=info["audio_dur"],
                 proc_dur=info["proc_dur"], status="ok",
                 words=len(final_text.split()),
                 request_id=rid, user_id=user.get("user_id"), key_id=user.get("key_id"))

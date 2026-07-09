@@ -65,8 +65,11 @@ def _run_long_utterance(speech_ms: int):
     async def decode_final(audio, prompt):
         off = session_box[0]._buffer_offset
         dur = audio.shape[0] / SR
-        raw = "".join(t for _, _, t in _grid_words(off, off + dur))
-        return (raw, [], False)
+        gw = _grid_words(off, off + dur)
+        raw = "".join(t for _, _, t in gw)
+        # buffer-relative word dicts, like the real decoder
+        words = [{"word": t, "start": a - off, "end": b - off} for a, b, t in gw]
+        return (raw, words, False)
 
     s = StreamSession(
         config=cfg, endpointer=EnergyEndpointer(),
@@ -105,19 +108,20 @@ def test_trim_preserves_committed_opening_in_final_document():
     doc = finals[-1]["committed"] + finals[-1]["tail"]
     assert "w0" in doc
 
-    # Capture alignment: audio_text pairs with the (trimmed) buffer, so it must
-    # NOT contain the banked opening, and raw_text = banked prefix + audio_text.
-    assert " w0" not in info["audio_text"]
-    assert info["raw_text"].endswith(info["audio_text"])
-    prefix = info["raw_text"][:len(info["raw_text"]) - len(info["audio_text"])]
-    assert prefix.split()[0] == "w0"
-
-    # Duration split: audio_dur is buffer-only (pairs with the capture audio),
-    # utterance_dur restores the trimmed seconds — it must cover the ~3.5 s of
-    # speech actually fed, while the trimmed buffer alone cannot.
-    assert info["utterance_dur"] > info["audio_dur"]
-    assert info["utterance_dur"] >= 3.2
-    assert info["audio_dur"] < 3.2
+    # Capture alignment: on_final reassembles the WHOLE utterance — the banked
+    # audio slices plus the remaining buffer — so audio, audio_dur, raw_text
+    # and words all span the full ~3.5 s of speech fed (a trimmed buffer alone
+    # would be shorter than the trim threshold's keep window).
+    assert info["trimmed_sec"] > 0.0
+    assert info["audio_dur"] >= 3.2
+    assert abs(info["audio"].shape[0] / SR - info["audio_dur"]) < 1e-6
+    # Words merge banked (absolute) + decode (shifted) entries: the utterance's
+    # first word is present, times are monotonic, and there's no duplication.
+    wtexts = [w["word"].strip() for w in info["words"]]
+    assert wtexts and wtexts[0] == "w0"
+    assert len(wtexts) == len(set(wtexts))
+    starts = [w["start"] for w in info["words"]]
+    assert starts == sorted(starts)
 
 
 def test_trim_folds_cut_words_into_rolling_prompt():
@@ -162,11 +166,11 @@ def test_trim_folds_cut_words_into_rolling_prompt():
 
 
 def test_short_utterance_unchanged_no_trim():
-    """Below buffer_trim_sec nothing is banked: raw_text == audio_text, the
-    final decode's text stands alone, and both durations coincide (pre-fix
-    behaviour preserved)."""
+    """Below buffer_trim_sec nothing is banked: the final decode's text stands
+    alone, no trim is reported, and the payload audio is the plain buffer
+    (pre-fix behaviour preserved)."""
     s, msgs, finals_meta = _run_long_utterance(speech_ms=800)
     info = finals_meta[-1]
-    assert info["raw_text"] == info["audio_text"]
-    assert info["utterance_dur"] == info["audio_dur"]
+    assert info["trimmed_sec"] == 0.0
+    assert abs(info["audio"].shape[0] / SR - info["audio_dur"]) < 1e-6
     assert s._trimmed_text == ""

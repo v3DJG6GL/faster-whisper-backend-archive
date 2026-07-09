@@ -123,6 +123,11 @@ class StreamSession:
         self._prev_processed = ""          # last whole-doc post-process (document-level LocalAgreement)
         self._trimmed_text = ""            # committed text whose audio _maybe_trim cut away
         self._trimmed_sec = 0.0            # seconds of utterance audio _maybe_trim cut away
+        # Audio + word dicts banked by _maybe_trim so on_final can hand captures
+        # the WHOLE utterance. Bounded: forced_commit_sec (25 s) caps an
+        # utterance, so this holds ~2 MB of float32 at worst, freed on reset.
+        self._trimmed_audio: "list[np.ndarray]" = []
+        self._trimmed_words: "list[dict]" = []
         self._utterance_index = 0
         self._prompt = base_prompt.strip()
         self._closed = False
@@ -266,21 +271,28 @@ class StreamSession:
                 break
         if cut is not None and cut > self._buffer_offset:
             cut_samples = int((cut - self._buffer_offset) * self.cfg.sample_rate)
-            self.audio = self.audio[cut_samples:]
-            # The cut words' AUDIO is gone — later decodes can't re-hear it, so
-            # their committed TEXT is the only remaining record. Bank it for
-            # _finalize (prepended to the final decode's result) and fold it
-            # into the rolling prompt so the partial/final decodes of the
-            # now-mid-sentence buffer get the preceding words as context (an
-            # uncontexted seam mishears its opening, e.g. "on"→"and").
+            # The DECODE buffer loses the cut span — later decodes can't re-hear
+            # it, so bank its committed words' text for _finalize (prepended to
+            # the final decode's result) and fold it into the rolling prompt so
+            # the partial/final decodes of the now-mid-sentence buffer get the
+            # preceding words as context (an uncontexted seam mishears its
+            # opening, e.g. "on"→"and"). Bank the audio + word dicts too, so
+            # on_final can hand captures the WHOLE utterance, not a fragment.
             # la.committed spans the whole utterance, so bound below by the
             # previous cut (== the current _buffer_offset) or a second trim
-            # would re-bank the first trim's words.
-            cut_text = self.la.text_of(
-                w for w in self.la.committed
-                if self._buffer_offset < w.end <= cut)
+            # would re-bank the first trim's words. Bank BEFORE the buffer is
+            # re-sliced; .copy() detaches from the old array (a bare view would
+            # pin the whole pre-trim buffer in memory).
+            cut_words = [w for w in self.la.committed
+                         if self._buffer_offset < w.end <= cut]
+            cut_text = self.la.text_of(cut_words)
             self._trimmed_text += cut_text
             self._trimmed_sec += cut - self._buffer_offset
+            self._trimmed_audio.append(self.audio[:cut_samples].copy())
+            self._trimmed_words.extend(
+                {"word": w.text, "start": w.start, "end": w.end}
+                for w in cut_words)
+            self.audio = self.audio[cut_samples:]
             self._prompt = " ".join(
                 (self._prompt + " " + cut_text).split()[-self.cfg.prompt_words:])
             self._buffer_offset = cut
@@ -292,7 +304,6 @@ class StreamSession:
         if self._speech_ms < self.cfg.min_speech_ms or rms_dbfs(audio) < self.cfg.rms_gate_dbfs:
             self._reset_utterance()
             return
-        audio_dur = audio.shape[0] / self.cfg.sample_rate
         t0 = time.perf_counter()
         raw, words, dropped_all = await self.decode_final(audio.copy(), self._prompt)
         proc_dur = time.perf_counter() - t0
@@ -306,17 +317,26 @@ class StreamSession:
             # la.committed spans the WHOLE utterance (pop_committed only prunes the
             # agreement buffer), so this path already includes any trim-banked words.
             raw = self.la.committed_text + self.la.text_of(self.la.finish())
-            audio_text = (raw[len(self._trimmed_text):]
-                          if raw.startswith(self._trimmed_text) else raw)
         else:
             # The decode only heard the (possibly trim-shortened) buffer: text whose
-            # audio _maybe_trim cut away exists ONLY in the banked committed words —
+            # audio _maybe_trim cut from it survives in the banked committed words —
             # without this prefix an over-15s continuous utterance loses its opening
             # (the decode result would replace the already-committed-and-shown text).
             # Applies to the dropped_all case too: the drop verdict judged the
             # remaining buffer, not the banked (multi-partial-agreed) prefix.
-            audio_text = raw
             raw = self._trimmed_text + raw
+        # Reassemble the WHOLE utterance for on_final: the banked audio slices +
+        # the remaining buffer, and the banked word dicts (absolute times) + the
+        # final decode's words shifted from buffer-relative to utterance time.
+        # Captures therefore store the full audio↔text pair, not a fragment.
+        if self._trimmed_audio:
+            full_audio = np.concatenate([*self._trimmed_audio, audio])
+            off = self._buffer_offset
+            words = self._trimmed_words + [
+                {**w, "start": w["start"] + off, "end": w["end"] + off}
+                for w in words]
+        else:
+            full_audio = audio
         self.raw_confirmed += raw
         self._prompt = self._make_prompt()
         processed = self.postprocess(self.raw_confirmed)
@@ -324,18 +344,12 @@ class StreamSession:
         if self.on_final is not None:
             await self.on_final({
                 "utterance": self._utterance_index,
-                "audio_dur": audio_dur,   # buffer only — pairs with `audio` (captures)
-                # Real spoken length incl. audio _maybe_trim cut away — use for
-                # usage metrics / display, NOT for the capture (whose stored
-                # audio is just the buffer).
-                "utterance_dur": self._trimmed_sec + audio_dur,
+                "audio_dur": full_audio.shape[0] / self.cfg.sample_rate,
+                "trimmed_sec": self._trimmed_sec,  # >0 → a mid-utterance trim fired
                 "proc_dur": proc_dur,
                 "raw_text": raw,       # full utterance text (incl. trim-banked prefix)
-                # Text aligned with `audio` — the buffer no longer holds the
-                # trim-banked words' audio, so captures must pair THIS with it.
-                "audio_text": audio_text,
                 "words": words,        # word-timestamp dicts (for captures / verbose)
-                "audio": audio,        # float32 PCM of the utterance (for captures)
+                "audio": full_audio,   # float32 PCM of the WHOLE utterance (for captures)
                 "forced": forced,
             })
         self._utterance_index += 1
@@ -435,6 +449,8 @@ class StreamSession:
         self._buffer_offset = 0.0
         self._trimmed_text = ""
         self._trimmed_sec = 0.0
+        self._trimmed_audio = []
+        self._trimmed_words = []
         self._in_utterance = False
         self._speech_ms = 0
         self._silence_ms = 0
