@@ -122,6 +122,7 @@ class StreamSession:
         self._committed_len = 0            # chars of processed text locked as append-only committed
         self._prev_processed = ""          # last whole-doc post-process (document-level LocalAgreement)
         self._trimmed_text = ""            # committed text whose audio _maybe_trim cut away
+        self._trimmed_sec = 0.0            # seconds of utterance audio _maybe_trim cut away
         self._utterance_index = 0
         self._prompt = base_prompt.strip()
         self._closed = False
@@ -279,6 +280,7 @@ class StreamSession:
                 w for w in self.la.committed
                 if self._buffer_offset < w.end <= cut)
             self._trimmed_text += cut_text
+            self._trimmed_sec += cut - self._buffer_offset
             self._prompt = " ".join(
                 (self._prompt + " " + cut_text).split()[-self.cfg.prompt_words:])
             self._buffer_offset = cut
@@ -322,7 +324,11 @@ class StreamSession:
         if self.on_final is not None:
             await self.on_final({
                 "utterance": self._utterance_index,
-                "audio_dur": audio_dur,
+                "audio_dur": audio_dur,   # buffer only — pairs with `audio` (captures)
+                # Real spoken length incl. audio _maybe_trim cut away — use for
+                # usage metrics / display, NOT for the capture (whose stored
+                # audio is just the buffer).
+                "utterance_dur": self._trimmed_sec + audio_dur,
                 "proc_dur": proc_dur,
                 "raw_text": raw,       # full utterance text (incl. trim-banked prefix)
                 # Text aligned with `audio` — the buffer no longer holds the
@@ -428,6 +434,7 @@ class StreamSession:
         self.audio = np.zeros(0, dtype=np.float32)
         self._buffer_offset = 0.0
         self._trimmed_text = ""
+        self._trimmed_sec = 0.0
         self._in_utterance = False
         self._speech_ms = 0
         self._silence_ms = 0

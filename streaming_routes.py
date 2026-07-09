@@ -527,6 +527,10 @@ async def transcribe_stream(ws: WebSocket) -> None:
             # route's per-request side-effects (rich log block, durable trace for
             # /quick-config + /reports, capture, metrics) so streaming has parity.
             rid = uuid.uuid4().hex
+            # Real spoken length (incl. audio the buffer trim cut away) for the
+            # log label + usage metrics. info["audio_dur"] stays buffer-only —
+            # it pairs with the capture's stored audio.
+            utt_dur = float(info.get("utterance_dur", info["audio_dur"]))
             raw_text = info["raw_text"] or ""
             # Capture pair: `audio` no longer holds the audio of trim-banked words
             # (a >BUFFER_TRIM_SEC continuous utterance), so the capture must store
@@ -561,7 +565,7 @@ async def transcribe_stream(ws: WebSocket) -> None:
             try:
                 logger.info(main._format_request_block(
                     file_label=f"stream {session_id[:8]} utt#{info['utterance']}  "
-                               f"({info['audio_dur']:.2f}s, {response_format})",
+                               f"({utt_dur:.2f}s, {response_format})",
                     model_name=final_model, info=fw_info, kwargs=kwargs,
                     seg_diag=seg_diag, raw=raw_text, final=final_text,
                     steps=steps, request_id=rid, captured_id=captured_id,
@@ -588,7 +592,7 @@ async def transcribe_stream(ws: WebSocket) -> None:
 
             # Timing/usage half — UPSERTs onto the same request_id row as record_trace.
             metrics.record_transcription(
-                model=final_model, audio_dur=info["audio_dur"],
+                model=final_model, audio_dur=utt_dur,
                 proc_dur=info["proc_dur"], status="ok",
                 words=len(final_text.split()),
                 request_id=rid, user_id=user.get("user_id"), key_id=user.get("key_id"))

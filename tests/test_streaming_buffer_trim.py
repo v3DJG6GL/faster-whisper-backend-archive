@@ -112,6 +112,13 @@ def test_trim_preserves_committed_opening_in_final_document():
     prefix = info["raw_text"][:len(info["raw_text"]) - len(info["audio_text"])]
     assert prefix.split()[0] == "w0"
 
+    # Duration split: audio_dur is buffer-only (pairs with the capture audio),
+    # utterance_dur restores the trimmed seconds — it must cover the ~3.5 s of
+    # speech actually fed, while the trimmed buffer alone cannot.
+    assert info["utterance_dur"] > info["audio_dur"]
+    assert info["utterance_dur"] >= 3.2
+    assert info["audio_dur"] < 3.2
+
 
 def test_trim_folds_cut_words_into_rolling_prompt():
     """After a trim the decodes see a mid-sentence buffer; the cut words must
@@ -155,9 +162,11 @@ def test_trim_folds_cut_words_into_rolling_prompt():
 
 
 def test_short_utterance_unchanged_no_trim():
-    """Below buffer_trim_sec nothing is banked: raw_text == audio_text and the
-    final decode's text stands alone (pre-fix behaviour preserved)."""
+    """Below buffer_trim_sec nothing is banked: raw_text == audio_text, the
+    final decode's text stands alone, and both durations coincide (pre-fix
+    behaviour preserved)."""
     s, msgs, finals_meta = _run_long_utterance(speech_ms=800)
     info = finals_meta[-1]
     assert info["raw_text"] == info["audio_text"]
+    assert info["utterance_dur"] == info["audio_dur"]
     assert s._trimmed_text == ""
