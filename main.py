@@ -1010,6 +1010,14 @@ def _apply_decode_overrides(kwargs, resolved_model, overrides, ident=None):
     for key, cap in _DECODE_STR_CAPS.items():
         if key in overrides and isinstance(overrides[key], str):
             kwargs[key] = overrides[key][:cap]
+    # A blank hotwords override means CLEAR the admin DEFAULT_HOTWORDS — remove
+    # the kwarg entirely. Forwarding a whitespace-only string is NOT a clear:
+    # any truthy hotwords value makes faster-whisper emit <|startofprev|> (the
+    # fake previous-transcript slot), which alone biases the decoder to treat a
+    # recording that starts mid-speech as a window continuation and drop its
+    # opening words.
+    if isinstance(kwargs.get("hotwords"), str) and not kwargs["hotwords"].strip():
+        kwargs.pop("hotwords")
     if "suppress_tokens" in overrides:
         st = overrides["suppress_tokens"]
         ids = None
@@ -1086,7 +1094,7 @@ def assemble_transcribe_kwargs(resolved_model, model, *, language, temperature,
     # Optional advanced kwargs — only forwarded when set, so the
     # transcribe_kwargs dict stays clean for the common path.
     _hotwords = cf("DEFAULT_HOTWORDS")
-    if _hotwords:
+    if _hotwords and _hotwords.strip():
         transcribe_kwargs["hotwords"] = _hotwords
     _temp_str = cf("TEMPERATURE")
     if _temp_str:
