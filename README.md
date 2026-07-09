@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="static/logo-lockup-dark.svg">
-    <img src="static/logo-lockup-light.svg" alt="faster-whisper-backend" width="420">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/lockup-dark.png">
+    <img src="docs/brand/lockup-light.png" alt="fasterwhisper — backend" width="264">
   </picture>
 </p>
 
@@ -388,16 +388,26 @@ The same `OVERRIDE_PROFILES` JSON can be pinned via `WHISPER_OVERRIDE_PROFILES` 
 
 ## Brand
 
-The mark is an **audio waveform skewed forward** — *whisper* (the equalizer bars) meets *faster* (the rightward lean reads as motion / fast-forward) — on a rounded terminal-dark tile. The wordmark is a monospace lockup, `faster` (dim) + `whisper` (bold), with a green `>` prompt marking this as the **backend** service, distinct from the upstream [faster-whisper](https://github.com/SYSTRAN/faster-whisper) library it wraps. The palette mirrors the WebUI's GitHub-dark theme — cyan `#79c0ff` → green `#7ee787` on `#0d1117`.
+The mark is an **audio waveform skewed forward** — *whisper* (the equalizer bars) meets *faster* (the rightward lean reads as motion / fast-forward) — on a rounded terminal-dark tile, in the WebUI's GitHub-dark palette (cyan `#79c0ff` → green `#7ee787` on `#0d1117`). It is deliberately **this service's own mark** and is untouched by the family alignment below.
+
+The wordmark follows the **brand-family grammar shared with
+[faster-whisper-frontend](https://github.com/v3DJG6GL/faster-whisper-frontend)**: light `faster`
+(Hubot Sans 430) in ink + bold `whisper` (730) in the product accent, then an accent `>` prompt
+before the tracked-caps role label in Geist Mono (`> BACKEND` here, `> FRONTEND` there). Each
+product keeps its own accent — terminal green for the backend, amber for the frontend — so the
+family reads through structure, the product through colour. Fonts are vendored in `static/`
+(see `static/VENDOR.md`); the lockup source + regen commands live in `docs/brand/lockup.html`.
 
 **Lockups & variants** — each designed to work on dark *and* light backgrounds:
 
-- **Primary lockup** — mark + stacked wordmark (`fasterwhisper` over `> BACKEND`); the hero above.
+- **Primary lockup** — mark + stacked wordmark (`fasterwhisper` over `> BACKEND`); the hero above (`docs/brand/lockup-{dark,light}.png`).
 - **Compact** — single line, `[mark] fasterwhisper > backend`, for headers and tight spaces. The admin WebUI's sticky header uses this form.
 - **Icon only** — the waveform tile alone (favicon, app tile, anything ≤ ~80 px).
 - **Monochrome** — single-colour, tile-less bars for one-colour or print contexts.
 
-**Type spec:** monospace throughout; hierarchy carried by weight + value (no rainbow of colours); the green `>` is the wordmark's only accent so the colour lives in the mark; the `BACKEND` sub-label is tracked caps at ~50 % cap-height. The same mark is the favicon and sits in the sticky header of every admin page.
+**Type spec:** name in Hubot Sans (430/730 weight pair, −0.025em); label in Geist Mono, 500,
+tracked caps at 0.14em, ⅔ of the name size; the green `>` and `whisper` are the wordmark's only
+accents. The same mark is the favicon and sits in the sticky header of every admin page.
 
 Assets (`static/`):
 

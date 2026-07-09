@@ -22,6 +22,18 @@ fully offline — no CDN fetch at page-load.
   - `gridstack.min.css` (~4 KB)  — default theme (we override colors via CSS vars).
 - **Used by**: `/stats` dashboard for drag-to-reorder + click-to-resize tiles.
 
+## Brand fonts (Hubot Sans, Geist Mono)
+
+- **Source**: the `@fontsource-variable/hubot-sans` and `@fontsource-variable/geist-mono`
+  packages (same pinned files the faster-whisper-frontend app bundles).
+- **License**: SIL OFL-1.1 (both).
+- **Files**:
+  - `hubot-sans-latin-wght-normal.woff2` (~48 KB) — variable weight 200–900.
+  - `geist-mono-latin-wght-normal.woff2` (~30 KB) — variable weight 100–900.
+- **Used by**: the header brand lockup on every WebUI page (family wordmark
+  grammar shared with faster-whisper-frontend), and `docs/brand/lockup.html`
+  for rendering the README lockup PNGs.
+
 ## How to update
 
 ```bash

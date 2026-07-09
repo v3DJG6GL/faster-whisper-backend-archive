@@ -1,0 +1,81 @@
+<!doctype html>
+<!-- Brand lockup source — the mark (static/logo.svg, UNCHANGED brand-family
+     decision: the backend keeps its own mark) + the family wordmark grammar
+     shared with faster-whisper-frontend: light "faster" (430) in ink, bold
+     "whisper" (730) in the product accent (terminal green here), then an
+     accent ">" prompt before the tracked-caps role label.
+
+     Regenerate the README PNGs with (from the repo root; snap chromium can't
+     read /tmp, keep paths in $HOME):
+
+       chromium --headless=new --screenshot=docs/brand/lockup-dark.png  --window-size=900,240 \
+         --default-background-color=00000000 --hide-scrollbars "file://$PWD/docs/brand/lockup.html"
+       chromium --headless=new --screenshot=docs/brand/lockup-light.png --window-size=900,240 \
+         --default-background-color=00000000 --hide-scrollbars "file://$PWD/docs/brand/lockup.html?light"
+
+     then autocrop both (PIL: crop to alpha bbox). -->
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @font-face {
+    font-family: "Hubot Sans";
+    font-style: normal;
+    font-display: block;
+    font-weight: 200 900;
+    src: url(../../static/hubot-sans-latin-wght-normal.woff2) format("woff2-variations");
+  }
+  @font-face {
+    font-family: "Geist Mono";
+    font-style: normal;
+    font-display: block;
+    font-weight: 100 900;
+    src: url(../../static/geist-mono-latin-wght-normal.woff2) format("woff2-variations");
+  }
+  /* GitHub-dark tokens (the WebUI palette); light = GitHub-light equivalents. */
+  :root { --ink: #f0f6fc; --accent: #7ee787; --faint: #8b949e; }
+  :root[data-theme="light"] { --ink: #1f2328; --accent: #1a7f37; --faint: #59636e; }
+  html, body { margin: 0; background: transparent; }
+  .lockup { display: inline-flex; align-items: center; gap: 40px; padding: 10px; }
+  .lockup svg { width: 104px; height: 104px; flex: none; }
+  .text { line-height: 1; }
+  .title {
+    font: 430 60px/1 "Hubot Sans", system-ui, sans-serif;
+    letter-spacing: -0.025em; color: var(--ink);
+  }
+  .title .accent { color: var(--accent); font-weight: 730; }
+  .sub {
+    margin-top: 16px; font: 500 40px/1 "Geist Mono", monospace;
+    letter-spacing: 0.14em; text-transform: uppercase; color: var(--faint);
+  }
+  .sub .prompt { color: var(--accent); font-weight: 700; }
+</style>
+<script>
+  if (location.search.includes("light")) document.documentElement.dataset.theme = "light";
+</script>
+</head>
+<body>
+  <div class="lockup">
+    <!-- static/logo.svg inlined verbatim (the mark is untouched by the family alignment) -->
+    <svg viewBox="0 0 120 120" fill="none" aria-hidden="true">
+      <defs>
+        <linearGradient id="fw" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stop-color="#79c0ff"/><stop offset="1" stop-color="#7ee787"/>
+        </linearGradient>
+      </defs>
+      <rect x="6" y="6" width="108" height="108" rx="26" fill="#161b22" stroke="#30363d" stroke-width="2"/>
+      <g transform="translate(13 2) skewX(-9)" fill="url(#fw)">
+        <rect x="16" y="74" width="11" height="20" rx="5.5"/>
+        <rect x="35" y="52" width="11" height="42" rx="5.5"/>
+        <rect x="54" y="22" width="11" height="72" rx="5.5"/>
+        <rect x="73" y="44" width="11" height="50" rx="5.5"/>
+        <rect x="92" y="66" width="11" height="28" rx="5.5"/>
+      </g>
+    </svg>
+    <div class="text">
+      <div class="title">faster<span class="accent">whisper</span></div>
+      <div class="sub"><span class="prompt">&gt;</span> backend</div>
+    </div>
+  </div>
+</body>
+</html>

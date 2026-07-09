@@ -181,6 +181,15 @@ def sse_response(generator):
 # so the right side stays right-aligned regardless of how many actions a page
 # has.
 NAV_CSS = """
+/* Brand fonts (vendored, see static/VENDOR.md) — the family wordmark grammar
+   shared with faster-whisper-frontend renders the name in Hubot Sans and the
+   role label in Geist Mono. Variable fonts, so the 430/730 weight pair works. */
+@font-face { font-family: "Hubot Sans"; font-style: normal; font-display: swap;
+  font-weight: 200 900;
+  src: url(/static/hubot-sans-latin-wght-normal.woff2) format("woff2-variations"); }
+@font-face { font-family: "Geist Mono"; font-style: normal; font-display: swap;
+  font-weight: 100 900;
+  src: url(/static/geist-mono-latin-wght-normal.woff2) format("woff2-variations"); }
 /* Global scaling tokens — every page uses these so a single :root knob
    (`--fs-base`) re-scales the WHOLE UI. Bump --fs-base to scale up; the
    scale-picker dropdown writes inline-style to override at runtime.
@@ -279,12 +288,18 @@ header .title { display: inline-flex; align-items: center; gap: 0.5rem;
   font-weight: 600; color: var(--bold); white-space: nowrap;
   flex-shrink: 1; min-width: 0; max-width: 22rem; overflow: hidden; }
 header .brand-mark { width: 1.6em; height: 1.6em; flex-shrink: 0; display: block; }
-header .brand-word { font-family: var(--font-mono); font-weight: 700;
-  letter-spacing: 0; white-space: nowrap; }
-header .brand-word .bw-a { color: var(--dim);  font-weight: 400; }
-header .brand-word .bw-b { color: var(--bold); font-weight: 700; }
-header .brand-word .bw-sep { color: var(--green); font-weight: 700; margin: 0 0.28em; }
-header .brand-word .bw-c { color: var(--dim);  font-weight: 400; }
+/* Brand-family wordmark grammar (shared with faster-whisper-frontend): light
+   "faster" in ink + bold "whisper" in the product accent (green here), then the
+   accent ">" prompt and the tracked-caps role label. The mark stays untouched. */
+header .brand-word { font-family: "Hubot Sans", var(--font-sans); font-weight: 430;
+  letter-spacing: -0.02em; white-space: nowrap; }
+header .brand-word .bw-a { color: var(--bold);  font-weight: 430; }
+header .brand-word .bw-b { color: var(--green); font-weight: 730; }
+header .brand-word .bw-sep { color: var(--green); font-weight: 700; margin: 0 0.3em;
+  font-family: "Geist Mono", var(--font-mono); }
+header .brand-word .bw-c { color: var(--dim); font-weight: 500; font-size: 0.72em;
+  font-family: "Geist Mono", var(--font-mono);
+  letter-spacing: 0.14em; text-transform: uppercase; }
 /* the requested clear separation between logo and nav */
 header .brand-sep { flex-shrink: 0; width: 1px; align-self: stretch;
   margin: 0.15rem 0.35rem; background: var(--border); }
