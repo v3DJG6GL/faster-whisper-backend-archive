@@ -9,6 +9,10 @@ Endpoints (all admin-only):
   GET    /settings/api-keys/api/users/{uid}/keys  list keys for one user
   POST   /settings/api-keys/api/users/{uid}/keys  { label }   -> show-once raw key
   DELETE /settings/api-keys/api/users/{uid}/keys/{kid}        soft-revoke
+  GET    /settings/api-keys/api/client-settings   per-account sync metadata map
+  GET    /settings/api-keys/api/users/{uid}/client-settings/export   file download
+  POST   /settings/api-keys/api/users/{uid}/client-settings/import   { blob }
+  DELETE /settings/api-keys/api/users/{uid}/client-settings          remove server copy
 
 Last-admin guard: revoking the only admin key (or only admin user)
 returns 409. Prevents accidental lockout.
@@ -19,10 +23,12 @@ the raw key is copied to the clipboard, then never retrievable.
 """
 from __future__ import annotations
 
+import json
 import logging
+import re
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
@@ -111,6 +117,15 @@ class PatchPermissionsIn(BaseModel):
     # binding ({} overrides, [] profiles) clears it. Validated by
     # config_store.validate_binding inside set_user_permissions.
     config: ConfigBindingIn | None = None
+
+
+class ImportClientSettingsIn(BaseModel):
+    """Wire shape for POST /api/users/{uid}/client-settings/import — the
+    WebUI's restore path. `blob` is a full opaque settings document (the
+    desktop export's `categories` object, or a file previously downloaded
+    with Export here); the route force-writes it, so no base_version."""
+    model_config = {"extra": "forbid"}
+    blob: dict[str, Any]
 
 
 # ---------------------------------------------------------------------
@@ -374,6 +389,127 @@ async def patch_key_config_api(
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
     return JSONResponse({"ok": True, "config": binding})
+
+
+# ---------------------------------------------------------------------
+# Synced client settings (desktop sync) — per-account admin management.
+#
+# The desktop app syncs its settings through the user-tier
+# /v1/client-settings endpoint (client_settings_routes). These admin
+# endpoints add per-account visibility + management on the keys page.
+# The stored blob is OPAQUE, SENSITIVE client JSON (by user choice it can
+# include the account's saved API keys), so the metadata endpoint never
+# returns blob contents — the blob itself only moves as an explicit
+# export download or import upload, and the page warns before both.
+# ---------------------------------------------------------------------
+
+_FILENAME_SAFE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _cs_user_or_404(uid: str) -> dict[str, Any] | None:
+    """Resolve the account a synced-settings row belongs to. Accept any
+    known user id — revoked included, their stored blob stays exportable/
+    deletable — plus the "(open-mode)" sentinel row the desktop writes
+    while the server runs without admin keys. Unknown ids 404 so a typoed
+    path can't create or expose rows."""
+    if uid == api_keys_store.OPEN_MODE_USER["user_id"]:
+        return None
+    user = api_keys_store.get_user(uid)
+    if user is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "user not found")
+    return user
+
+
+@router.get(
+    "/api/client-settings",
+    dependencies=[Depends(require_admin_webui_host), Depends(require_admin)],
+)
+async def client_settings_meta_api() -> JSONResponse:
+    """Per-account synced-settings metadata for the header chips + drawers,
+    id-keyed like /api/usage so the client joins it onto the users it
+    already renders. v1 desktop clients always use the default (profile='')
+    set; named sets stay out of this map until they exist."""
+    import client_settings_store
+    by_user = {
+        r["user_id"]: {
+            "version": r["version"],
+            "bytes": r["bytes"],
+            "updated_at": r["updated_at"],
+            "device": r["device"],
+        }
+        for r in client_settings_store.list_meta()
+        if r["profile"] == ""
+    }
+    return JSONResponse({"by_user": by_user})
+
+
+@router.get(
+    "/api/users/{uid}/client-settings/export",
+    dependencies=[Depends(require_admin_webui_host), Depends(require_admin)],
+)
+async def export_client_settings_api(uid: str) -> Response:
+    """Download the stored settings document as a JSON file. Pretty-printed
+    — a human inspecting/restoring it beats byte-fidelity, and it re-parses
+    to the identical document (import accepts it as-is). The file may
+    include the account's saved API keys; the WebUI's two-press guard warns
+    before this endpoint is ever hit."""
+    user = _cs_user_or_404(uid)
+    import client_settings_store
+    row = client_settings_store.get(uid)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no synced settings stored")
+    name = user["username"] if user else "open-mode"
+    name = _FILENAME_SAFE.sub("-", name).strip("-") or "user"
+    return Response(
+        json.dumps(row["blob"], ensure_ascii=False, indent=2),
+        media_type="application/json",
+        headers={
+            "Content-Disposition":
+                f'attachment; filename="client-settings_{name}_v{row["version"]}.json"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@router.post(
+    "/api/users/{uid}/client-settings/import",
+    dependencies=[Depends(require_admin_webui_host), Depends(require_admin)],
+)
+async def import_client_settings_api(
+    uid: str, payload: ImportClientSettingsIn,
+) -> JSONResponse:
+    """Force-write a settings document for the account. The version bumps
+    past whatever is stored, so every device's next sync sees a newer
+    server copy and applies it through its normal merge path — no
+    device-side changes needed."""
+    _cs_user_or_404(uid)
+    import client_settings_store
+    try:
+        state = client_settings_store.force_put(
+            uid, payload.blob, device="WebUI import",
+        )
+    except ValueError:
+        raise HTTPException(
+            status.HTTP_413_CONTENT_TOO_LARGE, "settings blob too large",
+        )
+    return JSONResponse({
+        "ok": True,
+        "version": state["version"],
+        "updated_at": state["updated_at"],
+    })
+
+
+@router.delete(
+    "/api/users/{uid}/client-settings",
+    dependencies=[Depends(require_admin_webui_host), Depends(require_admin)],
+)
+async def delete_client_settings_api(uid: str) -> JSONResponse:
+    """Remove the account's server copy. Devices keep their local settings;
+    a device still holding version N gets a 409 on its next push, correctly
+    surfacing the deletion (see client_settings_store.delete)."""
+    _cs_user_or_404(uid)
+    import client_settings_store
+    return JSONResponse({"ok": True, "deleted": client_settings_store.delete(uid)})
 
 
 # ---------------------------------------------------------------------
