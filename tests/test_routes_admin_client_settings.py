@@ -199,3 +199,35 @@ def test_admin_gate(client, make_user_key):
         assert r.status_code == 401, (method, path)
         r = client.request(method, path, json=body, headers=bearer(user_key))
         assert r.status_code == 403, (method, path)
+
+
+def test_admin_endpoints_when_store_unavailable(client, make_user_key, monkeypatch):
+    """Store never initialized: the meta map degrades to empty (the page must
+    still render its users), while the drawer's export/import/delete surface
+    a 503 instead of a bare 500."""
+    import client_settings_store
+
+    uid, key = make_user_key("sadmin", is_admin=True)
+    monkeypatch.setattr(client_settings_store, "_conn", None)
+    h = bearer(key)
+
+    r = client.get(f"{_API}/client-settings", headers=h)
+    assert r.status_code == 200
+    assert r.json() == {"by_user": {}}
+
+    assert (
+        client.get(f"{_API}/users/{uid}/client-settings/export", headers=h).status_code
+        == 503
+    )
+    assert (
+        client.post(
+            f"{_API}/users/{uid}/client-settings/import",
+            json={"blob": {"a": 1}},
+            headers=h,
+        ).status_code
+        == 503
+    )
+    assert (
+        client.delete(f"{_API}/users/{uid}/client-settings", headers=h).status_code
+        == 503
+    )

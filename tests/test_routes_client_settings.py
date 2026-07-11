@@ -121,3 +121,17 @@ def test_two_keys_same_user_share_one_blob(client, make_user_key):
     got = client.get(_URL, headers=bearer(key2)).json()
     assert got["blob"] == {"synced": True}
     assert got["device"] == "machine-1"
+
+
+def test_store_unavailable_maps_to_503_not_500(client, monkeypatch):
+    """init_db failing at startup (e.g. an unwritable CLIENT_SETTINGS_DB in a
+    containerized deployment) must surface as an actionable 503 pointing at
+    the config knob — not the bare 500 it used to be."""
+    import client_settings_store
+
+    monkeypatch.setattr(client_settings_store, "_conn", None)
+    r = client.get(_URL)
+    assert r.status_code == 503
+    assert "CLIENT_SETTINGS_DB" in r.json()["detail"]
+    assert _put(client, {"n": 1}, 0).status_code == 503
+    assert client.delete(_URL).status_code == 503

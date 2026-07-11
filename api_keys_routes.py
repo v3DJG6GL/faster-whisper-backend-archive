@@ -428,8 +428,15 @@ async def client_settings_meta_api() -> JSONResponse:
     """Per-account synced-settings metadata for the header chips + drawers,
     id-keyed like /api/usage so the client joins it onto the users it
     already renders. v1 desktop clients always use the default (profile='')
-    set; named sets stay out of this map until they exist."""
+    set; named sets stay out of this map until they exist.
+    Store never initialized (init_db failed at boot) → empty map rather than
+    a 503: the page must still render its users; the drawers' endpoints
+    below surface the 503 with the actionable message."""
     import client_settings_store
+    try:
+        rows = client_settings_store.list_meta()
+    except client_settings_store.StoreUnavailable:
+        rows = []
     by_user = {
         r["user_id"]: {
             "version": r["version"],
@@ -437,7 +444,7 @@ async def client_settings_meta_api() -> JSONResponse:
             "updated_at": r["updated_at"],
             "device": r["device"],
         }
-        for r in client_settings_store.list_meta()
+        for r in rows
         if r["profile"] == ""
     }
     return JSONResponse({"by_user": by_user})
@@ -455,7 +462,10 @@ async def export_client_settings_api(uid: str) -> Response:
     before this endpoint is ever hit."""
     user = _cs_user_or_404(uid)
     import client_settings_store
-    row = client_settings_store.get(uid)
+    try:
+        row = client_settings_store.get(uid)
+    except client_settings_store.StoreUnavailable as e:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(e)) from None
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "no synced settings stored")
     name = user["username"] if user else "open-mode"
@@ -488,6 +498,8 @@ async def import_client_settings_api(
         state = client_settings_store.force_put(
             uid, payload.blob, device="WebUI import",
         )
+    except client_settings_store.StoreUnavailable as e:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(e)) from None
     except ValueError:
         raise HTTPException(
             status.HTTP_413_CONTENT_TOO_LARGE, "settings blob too large",
@@ -509,7 +521,11 @@ async def delete_client_settings_api(uid: str) -> JSONResponse:
     surfacing the deletion (see client_settings_store.delete)."""
     _cs_user_or_404(uid)
     import client_settings_store
-    return JSONResponse({"ok": True, "deleted": client_settings_store.delete(uid)})
+    try:
+        deleted = client_settings_store.delete(uid)
+    except client_settings_store.StoreUnavailable as e:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(e)) from None
+    return JSONResponse({"ok": True, "deleted": deleted})
 
 
 # ---------------------------------------------------------------------

@@ -37,6 +37,12 @@ logger = logging.getLogger("whisper-api")
 _lock = threading.Lock()
 _conn: sqlite3.Connection | None = None
 
+
+class StoreUnavailable(RuntimeError):
+    """The store was never initialized (init_db failed or wasn't called).
+    Routes map this to a 503 with a pointer at the server log — the
+    alternative is a bare 500 that tells the operator nothing."""
+
 # Size caps — applied server-side before insert. The blob is opaque JSON, so
 # an over-cap payload is REJECTED (ValueError → route maps to 413), never
 # truncated: cutting JSON mid-document would hand every other device a
@@ -81,7 +87,7 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
 
 def _require_conn() -> sqlite3.Connection:
     if _conn is None:
-        raise RuntimeError(
+        raise StoreUnavailable(
             "client_settings_store.init_db() was not called before use."
         )
     return _conn

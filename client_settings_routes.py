@@ -50,6 +50,17 @@ class PutClientSettings(BaseModel):
     device: str | None = None
 
 
+def _store_unavailable() -> HTTPException:
+    """503 for StoreUnavailable: init_db failed at startup (the reason is in
+    the server log — typically a CLIENT_SETTINGS_DB path that isn't writable
+    in this deployment). A bare 500 here told the operator nothing."""
+    return HTTPException(
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        "client-settings store unavailable on this server — check the server "
+        "log for the startup error (CLIENT_SETTINGS_DB path/permissions)",
+    )
+
+
 def _state_body(row: dict[str, Any] | None) -> dict[str, Any]:
     """The one wire shape shared by GET, PUT-200, and PUT-409 (so a client
     parses a single schema everywhere): absent row = the version-0 zero-state."""
@@ -71,7 +82,10 @@ async def get_client_settings(
     `{version: 0, blob: null}` — NOT 404/204, because the desktop client
     reads a route-level 404 as "backend too old for sync" and a 204 would
     force a bodyless special case."""
-    return _state_body(client_settings_store.get(user["user_id"]))
+    try:
+        return _state_body(client_settings_store.get(user["user_id"]))
+    except client_settings_store.StoreUnavailable:
+        raise _store_unavailable() from None
 
 
 @router.put("/client-settings")
@@ -91,6 +105,8 @@ async def put_client_settings(
             payload.base_version,
             device=payload.device,
         )
+    except client_settings_store.StoreUnavailable:
+        raise _store_unavailable() from None
     except ValueError:
         raise HTTPException(
             status.HTTP_413_CONTENT_TOO_LARGE,
@@ -111,5 +127,8 @@ async def delete_client_settings(
     """Drop the stored blob. After this, GET reads the version-0 zero-state
     and a device still holding version N gets a 409 on its next PUT — the
     deletion surfaces instead of being silently overwritten."""
-    removed = client_settings_store.delete(user["user_id"])
+    try:
+        removed = client_settings_store.delete(user["user_id"])
+    except client_settings_store.StoreUnavailable:
+        raise _store_unavailable() from None
     return {"ok": True, "deleted": removed}

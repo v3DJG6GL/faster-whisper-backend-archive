@@ -1842,16 +1842,40 @@ async def lifespan(app: FastAPI):
 
     # Open the desktop-client settings-sync store (one opaque blob per
     # account, served at /v1/client-settings). Non-fatal: sync degrades to
-    # 500s but transcription keeps working. No retention loop — bounded at
+    # 503s but transcription keeps working. No retention loop — bounded at
     # one row per account.
+    # Fallback: the factory default lives in the repo dir, which containerized
+    # deployments often mount read-only (their OTHER sqlite paths are set via
+    # env; a freshly added default like this one isn't) — so a failed primary
+    # retries next to the api-keys DB, whose directory any authed deployment
+    # can already write. Deterministic: the primary either always works or
+    # always fails for a given deployment, so the chosen path is stable. Set
+    # WHISPER_CLIENT_SETTINGS_DB explicitly to skip the guesswork.
     try:
         import client_settings_store
-        client_settings_store.init_db(cfg.CLIENT_SETTINGS_DB)
-        logger.info(
-            "Client-settings store initialized at %s", cfg.CLIENT_SETTINGS_DB
-        )
+        try:
+            client_settings_store.init_db(cfg.CLIENT_SETTINGS_DB)
+            logger.info(
+                "Client-settings store initialized at %s", cfg.CLIENT_SETTINGS_DB
+            )
+        except Exception as _cse_primary:
+            _cs_fallback = os.path.join(
+                os.path.dirname(os.path.abspath(cfg.API_KEYS_DB)),
+                "client_settings.local.sqlite3",
+            )
+            logger.error(
+                "Failed to initialize client-settings store at %s (%s) — "
+                "falling back to %s (set WHISPER_CLIENT_SETTINGS_DB to pick "
+                "the path explicitly)",
+                cfg.CLIENT_SETTINGS_DB, _cse_primary, _cs_fallback,
+            )
+            client_settings_store.init_db(_cs_fallback)
+            logger.info("Client-settings store initialized at %s", _cs_fallback)
     except Exception as _cse:
-        logger.error("Failed to initialize client-settings store: %s", _cse)
+        logger.error(
+            "Failed to initialize client-settings store: %s — "
+            "/v1/client-settings will answer 503 until this is fixed", _cse
+        )
 
     # Open the captures store. Audio + word-timestamps for Whisper
     # fine-tuning, gated by CAPTURE_RECORDINGS_ENABLED. Reconcile drift
