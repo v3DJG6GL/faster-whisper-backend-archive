@@ -19,6 +19,15 @@ def _seed(client, blob, base=0, device=None, headers=None):
     return r.json()
 
 
+def test_page_ships_sync_ui(client):
+    """The served page must carry the sync surface: the import-preview
+    modal, the drawer builder, and the header-chip class."""
+    html = client.get("/settings/api-keys").text
+    assert "cs-import-modal" in html
+    assert "buildCsDrawer" in html
+    assert "pill sync" in html or ".pill.sync" in html
+
+
 def test_meta_map_empty(client):
     r = client.get(f"{_API}/client-settings")
     assert r.status_code == 200

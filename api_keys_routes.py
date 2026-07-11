@@ -904,6 +904,32 @@ _API_KEYS_HTML = r"""<!doctype html>
   .cfg-eff .ef { display: flex; gap: 0.5rem; }
   .cfg-eff .ef .v { color: var(--green); } .cfg-eff .ef .src { color: var(--dim); }
   .cfg-eff .ef .lk { color: var(--yellow); }
+  /* ---- synced client settings (per-account chip + drawer) ----
+     The header chip answers "is this account syncing?" while the card is
+     collapsed; the drawer (same idiom as ⚙ Overrides) carries metadata +
+     export/import/delete. Metadata only — the stored blob can include the
+     account's saved API keys and never renders on this page. */
+  .pill.sync { color: var(--cyan); border-color: #1f4a6b;
+    font-family: var(--font-mono); }
+  .cs-meta { display: grid; grid-template-columns: repeat(4, minmax(6rem, 1fr));
+    gap: 0.7rem; margin: 0.5rem 0 0.1rem; }
+  @media (max-width: 40em) { .cs-meta { grid-template-columns: 1fr 1fr; } }
+  .cs-meta .ck { font-size: var(--fs-xs); color: var(--dim);
+    text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.15rem; }
+  .cs-meta .cv { font-size: var(--fs-sm); color: var(--fg);
+    font-family: var(--font-mono); overflow-wrap: anywhere; }
+  /* Two-press export guard: the first press arms the button amber (the file
+     can carry API keys), the second press downloads. */
+  main button.warn-armed { color: var(--yellow); border-color: #4d3e1f;
+    background: rgba(242, 204, 96, 0.07); }
+  /* Import-preview modal: label/value rows, mono values. */
+  .cs-frows { display: grid; gap: 0.3rem; margin: 0.4rem 0 0; }
+  .cs-frow { display: grid; grid-template-columns: 6.5rem 1fr; gap: 0.6rem;
+    font-size: var(--fs-sm); }
+  .cs-frow .fk { color: var(--dim); }
+  .cs-frow .fv { color: var(--fg); font-family: var(--font-mono);
+    overflow-wrap: anywhere; }
+  .cs-frow .fv.warn { color: var(--yellow); }
   {{NAV_CSS}}
 </style></head>
 <body>
@@ -979,6 +1005,20 @@ _API_KEYS_HTML = r"""<!doctype html>
       <span class="copystate" id="key-modal-copystate">not copied yet</span>
       <button id="key-modal-close" type="button">Close</button>
       <button id="key-modal-copyclose" class="primary" type="button">&#10697; Copy &amp; close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Import synced-settings modal (opened from an account's sync drawer) -->
+<div id="cs-import-modal" class="modal">
+  <div class="box">
+    <h3>&#8645; Import settings <span class="pill" id="cs-import-user"></span></h3>
+    <p>Review the file before it replaces this account&rsquo;s synced settings.</p>
+    <div class="cs-frows" id="cs-import-rows"></div>
+    <div class="warn" id="cs-import-warn"></div>
+    <div class="actions">
+      <button id="cs-import-cancel" type="button">Cancel</button>
+      <button id="cs-import-go" class="primary" type="button">Import</button>
     </div>
   </div>
 </div>
@@ -1487,6 +1527,19 @@ _API_KEYS_HTML = r"""<!doctype html>
     keyCount.textContent = u.active_key_count + ' active key' +
       (u.active_key_count === 1 ? '' : 's');
     head.appendChild(keyCount);
+    // Synced-settings chip: answers "is this account syncing?" while the
+    // card is collapsed. Metadata only; details live in the ⇅ drawer below.
+    var csm = csMetaFor(u.id);
+    if (csm) {
+      var syncPill = document.createElement('span');
+      syncPill.className = 'pill sync';
+      syncPill.textContent = '⇅ v' + csm.version;
+      syncPill.title = 'synced settings v' + csm.version
+        + ' · ' + fmtBytes(csm.bytes)
+        + (csm.device ? ' · from ' + csm.device : '')
+        + (csm.updated_at ? ' · updated ' + fmtWhen(csm.updated_at) : '');
+      head.appendChild(syncPill);
+    }
     // Lifetime usage strip, pushed right (margin-left:auto) so it fills the
     // space beside the name instead of crowding a line below.
     var usageStrip = document.createElement('div');
@@ -1565,6 +1618,22 @@ _API_KEYS_HTML = r"""<!doctype html>
     };
     tb.appendChild(ovrBtn);
 
+    // Synced settings (desktop sync) — same drawer idiom as ⚙ Overrides.
+    var csBtn = document.createElement('button');
+    csBtn.className = 'ghost';
+    csBtn.textContent = '⇅ Synced settings';
+    var csWrap = document.createElement('div');
+    csBtn.onclick = function () {
+      if (csWrap.firstChild) {
+        csWrap.innerHTML = '';
+        csBtn.classList.remove('on');
+        return;
+      }
+      csBtn.classList.add('on');
+      csWrap.appendChild(buildCsDrawer(u));
+    };
+    tb.appendChild(csBtn);
+
     var revBtn = document.createElement('button');
     revBtn.className = 'danger';
     revBtn.textContent = 'Revoke user';
@@ -1587,6 +1656,7 @@ _API_KEYS_HTML = r"""<!doctype html>
 
     userBody.appendChild(tb);
     userBody.appendChild(ovrWrap);
+    userBody.appendChild(csWrap);
 
     // ---- key list (rule cards) ----
     var listEl = document.createElement('div');
@@ -2184,6 +2254,314 @@ _API_KEYS_HTML = r"""<!doctype html>
     return root;
   }
 
+  // ---- per-account synced client settings (chip + drawer) ----
+  // The desktop app syncs its settings per account via /v1/client-settings;
+  // this page surfaces METADATA (version/size/device/updated) + management.
+  // The stored blob can include the account's saved API keys, so it never
+  // renders here — it only moves as an explicit export download (two-press
+  // guard) or import upload (preview modal).
+  function csMetaFor(uid) {
+    return (window.__csMeta && window.__csMeta.by_user || {})[uid] || null;
+  }
+  function csApiBase(uid) {
+    return '/settings/api-keys/api/users/' + encodeURIComponent(uid)
+      + '/client-settings';
+  }
+  function fmtBytes(n) {
+    n = Number(n || 0);
+    if (n >= 1048576) return (n / 1048576).toFixed(1) + ' MB';
+    if (n >= 1024) return (n / 1024).toFixed(1) + ' KB';
+    return n + ' B';
+  }
+  // Human summary of a settings document's top-level categories (counts where
+  // the shape carries lists) for the import preview.
+  function csContainsSummary(blob) {
+    var parts = [];
+    if (blob.general) parts.push('general');
+    if (blob.recording) parts.push('recording');
+    if (blob.backends) {
+      var nb = Array.isArray(blob.backends.list) ? blob.backends.list.length : null;
+      parts.push('backends' + (nb === null ? '' : ' (' + nb + ')'));
+    }
+    if (blob.profiles) {
+      var np = Array.isArray(blob.profiles.list) ? blob.profiles.list.length : null;
+      parts.push('profiles' + (np === null ? '' : ' (' + np + ')'));
+    }
+    if (blob.appRules) {
+      var nl = Array.isArray(blob.appRules.linux) ? blob.appRules.linux.length : 0;
+      var nw = Array.isArray(blob.appRules.windows) ? blob.appRules.windows.length : 0;
+      parts.push('app rules (linux ' + nl + ' · windows ' + nw + ')');
+    }
+    return parts.length ? parts.join(', ') : '(nothing recognisable)';
+  }
+
+  function showCsImportModal(u, d) {
+    var m = document.getElementById('cs-import-modal');
+    document.getElementById('cs-import-user').textContent = u.username;
+    var rows = document.getElementById('cs-import-rows');
+    rows.innerHTML = '';
+    function row(k, v, warn) {
+      var r = document.createElement('div');
+      r.className = 'cs-frow';
+      r.innerHTML = '<span class="fk">' + k + '</span>'
+        + '<span class="fv' + (warn ? ' warn' : '') + '">' + escapeHtml(v) + '</span>';
+      rows.appendChild(r);
+    }
+    var bytes = new Blob([JSON.stringify(d.blob)]).size;
+    var secrets = d.blob.backends && d.blob.backends.secrets;
+    var nSecrets = secrets && typeof secrets === 'object'
+      ? Object.keys(secrets).length : 0;
+    row('file', d.fileName);
+    row('source', d.source);
+    row('contains', csContainsSummary(d.blob));
+    row('api keys', nSecrets ? 'included (' + nSecrets + ')' : 'not included',
+        !!nSecrets);
+    row('size', fmtBytes(bytes));
+    var warnEl = document.getElementById('cs-import-warn');
+    var go = document.getElementById('cs-import-go');
+    var meta = csMetaFor(u.id);
+    // 512000 mirrors the server's blob cap — reject early with the reason
+    // instead of a bare 413 after the upload.
+    if (bytes > 512000) {
+      go.disabled = true;
+      warnEl.textContent = 'This file is ' + fmtBytes(bytes)
+        + ' — over the 500 KB server cap. It cannot be imported.';
+    } else {
+      go.disabled = false;
+      warnEl.textContent =
+        (meta
+          ? 'Replaces the synced settings stored for this account (currently v'
+            + meta.version + '). '
+          : 'Becomes the first synced settings for this account. ')
+        + 'Every device signed in with this account’s keys applies it on '
+        + 'its next sync.';
+    }
+    function close() {
+      m.classList.remove('show');
+      document.removeEventListener('keydown', onKey);
+    }
+    function onKey(e) { if (e.key === 'Escape') close(); }
+    document.getElementById('cs-import-cancel').onclick = close;
+    go.onclick = function () {
+      go.disabled = true;
+      api('POST', csApiBase(u.id) + '/import', { blob: d.blob })
+        .then(function (r) {
+          if (r.status === 413) throw new Error('File too large for the server (over 500 KB)');
+          if (!r.ok) return r.text().then(function (t) { throw new Error(t); });
+          return r.json();
+        })
+        .then(function () {
+          close();
+          showToast('Settings imported — devices apply them on their next sync', 'ok');
+          load();
+        })
+        .catch(function (e) {
+          showToast(String(e.message || e), 'err');
+          go.disabled = false;
+        });
+    };
+    document.addEventListener('keydown', onKey);
+    m.classList.add('show');
+  }
+
+  function buildCsDrawer(u) {
+    var meta = csMetaFor(u.id);
+    var root = document.createElement('div');
+    root.className = 'cfg-drawer';
+    var card = document.createElement('div');
+    card.className = 'ov-card';
+    var head = document.createElement('div');
+    head.className = 'ohead';
+    var t = document.createElement('span');
+    t.className = 't'; t.textContent = 'Synced settings';
+    head.appendChild(t);
+    var c = document.createElement('span');
+    c.className = 'c';
+    c.textContent = meta ? 'v' + meta.version + ' on the server' : 'nothing stored';
+    head.appendChild(c);
+    card.appendChild(head);
+
+    if (meta) {
+      var grid = document.createElement('div');
+      grid.className = 'cs-meta';
+      function cell(k, vHtml) {
+        var d = document.createElement('div');
+        d.innerHTML = '<div class="ck">' + k + '</div><div class="cv">' + vHtml + '</div>';
+        return d;
+      }
+      grid.appendChild(cell('version', 'v' + meta.version));
+      grid.appendChild(cell('size', escapeHtml(fmtBytes(meta.bytes))));
+      grid.appendChild(cell('last device',
+        meta.device ? escapeHtml(meta.device) : '—'));
+      grid.appendChild(cell('updated', metaWhen(meta.updated_at)));
+      card.appendChild(grid);
+      var hint = document.createElement('div');
+      hint.className = 'ohint';
+      hint.textContent = 'What the desktop app stores for this account. It can '
+        + 'include the account’s saved API keys — they never appear on this '
+        + 'page; Export downloads them as a file.';
+      card.appendChild(hint);
+    } else {
+      var hintE = document.createElement('div');
+      hintE.className = 'ohint';
+      hintE.textContent = 'No device has pushed settings for this account yet. '
+        + 'Import a settings file to seed it — every device signed in with this '
+        + 'account’s keys applies it on its next sync.';
+      card.appendChild(hintE);
+    }
+    root.appendChild(card);
+
+    var foot = document.createElement('div');
+    foot.className = 'ov-footer';
+
+    // Export — two-press guard: the file is exactly what the desktop stored,
+    // which can include the account's saved API keys.
+    var ex = document.createElement('button');
+    ex.className = 'ghost';
+    var EX_LABEL = '⤓ Export';
+    ex.textContent = EX_LABEL;
+    ex.disabled = !meta;
+    var exArmed = false, exTimer = null;
+    function disarmExport() {
+      exArmed = false;
+      ex.classList.remove('warn-armed');
+      ex.textContent = EX_LABEL;
+      if (exTimer) { clearTimeout(exTimer); exTimer = null; }
+    }
+    ex.onclick = function () {
+      if (!exArmed) {
+        exArmed = true;
+        ex.classList.add('warn-armed');
+        ex.textContent = '⚠ May include API keys — press again';
+        exTimer = setTimeout(disarmExport, 6000);
+        return;
+      }
+      disarmExport();
+      fetch(csApiBase(u.id) + '/export', { cache: 'no-store' })
+        .then(function (r) {
+          if (r.status === 401) {
+            if (window._showLoginGate) window._showLoginGate();
+            throw new Error('signed out');
+          }
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          var cd = r.headers.get('Content-Disposition') || '';
+          var mm = cd.match(/filename="([^"]+)"/);
+          return r.blob().then(function (b) {
+            return { blob: b, name: mm ? mm[1] : 'client-settings.json' };
+          });
+        })
+        .then(function (d) {
+          var url = URL.createObjectURL(d.blob);
+          var a = document.createElement('a');
+          a.href = url;
+          a.download = d.name;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
+          showToast('Settings exported', 'ok');
+        })
+        .catch(function (e) { showToast(String(e.message || e), 'err'); });
+    };
+    foot.appendChild(ex);
+
+    // Import — file picker → preview modal → force-write. Accepts a desktop
+    // settings export (envelope with categories) or a server Export file.
+    var imp = document.createElement('button');
+    imp.className = 'ghost';
+    imp.textContent = '⤒ Import…';
+    var fileInp = document.createElement('input');
+    fileInp.type = 'file';
+    fileInp.accept = '.json,application/json';
+    fileInp.style.display = 'none';
+    imp.onclick = function () { fileInp.value = ''; fileInp.click(); };
+    fileInp.onchange = function () {
+      var f = fileInp.files && fileInp.files[0];
+      if (!f) return;
+      f.text().then(function (txt) {
+        var parsed = null;
+        try { parsed = JSON.parse(txt); } catch (_) {
+          showToast('Not a JSON file', 'err');
+          return;
+        }
+        var isObj = parsed && typeof parsed === 'object' && !Array.isArray(parsed);
+        var blob = null;
+        var source = 'server export (raw settings document)';
+        if (isObj && parsed.formatVersion !== undefined) {
+          if (typeof parsed.formatVersion !== 'number' || parsed.formatVersion > 1) {
+            showToast('Unsupported export format (formatVersion '
+              + parsed.formatVersion + ') — made by a newer app', 'err');
+            return;
+          }
+          if (!parsed.categories || typeof parsed.categories !== 'object') {
+            showToast('Not a settings export — no categories inside', 'err');
+            return;
+          }
+          blob = parsed.categories;
+          source = 'desktop export'
+            + (parsed.hostname ? ' · ' + parsed.hostname : '')
+            + (parsed.platform ? ' · ' + parsed.platform : '');
+        } else if (isObj && ['general', 'recording', 'backends', 'profiles',
+                             'appRules'].some(function (k) { return k in parsed; })) {
+          blob = parsed;
+        } else {
+          showToast('Not a settings file — expected a desktop settings export '
+            + 'or a server download', 'err');
+          return;
+        }
+        showCsImportModal(u, { blob: blob, source: source, fileName: f.name });
+      });
+    };
+    foot.appendChild(imp);
+    foot.appendChild(fileInp);
+
+    // Delete (destructive) — server copy only; devices keep local settings.
+    var del = document.createElement('button');
+    del.className = 'danger';
+    del.textContent = 'Delete';
+    del.style.marginLeft = 'auto';
+    del.disabled = !meta;
+    del.onclick = function () {
+      if (!confirm('Delete the synced settings stored for "' + u.username
+        + '"? Devices keep their local settings; the next device to sync '
+        + 're-uploads its own copy.')) return;
+      api('DELETE', csApiBase(u.id))
+        .then(function (r) {
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          showToast('Server copy deleted', 'ok');
+          load();
+        })
+        .catch(function (e) { showToast(String(e.message || e), 'err'); });
+    };
+    foot.appendChild(del);
+    root.appendChild(foot);
+    return root;
+  }
+
+  // In OPEN mode the desktop syncs into the shared "(open-mode)" row, which
+  // belongs to no listed user — surface it as its own card so the stored
+  // settings are visible + manageable instead of invisible and immortal.
+  function renderOpenModeCsCard(ct) {
+    var om = csMetaFor('(open-mode)');
+    if (!om) return;
+    var card = document.createElement('div');
+    card.className = 'card';
+    var h = document.createElement('h3');
+    h.appendChild(document.createTextNode('Synced settings — open mode '));
+    var pill = document.createElement('span');
+    pill.className = 'pill sync';
+    pill.textContent = '⇅ v' + om.version;
+    h.appendChild(pill);
+    card.appendChild(h);
+    var hint = document.createElement('p');
+    hint.className = 'hint';
+    hint.textContent = 'Stored while the server ran without admin keys — every '
+      + 'open-mode device shares this one settings set.';
+    card.appendChild(hint);
+    card.appendChild(buildCsDrawer({ id: '(open-mode)', username: 'open mode' }));
+    ct.appendChild(card);
+  }
+
   async function load() {
     var r = await api('GET', '/settings/api-keys/api/users');
     if (r.status === 401) {
@@ -2204,9 +2582,18 @@ _API_KEYS_HTML = r"""<!doctype html>
     banner.style.display = j.open_mode ? 'block' : 'none';
     var ct = document.getElementById('users-container');
     ct.innerHTML = '';
+    // Per-account synced-settings metadata for the header chips + drawers.
+    // Fetched before the empty-users early-return so an open-mode blob is
+    // still surfaced when no users exist yet. Best-effort, like usage.
+    window.__csMeta = { by_user: {} };
+    try {
+      var cs = await api('GET', '/settings/api-keys/api/client-settings');
+      if (cs.ok) window.__csMeta = await cs.json();
+    } catch (_) {}
     if (!j.users.length) {
       document.getElementById('perm-matrix-card').style.display = 'none';
       ct.innerHTML = '<p class="hint">No users yet. Add one above to create the first admin.</p>';
+      renderOpenModeCsCard(ct);
       return;
     }
     // Pull the usage rollup once (lifetime) so per-user strips and per-key
@@ -2226,6 +2613,7 @@ _API_KEYS_HTML = r"""<!doctype html>
     renderMatrix(j);
     var nUsers = j.users.length;
     j.users.forEach(function(u) { ct.appendChild(renderUser(u, nUsers)); });
+    renderOpenModeCsCard(ct);
   }
 
   document.getElementById('add-user-btn').onclick = function() {
