@@ -35,12 +35,12 @@ services:
     # env_file:
     #   - .env
     environment:
-      # Paths need NO configuration: the app's defaults are container-first —
-      # all runtime state under /data (SQLite stores under /data/db, plus
-      # config.local.json, logs/, captures/) and models under /models; the two
-      # volumes below cover everything. Move the roots with WHISPER_DATA_DIR /
-      # WHISPER_DB_DIR, or any individual WHISPER_* path env — see
-      # .env.example for the full list.
+      # Path defaults are container-first: runtime state under /data (SQLite
+      # stores in /data/db; config.local.json, logs/, captures/) and models
+      # under /models — matching the two volumes below. To relocate anything,
+      # set WHISPER_DATA_DIR / WHISPER_DB_DIR (move the roots wholesale) or
+      # any individual WHISPER_* path env — see .env.example for the full
+      # list and defaults.
       #
       # HF download backend (hf_xet) writes its cache + logs under HF_HOME;
       # unset it defaults to ~/.cache, which fails ("Permission denied") when
