@@ -42,13 +42,6 @@ services:
       # WHISPER_DB_DIR, or any individual WHISPER_* path env — see
       # .env.example for the full list.
       #
-      # MIGRATION (deployments created before the /data/db default): your
-      # SQLite files live flat in /data. Either move them once —
-      #   docker compose stop && docker compose run --rm --entrypoint sh \
-      #     faster-whisper-backend -c 'mkdir -p /data/db && mv /data/*.sqlite3* /data/db/'
-      #   && docker compose up -d
-      # — or keep your old explicit WHISPER_*_DB env lines instead.
-      #
       # HF download backend (hf_xet) writes its cache + logs under HF_HOME;
       # unset it defaults to ~/.cache, which fails ("Permission denied") when
       # the platform runs the container as a non-root UID with HOME=/. Point it
