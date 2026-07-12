@@ -7,6 +7,10 @@ def test_v1_models_shape(client):
     body = r.json()
     assert body["object"] == "list"
     assert "boot_id" in body and isinstance(body["boot_id"], str)
+    # Build identity travels with the model list so clients can display
+    # "faster-whisper-backend · <version>" (exact version varies per build).
+    assert body["server_name"] == "faster-whisper-backend"
+    assert isinstance(body["server_version"], str) and body["server_version"]
     assert isinstance(body["data"], list)
     for entry in body["data"]:
         assert entry["object"] == "model"

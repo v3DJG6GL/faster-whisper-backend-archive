@@ -43,6 +43,12 @@ RUN groupadd -g "${PGID}" app \
 # App code. Runtime state lives on mounted volumes — see docker-compose.yml.
 COPY . .
 
+# Build identity: CI stamps the `git describe` string here (see ci.yml) so
+# /v1/models and the WebUI can report the exact build — the image carries no
+# .git to describe at runtime (.dockerignore). Local builds default to "dev".
+ARG BUILD_VERSION=dev
+ENV WHISPER_BUILD_VERSION=${BUILD_VERSION}
+
 EXPOSE 8000
 
 USER ${PUID}:${PGID}

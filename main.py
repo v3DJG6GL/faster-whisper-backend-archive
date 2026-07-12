@@ -18,6 +18,8 @@ from contextlib import asynccontextmanager
 # if its 1 s polling missed the brief "service down" window.
 BOOT_ID = uuid.uuid4().hex
 
+from build_info import APP_VERSION, SERVER_NAME
+
 import config as cfg
 # system_stats imports psutil + pynvml at module load and primes psutil's
 # non-blocking counters. Imported here (early) so the priming happens before
@@ -1755,6 +1757,8 @@ def _bootstrap_admin_from_env(raw_key: str) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    logger.info("%s %s starting (boot %s)", SERVER_NAME, APP_VERSION, BOOT_ID[:8])
+
     # If PRELOAD_MODELS is empty, fall back to preloading just DEFAULT_MODEL
     # so a fresh start always has at least one ready-to-serve model.
     to_preload = list(dict.fromkeys(cfg.PRELOAD_MODELS or [cfg.DEFAULT_MODEL]))
@@ -1925,7 +1929,7 @@ async def lifespan(app: FastAPI):
 # docs; they're re-added below behind the admin-tier host gate (+ admin key on
 # /openapi.json) so the API surface isn't exposed to arbitrary hosts.
 app = FastAPI(
-    title="Faster Whisper API", version="1.0.0", lifespan=lifespan,
+    title="Faster Whisper API", version=APP_VERSION, lifespan=lifespan,
     docs_url=None, redoc_url=None, openapi_url=None,
 )
 
@@ -2610,6 +2614,10 @@ async def list_models():
     return {
         "object": "list",
         "boot_id": BOOT_ID,
+        # Build identity (non-standard, like boot_id): lets clients show
+        # "faster-whisper-backend · v0.1.0" instead of a generic detection tag.
+        "server_name": SERVER_NAME,
+        "server_version": APP_VERSION,
         "data": [
             {
                 "id": n,

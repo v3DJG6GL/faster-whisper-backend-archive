@@ -96,10 +96,21 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          # Full history + tags so `git describe` below can anchor the build
+          # version to the newest v* tag (shallow default sees no tags).
+          fetch-depth: 0
 
       - name: Compute image name (ghcr requires lowercase)
         id: img
         run: echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/faster-whisper-backend" >> "$GITHUB_OUTPUT"
+
+      # The version baked into the image (build_info.py reads it from the
+      # WHISPER_BUILD_VERSION env). Tag-anchored and bumps with every commit:
+      # "v0.1.0" on a tagged build, "v0.1.0-3-g1a2b3c4" three commits later.
+      - name: Compute build version (git describe)
+        id: ver
+        run: echo "version=$(git describe --tags --always)" >> "$GITHUB_OUTPUT"
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v4
@@ -155,6 +166,8 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            BUILD_VERSION=${{ steps.ver.outputs.version }}
           # Per-variant cache scope so the cpu and gpu builds don't evict each other.
           cache-from: type=gha,scope=${{ matrix.variant }}
           cache-to: type=gha,mode=max,scope=${{ matrix.variant }}

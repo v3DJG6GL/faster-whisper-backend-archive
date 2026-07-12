@@ -204,7 +204,7 @@ CIDR is accepted (`192.168.0.0/16`) and so are bare IPs (`10.0.0.5`). For a dual
 
 - `POST /v1/audio/transcriptions` — OpenAI-compatible transcription. Pass `model=<name>` to pick a specific model (any faster-whisper short name or HF repo id).
 - `WS   /v1/audio/transcriptions/stream` — live streaming dictation (raw 16 kHz PCM or browser WebM/Opus); see the Features section.
-- `GET  /v1/models` — list currently-loaded models, the configured default, and the allowlist (if set).
+- `GET  /v1/models` — list currently-loaded models, the configured default, and the allowlist (if set). Also carries the server's build identity — `server_name` ("faster-whisper-backend"), `server_version`, and the per-process `boot_id` — non-standard fields clients use to recognize the full backend and display its version. The version resolves via `WHISPER_BUILD_VERSION` (baked into container images by CI as `git describe`) or a runtime `git describe` on bare-metal checkouts (see `build_info.py`).
 - `GET  /v1/me` — the caller's effective request-override capabilities (drives client UI).
 - `GET  /v1/override-profiles` (+ `/{name}`) — the override profiles this caller may request per-request; name list / single-profile preview.
 - `GET/PATCH /v1/pipeline-rules` — the exposed post-processing rules this caller may view/edit (same gating + semantics as `/quick-config`, for API clients).
