@@ -19,4 +19,4 @@ huggingface_hub>=1.24.0
 
 # filelock is also already a transitive (via huggingface_hub); listed for
 # the same reason — we use it directly for cross-worker conversion locking.
-filelock>=3.30.3
+filelock>=3.31.0
